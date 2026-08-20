@@ -5,6 +5,8 @@ import ReactECharts from 'echarts-for-react'
 import type { EChartsOption } from 'echarts'
 import { useClusterStore } from '../../store/cluster'
 import type { ClusterConfig } from '../../types'
+import { useFullscreen } from '../../hooks/useFullscreen'
+import { useEchartsResize, zoomGraph, resetGraphView } from '../../hooks/useEcharts'
 
 interface ClusterTopologyProps {
   clusterId?: string
@@ -216,7 +218,6 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({ clusterId: initialClu
   const [loading, setLoading] = useState(false)
   const [nodes, setNodes] = useState<TopologyNode[]>([])
   const [edges, setEdges] = useState<TopologyEdge[]>([])
-  const [isFullscreen, setIsFullscreen] = useState(false)
   const [selectedClusterId, setSelectedClusterId] = useState<string | undefined>(initialClusterId)
   const [stats, setStats] = useState({
     brokers: 0,
@@ -224,8 +225,20 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({ clusterId: initialClu
     subscriptions: 0
   })
   const chartRef = useRef<ReactECharts>(null)
-  const chartContainerRef = useRef<HTMLDivElement>(null)
   const chartKey = useRef(0)
+  const getChart = useCallback(() => chartRef.current?.getEchartsInstance(), [])
+
+  // 进出全屏后容器尺寸变化，需要等浏览器完成布局再 resize
+  const handleFullscreenChange = useCallback(() => {
+    setTimeout(() => getChart()?.resize(), 100)
+  }, [getChart])
+
+  const {
+    ref: chartContainerRef,
+    isFullscreen,
+    toggle: toggleFullscreen,
+  } = useFullscreen<HTMLDivElement>(handleFullscreenChange)
+  useEchartsResize(chartContainerRef, getChart)
 
   const { clusters, fetchClusters } = useClusterStore()
 
@@ -236,30 +249,6 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({ clusterId: initialClu
   useEffect(() => {
     fetchClusters()
   }, [fetchClusters])
-
-  // 监听容器大小变化，触发 ECharts resize
-  useEffect(() => {
-    const handleResize = () => {
-      if (chartRef.current) {
-        chartRef.current.getEchartsInstance()?.resize()
-      }
-    }
-
-    const resizeObserver = new ResizeObserver(() => {
-      handleResize()
-    })
-
-    if (chartContainerRef.current) {
-      resizeObserver.observe(chartContainerRef.current)
-    }
-
-    window.addEventListener('resize', handleResize)
-
-    return () => {
-      resizeObserver.disconnect()
-      window.removeEventListener('resize', handleResize)
-    }
-  }, [])
 
   // 图表实例初始化后的处理
   const onChartInit = useCallback((chart: any) => {
@@ -379,86 +368,20 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({ clusterId: initialClu
 
   // 图表操作 - 放大
   const handleZoomIn = useCallback(() => {
-    const chartInstance = chartRef.current?.getEchartsInstance()
-    if (!chartInstance) return
-
-    // 使用 graphRoam action 进行缩放（graph 图表需要使用此 API）
-    chartInstance.dispatchAction({
-      type: 'graphRoam',
-      zoom: 1.2,
-    })
-  }, [])
+    zoomGraph(getChart(), 1.2)
+  }, [getChart])
 
   // 图表操作 - 缩小
   const handleZoomOut = useCallback(() => {
-    const chartInstance = chartRef.current?.getEchartsInstance()
-    if (!chartInstance) return
-
-    // 使用 graphRoam action 进行缩放（graph 图表需要使用此 API）
-    chartInstance.dispatchAction({
-      type: 'graphRoam',
-      zoom: 0.8,
-    })
-  }, [])
-
-  // 全屏切换
-  const toggleFullscreen = useCallback(() => {
-    if (!chartContainerRef.current) return
-
-    if (!isFullscreen) {
-      // 进入全屏
-      if (chartContainerRef.current.requestFullscreen) {
-        chartContainerRef.current.requestFullscreen()
-        setIsFullscreen(true)
-      } else if ((chartContainerRef.current as any).webkitRequestFullscreen) {
-        (chartContainerRef.current as any).webkitRequestFullscreen()
-        setIsFullscreen(true)
-      } else {
-        message.info('您的浏览器不支持全屏功能')
-      }
-    } else {
-      // 退出全屏
-      if (document.exitFullscreen) {
-        document.exitFullscreen()
-        setIsFullscreen(false)
-      } else if ((document as any).webkitExitFullscreen) {
-        (document as any).webkitExitFullscreen()
-        setIsFullscreen(false)
-      }
-    }
-  }, [isFullscreen])
-
-  // 监听全屏状态变化
-  useEffect(() => {
-    const handleFullscreenChange = () => {
-      setIsFullscreen(!!document.fullscreenElement)
-      // 全屏状态变化时调整图表大小
-      setTimeout(() => {
-        chartRef.current?.getEchartsInstance()?.resize()
-      }, 100)
-    }
-
-    document.addEventListener('fullscreenchange', handleFullscreenChange)
-    document.addEventListener('webkitfullscreenchange', handleFullscreenChange)
-
-    return () => {
-      document.removeEventListener('fullscreenchange', handleFullscreenChange)
-      document.removeEventListener('webkitfullscreenchange', handleFullscreenChange)
-    }
-  }, [])
+    zoomGraph(getChart(), 0.8)
+  }, [getChart])
 
   // 重置视图
   const handleResetView = useCallback(() => {
-    const chartInstance = chartRef.current?.getEchartsInstance()
-    if (!chartInstance) return
+    if (!getChart()) return
 
-    // 使用 graphRoam action 重置缩放和位置（graph 图表需要使用此 API）
-    chartInstance.dispatchAction({
-      type: 'graphRoam',
-      zoom: 1,
-      center: ['50%', '50%'],
-    })
-    
+    resetGraphView(getChart())
+
     message.success('视图已重置')
   }, [])
 

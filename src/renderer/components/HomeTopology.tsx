@@ -4,6 +4,9 @@ import { ReloadOutlined, ZoomInOutlined, ZoomOutOutlined, FullscreenOutlined, Co
 import ReactECharts from 'echarts-for-react'
 import type { EChartsOption } from 'echarts'
 import { useClusterStore } from '../store/cluster'
+import { useFullscreen } from '../hooks/useFullscreen'
+import { useEchartsResize, zoomGraph } from '../hooks/useEcharts'
+
 
 interface TopologyNode {
   id: string
@@ -270,15 +273,17 @@ const HomeTopology: React.FC = () => {
   const [loading, setLoading] = useState(false)
   const [nodes, setNodes] = useState<TopologyNode[]>([])
   const [edges, setEdges] = useState<TopologyEdge[]>([])
-  const [isFullscreen, setIsFullscreen] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [stats, setStats] = useState({
     clusters: 0,
     brokers: 0,
     topics: 0
   })
-  const chartRef = useRef<HTMLDivElement>(null)
   const chartInstance = useRef<any>(null)
+  const getChart = useCallback(() => chartInstance.current, [])
+
+  const { ref: chartRef, isFullscreen, toggle: toggleFullscreen } = useFullscreen<HTMLDivElement>()
+  useEchartsResize(chartRef, getChart)
 
   const { clusters } = useClusterStore()
 
@@ -295,50 +300,6 @@ const HomeTopology: React.FC = () => {
     }
   }, [])
 
-  // 监听容器大小变化，触发 ECharts resize
-  useEffect(() => {
-    const handleResize = () => {
-      if (chartInstance.current) {
-        chartInstance.current.resize()
-      }
-    }
-
-    const resizeObserver = new ResizeObserver(() => {
-      handleResize()
-    })
-
-    if (chartRef.current) {
-      resizeObserver.observe(chartRef.current)
-    }
-
-    window.addEventListener('resize', handleResize)
-
-    return () => {
-      resizeObserver.disconnect()
-      window.removeEventListener('resize', handleResize)
-    }
-  }, [])
-
-  // 全屏切换
-  const toggleFullscreen = useCallback(() => {
-    if (!chartRef.current) return
-
-    if (!isFullscreen) {
-      chartRef.current.requestFullscreen?.()
-    } else {
-      document.exitFullscreen?.()
-    }
-    setIsFullscreen(!isFullscreen)
-  }, [isFullscreen])
-
-  // 监听全屏状态变化
-  useEffect(() => {
-    const handleFullscreenChange = () => {
-      setIsFullscreen(!!document.fullscreenElement)
-    }
-    document.addEventListener('fullscreenchange', handleFullscreenChange)
-    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange)
-  }, [])
 
   // 加载集群拓扑数据
   const loadTopology = useCallback(async () => {
@@ -415,21 +376,14 @@ const HomeTopology: React.FC = () => {
 
   // 放大
   const handleZoomIn = useCallback(() => {
-    if (!chartInstance.current) return
-    chartInstance.current.dispatchAction({
-      type: 'graphRoam',
-      zoom: 1.2,
-    })
+    zoomGraph(chartInstance.current, 1.2)
   }, [])
 
   // 缩小
   const handleZoomOut = useCallback(() => {
-    if (!chartInstance.current) return
-    chartInstance.current.dispatchAction({
-      type: 'graphRoam',
-      zoom: 0.8,
-    })
+    zoomGraph(chartInstance.current, 0.8)
   }, [])
+
 
   // 空状态
   if (clusters.length === 0) {

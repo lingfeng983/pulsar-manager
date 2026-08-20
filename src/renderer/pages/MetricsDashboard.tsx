@@ -6,6 +6,7 @@ import type { EChartsOption } from 'echarts'
 import dayjs from 'dayjs'
 import { useClusterStore } from '../store/cluster'
 import { formatThroughput, toKilobytesPerSecond } from '../utils/format'
+import { useFullscreen } from '../hooks/useFullscreen'
 
 const { RangePicker } = DatePicker
 const { Text } = Typography
@@ -142,12 +143,12 @@ const MetricsDashboard: React.FC = () => {
     backlog: [],
   })
   const [error, setError] = useState<string | null>(null)
-  const [isFullscreen, setIsFullscreen] = useState(false)
   const [peakMsgRate, setPeakMsgRate] = useState(0)
   const chartRef = useRef<ReactECharts>(null)
-  const chartContainerRef = useRef<HTMLDivElement>(null)
   const intervalRef = useRef<NodeJS.Timeout | null>(null)
   const lastFetchRef = useRef<number>(0)
+
+  const { ref: chartContainerRef, toggle: toggleFullscreen } = useFullscreen<HTMLDivElement>()
 
   const { clusters, fetchClusters } = useClusterStore()
 
@@ -254,44 +255,6 @@ const MetricsDashboard: React.FC = () => {
       }
     }
   }, [selectedCluster, loadAggregatedStats, refreshInterval, clusters])
-
-  // 全屏切换
-  const toggleFullscreen = useCallback(() => {
-    if (!chartContainerRef.current) return
-
-    if (!isFullscreen) {
-      if (chartContainerRef.current.requestFullscreen) {
-        chartContainerRef.current.requestFullscreen()
-        setIsFullscreen(true)
-      } else if ((chartContainerRef.current as any).webkitRequestFullscreen) {
-        (chartContainerRef.current as any).webkitRequestFullscreen()
-        setIsFullscreen(true)
-      }
-    } else {
-      if (document.exitFullscreen) {
-        document.exitFullscreen()
-        setIsFullscreen(false)
-      } else if ((document as any).webkitExitFullscreen) {
-        (document as any).webkitExitFullscreen()
-        setIsFullscreen(false)
-      }
-    }
-  }, [isFullscreen])
-
-  // 监听全屏状态变化
-  useEffect(() => {
-    const handleFullscreenChange = () => {
-      setIsFullscreen(!!document.fullscreenElement)
-    }
-
-    document.addEventListener('fullscreenchange', handleFullscreenChange)
-    document.addEventListener('webkitfullscreenchange', handleFullscreenChange)
-
-    return () => {
-      document.removeEventListener('fullscreenchange', handleFullscreenChange)
-      document.removeEventListener('webkitfullscreenchange', handleFullscreenChange)
-    }
-  }, [])
 
   // 使用 useMemo 缓存图表配置
   const msgRateInChartOption = useMemo(() => {
