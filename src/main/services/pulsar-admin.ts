@@ -38,14 +38,17 @@ export type {
 export class PulsarAdminClient {
   private http: AxiosInstance
   private semaphore: Semaphore
+  private aggregateSemaphore: Semaphore
   private resourceAPI: ResourceAPI
   private metricsAPI: MetricsAPI
 
   constructor(config: PulsarAdminConfig) {
     this.http = createAxiosClient(config)
     this.semaphore = new Semaphore(REQUEST_CONFIG.MAX_CONCURRENT)
+    // 聚合任务用独立信号量，避免外层聚合持有许可等待内层叶子请求许可造成死锁
+    this.aggregateSemaphore = new Semaphore(REQUEST_CONFIG.MAX_CONCURRENT_AGGREGATE)
     this.resourceAPI = new ResourceAPI(this.http, this.semaphore)
-    this.metricsAPI = new MetricsAPI(this.http, this.semaphore, this.resourceAPI)
+    this.metricsAPI = new MetricsAPI(this.http, this.semaphore, this.resourceAPI, this.aggregateSemaphore)
   }
 
   // ========== 集群操作 ==========
@@ -232,6 +235,7 @@ export class PulsarAdminClient {
   // 清理客户端资源
   destroy(): void {
     this.semaphore.reset()
+    this.aggregateSemaphore.reset()
   }
 }
 
@@ -253,13 +257,19 @@ export class PulsarAdminClientManager {
     return client
   }
 
-  // 移除客户端
+  // 移除客户端（集群配置变更或删除后必须调用，否则会继续使用旧的
+  // baseURL / 凭据 / 超时设置）
   removeClient(clusterId: string): void {
+    const existing = this.clients.get(clusterId)
+    if (existing) {
+      existing.destroy()
+    }
     this.clients.delete(clusterId)
   }
 
   // 清除所有客户端
   clear(): void {
+    this.clients.forEach(client => client.destroy())
     this.clients.clear()
   }
 }

@@ -1,0 +1,5 @@
+﻿
+src/main/services/resource-api.ts(238,10): error TS2345: Argument of type '{ topicName: string; }' is not assignable to
+ parameter of type '{ topicName: string; numPartitions: any; permissions: any; }'.
+
+

@@ -1,5 +1,5 @@
 import { AxiosInstance } from 'axios'
-import { Semaphore, withRetry } from './http-client'
+import { Semaphore, withRetry, withSemaphore, orNotFound, getErrorMessage, seg } from './http-client'
 import { API_ENDPOINTS } from '../config/constants'
 import type {
   ClusterInfo,
@@ -19,12 +19,7 @@ export class ResourceAPI {
   ) {}
 
   private async enqueue<T>(fn: () => Promise<T>): Promise<T> {
-    await this.semaphore.acquire()
-    try {
-      return await fn()
-    } finally {
-      this.semaphore.release()
-    }
+    return withSemaphore(this.semaphore, fn)
   }
 
   // ========== 集群操作 ==========
@@ -36,13 +31,17 @@ export class ResourceAPI {
         this.http.get('/admin/v2/clusters')
       )
       // clusters API 返回集群名称列表
-      const clusterName = response.data[0]
-      const info = await this.http.get(`/admin/v2/clusters/${clusterName}`)
+      const clusters = (response.data as string[]) || []
+      if (clusters.length === 0) {
+        throw new Error('No cluster found on the target Pulsar instance')
+      }
+      const clusterName = clusters[0]
+      const info = await this.http.get(`/admin/v2/clusters/${seg(clusterName)}`)
       return {
         name: clusterName,
-        serviceUrl: info.data.serviceUrl,
-        brokerServiceUrl: info.data.brokerServiceUrl,
-        version: info.data.version,
+        serviceUrl: info.data?.serviceUrl,
+        brokerServiceUrl: info.data?.brokerServiceUrl,
+        version: info.data?.version,
       }
     })
   }
@@ -55,28 +54,32 @@ export class ResourceAPI {
       const response = await withRetry(() =>
         this.http.get('/admin/v2/tenants')
       )
-      const tenants = response.data as string[]
+      const tenants = (response.data as string[]) || []
 
-      // 并行获取每个租户的详细信息
+      // 并行获取每个租户的详细信息（受同一信号量限流，见 fetchTenantDetail）
       const tenantInfos = await Promise.all(
-        tenants.map(async (name) => {
-          const detail = await this.http.get(`/admin/v2/tenants/${name}`)
-          return {
-            name,
-            adminRoles: detail.data.adminRoles || [],
-            allowedClusters: detail.data.allowedClusters || [],
-          }
-        })
+        tenants.map((name) => this.fetchTenantDetail(name))
       )
 
       return tenantInfos
     })
   }
 
+  // 获取单个租户详情（供 getTenants 扇出复用；不额外占用信号量，
+  // 因为外层 getTenants 已持有一个许可，这里只做真正的 HTTP 请求）
+  private async fetchTenantDetail(name: string): Promise<Tenant> {
+    const detail = await this.http.get(`/admin/v2/tenants/${seg(name)}`)
+    return {
+      name,
+      adminRoles: detail.data?.adminRoles || [],
+      allowedClusters: detail.data?.allowedClusters || [],
+    }
+  }
+
   // 创建租户
   async createTenant(name: string, config: Partial<Tenant>): Promise<void> {
     return this.enqueue(async () => {
-      await this.http.put(`/admin/v2/tenants/${name}`, {
+      await this.http.put(`/admin/v2/tenants/${seg(name)}`, {
         adminRoles: config.adminRoles || [],
         allowedClusters: config.allowedClusters || [],
       })
@@ -91,7 +94,7 @@ export class ResourceAPI {
   // 删除租户
   async deleteTenant(name: string): Promise<void> {
     return this.enqueue(async () => {
-      await this.http.delete(`/admin/v2/tenants/${name}`)
+      await this.http.delete(`/admin/v2/tenants/${seg(name)}`)
     })
   }
 
@@ -99,7 +102,7 @@ export class ResourceAPI {
   async getTenantInfo(tenant: string): Promise<{ adminRoles: string[]; allowedClusters: string[] }> {
     return this.enqueue(async () => {
       const response = await withRetry(() =>
-        this.http.get(`/admin/v2/tenants/${tenant}`)
+        this.http.get(`/admin/v2/tenants/${seg(tenant)}`)
       )
       return response.data
     })
@@ -109,23 +112,26 @@ export class ResourceAPI {
 
   // 获取租户下的所有命名空间
   async getNamespaces(tenant: string): Promise<string[]> {
-    return this.enqueue(async () => {
-      const response = await withRetry(() =>
-        this.http.get(`/admin/v2/namespaces/${tenant}`)
-      )
-      // 响应格式: ["tenant/namespace1", "tenant/namespace2"]
-      return response.data.map((ns: string) => {
-        const parts = ns.split('/')
-        return parts.length > 1 ? parts.slice(1).join('/') : ns
-      })
-    })
+    return this.enqueue(() =>
+      orNotFound(async () => {
+        const response = await withRetry(() =>
+          this.http.get(`/admin/v2/namespaces/${seg(tenant)}`)
+        )
+        // 响应格式: ["tenant/namespace1", "tenant/namespace2"]
+        const namespaces = (response.data as string[]) || []
+        return namespaces.map((ns: string) => {
+          const parts = ns.split('/')
+          return parts.length > 1 ? parts.slice(1).join('/') : ns
+        })
+      }, [])
+    )
   }
 
   // 获取命名空间详情
   async getNamespaceInfo(tenant: string, namespace: string): Promise<{ replicationClusters: string[]; clusters: string[] }> {
     return this.enqueue(async () => {
       const response = await withRetry(() =>
-        this.http.get(`/admin/v2/namespaces/${tenant}/${namespace}`)
+        this.http.get(`/admin/v2/namespaces/${seg(tenant)}/${seg(namespace)}`)
       )
       return response.data
     })
@@ -134,14 +140,14 @@ export class ResourceAPI {
   // 创建命名空间
   async createNamespace(tenant: string, namespace: string): Promise<void> {
     return this.enqueue(async () => {
-      await this.http.put(`/admin/v2/namespaces/${tenant}/${namespace}`)
+      await this.http.put(`/admin/v2/namespaces/${seg(tenant)}/${seg(namespace)}`)
     })
   }
 
   // 删除命名空间
   async deleteNamespace(tenant: string, namespace: string): Promise<void> {
     return this.enqueue(async () => {
-      await this.http.delete(`/admin/v2/namespaces/${tenant}/${namespace}`)
+      await this.http.delete(`/admin/v2/namespaces/${seg(tenant)}/${seg(namespace)}`)
     })
   }
 
@@ -149,26 +155,28 @@ export class ResourceAPI {
 
   // 获取命名空间下的所有 Topic
   async getTopics(tenant: string, namespace: string): Promise<Topic[]> {
-    return this.enqueue(async () => {
-      // 获取命名空间下的所有Topic（包括分区和非分区）
-      const response = await withRetry(() =>
-        this.http.get(`/admin/v2/namespaces/${tenant}/${namespace}/topics`)
-      )
+    return this.enqueue(() =>
+      orNotFound(async () => {
+        // 获取命名空间下的所有Topic（包括分区和非分区）
+        const response = await withRetry(() =>
+          this.http.get(`/admin/v2/namespaces/${seg(tenant)}/${seg(namespace)}/topics`)
+        )
 
-      const topics: Topic[] = []
+        const topics: Topic[] = []
 
-      for (const topicUri of response.data || []) {
-        const topicName = topicUri.split('://').pop()!
-        topics.push({
-          name: topicName,
-          persistent: topicUri.startsWith('persistent://'),
-          partitionIndex: -1,
-          topicUri,
-        })
-      }
+        for (const topicUri of (response.data as string[]) || []) {
+          const topicName = topicUri.split('://').pop()!
+          topics.push({
+            name: topicName,
+            persistent: topicUri.startsWith('persistent://'),
+            partitionIndex: -1,
+            topicUri,
+          })
+        }
 
-      return topics
-    })
+        return topics
+      }, [])
+    )
   }
 
   // 获取 Topic 统计信息
@@ -185,46 +193,51 @@ export class ResourceAPI {
 
       const topicType = persistent ? 'persistent' : 'non-persistent'
 
-      const response = await withRetry(() =>
-        this.http.get(`/admin/v2/${topicType}/${tenant}/${namespace}/${topicName}/stats`)
-      )
-
-      if (response.status === 404 || response.data === null) {
-        return {
-          name: `${tenant}/${namespace}/${topicName}`,
-          persistent,
-          partitionIndex: -1,
-          totalStorageSize: 0,
-          storageSize: 0,
-          backlogSize: 0,
-          msgRateIn: 0,
-          msgRateOut: 0,
-          msgThroughputIn: 0,
-          msgThroughputOut: 0,
-          subscriptions: {},
-          producers: [],
-          consumers: [],
-          numPartitions: 0,
-        }
+      const emptyStats: TopicStats = {
+        name: `${tenant}/${namespace}/${topicName}`,
+        persistent,
+        partitionIndex: -1,
+        totalStorageSize: 0,
+        storageSize: 0,
+        backlogSize: 0,
+        msgRateIn: 0,
+        msgRateOut: 0,
+        msgThroughputIn: 0,
+        msgThroughputOut: 0,
+        subscriptions: {},
+        producers: [],
+        consumers: [],
+        numPartitions: 0,
       }
 
-      return { ...response.data, persistent }
+      return orNotFound(async () => {
+        const response = await withRetry(() =>
+          this.http.get(`/admin/v2/${topicType}/${seg(tenant)}/${seg(namespace)}/${seg(topicName)}/stats`)
+        )
+        if (response.data === null) {
+          return emptyStats
+        }
+        return { ...response.data, persistent }
+      }, emptyStats)
     })
   }
 
   // 获取 Topic 配置
   async getTopicConfig(tenant: string, namespace: string, topic: string, persistent: boolean = true): Promise<TopicConfig> {
-    return this.enqueue(async () => {
-      const topicType = persistent ? 'persistent' : 'non-persistent'
-      const response = await this.http.get(
-        `/admin/v2/${topicType}/${tenant}/${namespace}/${topic}/info`
-      )
-      return {
-        topicName: `${tenant}/${namespace}/${topic}`,
-        numPartitions: response.data.numPartitions,
-        permissions: response.data.policies?.permissions,
-      }
-    })
+    const fallback: TopicConfig = { topicName: `${tenant}/${namespace}/${topic}` }
+    return this.enqueue(() =>
+      orNotFound<TopicConfig>(async () => {
+        const topicType = persistent ? 'persistent' : 'non-persistent'
+        const response = await withRetry(() =>
+          this.http.get(`/admin/v2/${topicType}/${seg(tenant)}/${seg(namespace)}/${seg(topic)}/info`)
+        )
+        return {
+          topicName: `${tenant}/${namespace}/${topic}`,
+          numPartitions: response.data?.numPartitions,
+          permissions: response.data?.policies?.permissions,
+        }
+      }, fallback)
+    )
   }
 
   // 更新 Topic 配置
@@ -232,7 +245,7 @@ export class ResourceAPI {
     return this.enqueue(async () => {
       const topicType = persistent ? 'persistent' : 'non-persistent'
       await this.http.put(
-        `/admin/v2/${topicType}/${tenant}/${namespace}/${topic}/config`,
+        `/admin/v2/${topicType}/${seg(tenant)}/${seg(namespace)}/${seg(topic)}/config`,
         config
       )
     })
@@ -247,7 +260,7 @@ export class ResourceAPI {
   ): Promise<void> {
     return this.enqueue(async () => {
       await this.http.put(
-        `/admin/v2/persistent/${tenant}/${namespace}/${topic}/partitions`,
+        `/admin/v2/persistent/${seg(tenant)}/${seg(namespace)}/${seg(topic)}/partitions`,
         partitions
       )
     })
@@ -256,7 +269,7 @@ export class ResourceAPI {
   // 删除 Topic
   async deleteTopic(tenant: string, namespace: string, topic: string): Promise<void> {
     return this.enqueue(async () => {
-      await this.http.delete(`/admin/v2/persistent/${tenant}/${namespace}/${topic}`)
+      await this.http.delete(`/admin/v2/persistent/${seg(tenant)}/${seg(namespace)}/${seg(topic)}`)
     })
   }
 
@@ -264,12 +277,14 @@ export class ResourceAPI {
 
   // 获取 Topic 的所有订阅
   async getSubscriptions(tenant: string, namespace: string, topic: string): Promise<string[]> {
-    return this.enqueue(async () => {
-      const response = await withRetry(() =>
-        this.http.get(`/admin/v2/persistent/${tenant}/${namespace}/${topic}/subscriptions`)
-      )
-      return response.data
-    })
+    return this.enqueue(() =>
+      orNotFound(async () => {
+        const response = await withRetry(() =>
+          this.http.get(`/admin/v2/persistent/${seg(tenant)}/${seg(namespace)}/${seg(topic)}/subscriptions`)
+        )
+        return (response.data as string[]) || []
+      }, [])
+    )
   }
 
   // 删除订阅
@@ -281,7 +296,7 @@ export class ResourceAPI {
   ): Promise<void> {
     return this.enqueue(async () => {
       await this.http.delete(
-        `/admin/v2/persistent/${tenant}/${namespace}/${topic}/subscription/${subscription}`
+        `/admin/v2/persistent/${seg(tenant)}/${seg(namespace)}/${seg(topic)}/subscription/${seg(subscription)}`
       )
     })
   }
@@ -296,7 +311,7 @@ export class ResourceAPI {
   ): Promise<void> {
     return this.enqueue(async () => {
       await this.http.put(
-        `/admin/v2/persistent/${tenant}/${namespace}/${topic}/subscription/${name}`,
+        `/admin/v2/persistent/${seg(tenant)}/${seg(namespace)}/${seg(topic)}/subscription/${seg(name)}`,
         { type }
       )
     })
@@ -312,7 +327,7 @@ export class ResourceAPI {
   ): Promise<void> {
     return this.enqueue(async () => {
       await this.http.post(
-        `/admin/v2/persistent/${tenant}/${namespace}/${topic}/subscription/${subscription}/skip/${numMessages}`
+        `/admin/v2/persistent/${seg(tenant)}/${seg(namespace)}/${seg(topic)}/subscription/${seg(subscription)}/skip/${numMessages}`
       )
     })
   }
@@ -327,7 +342,7 @@ export class ResourceAPI {
   ): Promise<void> {
     return this.enqueue(async () => {
       await this.http.post(
-        `/admin/v2/persistent/${tenant}/${namespace}/${topic}/subscription/${subscription}/resetcursor`,
+        `/admin/v2/persistent/${seg(tenant)}/${seg(namespace)}/${seg(topic)}/subscription/${seg(subscription)}/resetcursor`,
         { timestamp }
       )
     })
@@ -342,7 +357,7 @@ export class ResourceAPI {
   ): Promise<void> {
     return this.enqueue(async () => {
       await this.http.post(
-        `/admin/v2/persistent/${tenant}/${namespace}/${topic}/subscription/${subscription}/seekEarliest`
+        `/admin/v2/persistent/${seg(tenant)}/${seg(namespace)}/${seg(topic)}/subscription/${seg(subscription)}/seekEarliest`
       )
     })
   }
@@ -356,7 +371,7 @@ export class ResourceAPI {
   ): Promise<void> {
     return this.enqueue(async () => {
       await this.http.post(
-        `/admin/v2/persistent/${tenant}/${namespace}/${topic}/subscription/${subscription}/seekLatest`
+        `/admin/v2/persistent/${seg(tenant)}/${seg(namespace)}/${seg(topic)}/subscription/${seg(subscription)}/seekLatest`
       )
     })
   }
@@ -375,7 +390,7 @@ export class ResourceAPI {
       const response = await withRetry(
         () =>
           this.http.get(
-            `/admin/v2/persistent/${tenant}/${namespace}/${topic}/subscription/${subscription}/peek/${count}`
+            `/admin/v2/persistent/${seg(tenant)}/${seg(namespace)}/${seg(topic)}/subscription/${seg(subscription)}/peek/${count}`
           ),
         2
       )
@@ -394,7 +409,7 @@ export class ResourceAPI {
     try {
       // Pulsar HTTP Producer API
       const response = await this.http.post(
-        `/admin/v2/producers/${tenant}/${namespace}/${topic}/send`,
+        `/admin/v2/producers/${seg(tenant)}/${seg(namespace)}/${seg(topic)}/send`,
         {
           payload: Buffer.from(message).toString('base64'),
           properties: properties || {},
@@ -424,7 +439,7 @@ export class ResourceAPI {
 
       return {
         success: false,
-        error: error.response?.data?.reason || error.message || '发送失败',
+        error: getErrorMessage(error),
       }
     }
   }
@@ -438,7 +453,7 @@ export class ResourceAPI {
   ): Promise<number> {
     return this.enqueue(async () => {
       const response = await this.http.get(
-        `/admin/v2/persistent/${tenant}/${namespace}/${topic}/subscription/${subscription}/backlog`
+        `/admin/v2/persistent/${seg(tenant)}/${seg(namespace)}/${seg(topic)}/subscription/${seg(subscription)}/backlog`
       )
       return response.data
     })
@@ -457,7 +472,9 @@ export class ResourceAPI {
 
     for (const endpoint of endpoints) {
       try {
-        const response = await this.http.get(endpoint, { timeout: 3000 })
+        const response = await this.enqueue(() =>
+          this.http.get(endpoint, { timeout: 3000 })
+        )
         // 检查状态码是否在成功范围内 (200-399)
         if (response.status >= 200 && response.status < 400) {
           return true

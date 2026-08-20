@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, BrowserWindowInstance } from 'electron'
+import { app, BrowserWindow, shell, session } from 'electron'
 import path from 'path'
 import { registerIPCHandlers, cleanupDatabase } from './ipc/handlers'
 
@@ -13,7 +13,21 @@ process.on('unhandledRejection', (reason) => {
 app.commandLine.appendSwitch('disable-features', 'AutofillServerCommunication')
 app.commandLine.appendSwitch('autofill-server-url', '')
 
-let mainWindow: BrowserWindowInstance | null = null
+// 内容安全策略：仅允许本地资源与本地 Vite dev server，禁止加载远程脚本。
+// dev 环境需放开 ws/http localhost 以支持 HMR。
+const CSP_DIRECTIVES = [
+  "default-src 'self'",
+  // Vite dev 需要 inline/eval；生产构建后可进一步收紧
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data:",
+  "font-src 'self' data:",
+  process.env.NODE_ENV === 'development'
+    ? "connect-src 'self' ws: http://localhost:* http://127.0.0.1:*"
+    : "connect-src 'self'",
+].join('; ')
+
+let mainWindow: BrowserWindow | null = null
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -56,7 +70,9 @@ function createWindow() {
     mainWindow = null
   })
 
-  mainWindow.webContents.on('crashed', () => {
+  // 渲染进程崩溃（'crashed' 在 Electron 29 已移除，改用 render-process-gone）
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    console.error('[Main] Renderer process gone:', details.reason)
     const { dialog } = require('electron')
     dialog.showMessageBox({
       type: 'error',
@@ -99,6 +115,16 @@ if (!gotTheLock) {
 
   // 应用就绪
   app.whenReady().then(() => {
+    // 下发 CSP，避免渲染层被注入的脚本直接调用 IPC
+    session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+      callback({
+        responseHeaders: {
+          ...details.responseHeaders,
+          'Content-Security-Policy': [CSP_DIRECTIVES],
+        },
+      })
+    })
+
     // 注册 IPC handlers（包括数据库初始化）
     registerIPCHandlers()
 

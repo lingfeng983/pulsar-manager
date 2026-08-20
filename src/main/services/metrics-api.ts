@@ -1,5 +1,6 @@
 import { AxiosInstance } from 'axios'
-import { Semaphore, withRetry } from './http-client'
+import { Semaphore, withRetry, withSemaphore, seg } from './http-client'
+import { AGGREGATION_LIMITS } from '../config/constants'
 import type { BrokerStats, TopicStats } from './http-client'
 import type { ResourceAPI } from './resource-api'
 
@@ -10,15 +11,19 @@ export class MetricsAPI {
     private http: AxiosInstance,
     private semaphore: Semaphore,
     private resourceAPI: ResourceAPI,
+    // 聚合任务使用独立信号量：聚合方法会调用 resourceAPI 的限流方法，
+    // 若共用同一信号量，外层持有许可等待内层获取许可即会死锁。
+    private aggregateSemaphore: Semaphore,
   ) {}
 
+  // 叶子请求限流：仅包裹真正发起 HTTP 的调用
   private async enqueue<T>(fn: () => Promise<T>): Promise<T> {
-    await this.semaphore.acquire()
-    try {
-      return await fn()
-    } finally {
-      this.semaphore.release()
-    }
+    return withSemaphore(this.semaphore, fn)
+  }
+
+  // 聚合任务限流：不得在其中再获取 this.semaphore 的许可
+  private async enqueueAggregate<T>(fn: () => Promise<T>): Promise<T> {
+    return withSemaphore(this.aggregateSemaphore, fn)
   }
 
   // ========== Broker 相关 ==========
@@ -56,11 +61,11 @@ export class MetricsAPI {
     return this.enqueue(async () => {
       try {
         const response = await withRetry(() =>
-          this.http.get(`/admin/v2/broker-stats/${broker}`)
+          this.http.get(`/admin/v2/broker-stats/${seg(broker)}`)
         )
 
         // 解析响应数据为 BrokerStats 类型
-        const data = response.data
+        const data = response.data || {}
         return {
           brokerId: broker,
           brokerName: broker,
@@ -101,7 +106,7 @@ export class MetricsAPI {
     totalThroughputOut: number
     totalBacklog: number
   }> {
-    return this.enqueue(async () => {
+    return this.enqueueAggregate(async () => {
       const stats = {
         totalTopics: 0,
         totalPartitions: 0,
@@ -116,15 +121,17 @@ export class MetricsAPI {
       }
 
       try {
-        const tenants = await this.resourceAPI.getTenants()
+        const tenants = (await this.resourceAPI.getTenants()).slice(0, AGGREGATION_LIMITS.MAX_TENANTS)
 
         const tenantStatsPromises = tenants.map(async (tenant) => {
           try {
-            const namespaces = await this.resourceAPI.getNamespaces(tenant.name)
+            const namespaces = (await this.resourceAPI.getNamespaces(tenant.name))
+              .slice(0, AGGREGATION_LIMITS.MAX_NAMESPACES_PER_TENANT)
 
             const namespaceStatsPromises = namespaces.map(async (namespace) => {
               try {
-                const topics = await this.resourceAPI.getTopics(tenant.name, namespace)
+                const topics = (await this.resourceAPI.getTopics(tenant.name, namespace))
+                  .slice(0, AGGREGATION_LIMITS.MAX_TOPICS_PER_NAMESPACE)
 
                 const topicStatsPromises = topics.map(async (topic) => {
                   try {
@@ -204,7 +211,7 @@ export class MetricsAPI {
     totalThroughputOut: number
     totalBacklog: number
   }> {
-    return this.enqueue(async () => {
+    return this.enqueueAggregate(async () => {
       const stats = {
         topicCount: 0,
         subscriptionCount: 0,
@@ -218,8 +225,9 @@ export class MetricsAPI {
       }
 
       try {
-        const topics = await this.resourceAPI.getTopics(tenant, namespace)
-        stats.topicCount = topics.length
+        const allTopics = await this.resourceAPI.getTopics(tenant, namespace)
+        stats.topicCount = allTopics.length
+        const topics = allTopics.slice(0, AGGREGATION_LIMITS.MAX_TOPICS_PER_NAMESPACE)
 
         for (const topic of topics) {
           try {
@@ -265,7 +273,7 @@ export class MetricsAPI {
       consumers: number
     }>
   }> {
-    return this.enqueue(async () => {
+    return this.enqueueAggregate(async () => {
       const result = {
         brokers: [] as any[],
         topics: [] as any[],
@@ -278,15 +286,17 @@ export class MetricsAPI {
           result.brokers.push({ name: broker, topics: [] })
         })
 
-        const tenants = await this.resourceAPI.getTenants()
+        const tenants = (await this.resourceAPI.getTenants()).slice(0, AGGREGATION_LIMITS.MAX_TENANTS)
 
         const tenantTopicPromises = tenants.map(async (tenant) => {
           try {
-            const namespaces = await this.resourceAPI.getNamespaces(tenant.name)
+            const namespaces = (await this.resourceAPI.getNamespaces(tenant.name))
+              .slice(0, AGGREGATION_LIMITS.MAX_NAMESPACES_PER_TENANT)
 
             const namespaceTopicPromises = namespaces.map(async (namespace) => {
               try {
-                const topics = await this.resourceAPI.getTopics(tenant.name, namespace)
+                const topics = (await this.resourceAPI.getTopics(tenant.name, namespace))
+                  .slice(0, AGGREGATION_LIMITS.MAX_TOPICS_PER_NAMESPACE)
 
                 const topicStatsPromises = topics.map(async (topic) => {
                   try {
@@ -377,20 +387,20 @@ export class MetricsAPI {
     return this.enqueue(async () => {
       try {
         const subscriptions = await this.http.get(
-          `/admin/v2/persistent/${tenant}/${namespace}/${topic}/subscriptions`
+          `/admin/v2/persistent/${seg(tenant)}/${seg(namespace)}/${seg(topic)}/subscriptions`
         )
 
         const result = []
-        for (const subName of subscriptions.data || []) {
+        for (const subName of (subscriptions.data as string[]) || []) {
           try {
             const stats = await this.http.get(
-              `/admin/v2/persistent/${tenant}/${namespace}/${topic}/subscription/${subName}/stats`
+              `/admin/v2/persistent/${seg(tenant)}/${seg(namespace)}/${seg(topic)}/subscription/${seg(subName)}/stats`
             )
             result.push({
               name: subName,
-              type: stats.data.type || 'unknown',
-              msgBacklog: stats.data.msgBacklog || 0,
-              consumers: stats.data.consumers?.length || 0,
+              type: stats.data?.type || 'unknown',
+              msgBacklog: stats.data?.msgBacklog || 0,
+              consumers: stats.data?.consumers?.length || 0,
             })
           } catch {
             result.push({

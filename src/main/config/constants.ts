@@ -12,9 +12,20 @@ export const API_ENDPOINTS = {
 export const REQUEST_CONFIG = {
   TIMEOUT: 5000,
   MAX_CONCURRENT: 5,
+  // 聚合类任务使用独立信号量，避免与叶子请求共用许可造成死锁
+  MAX_CONCURRENT_AGGREGATE: 2,
+  // 等待请求许可的上限，超时后报错而不是无限挂起
+  ACQUIRE_TIMEOUT: 30000,
   REQUEST_DELAY: 50,
   MAX_RETRIES: 3,
   RETRY_DELAY: 1000,
+}
+
+// 聚合遍历的规模上限：避免在大集群上产生数千次请求
+export const AGGREGATION_LIMITS = {
+  MAX_TENANTS: 50,
+  MAX_NAMESPACES_PER_TENANT: 50,
+  MAX_TOPICS_PER_NAMESPACE: 200,
 }
 
 export const CACHE_CONFIG = {

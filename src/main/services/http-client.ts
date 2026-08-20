@@ -1,4 +1,6 @@
 import axios, { AxiosInstance, AxiosError, InternalAxiosRequestConfig } from 'axios'
+import https from 'node:https'
+import fs from 'node:fs'
 import { REQUEST_CONFIG } from '../config/constants'
 
 // ========== Type Definitions ==========
@@ -159,6 +161,79 @@ export interface PulsarAdminConfig {
 // ========== HTTP Client Factory ==========
 
 /**
+ * Thrown when the Admin API answers 404. Callers that treat "absent" as a
+ * normal outcome should wrap the call in orNotFound() instead of relying on a
+ * null payload leaking through as a successful response.
+ */
+export class NotFoundError extends Error {
+  constructor(public readonly url?: string) {
+    super(`Resource not found${url ? `: ${url}` : ''}`)
+    this.name = 'NotFoundError'
+  }
+}
+
+/** Resolve to `fallback` when the wrapped call reports a missing resource. */
+export async function orNotFound<T>(fn: () => Promise<T>, fallback: T): Promise<T> {
+  try {
+    return await fn()
+  } catch (error) {
+    if (error instanceof NotFoundError) {
+      return fallback
+    }
+    throw error
+  }
+}
+
+/** Read a PEM value that may be supplied either inline or as a file path. */
+function readPem(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined
+  }
+  if (value.includes('-----BEGIN')) {
+    return value
+  }
+  try {
+    return fs.readFileSync(value, 'utf-8')
+  } catch (error) {
+    throw new Error(`Unable to read certificate file "${value}": ${(error as Error).message}`)
+  }
+}
+
+/**
+ * Resolve the Admin API base URL. An explicit webServiceUrl always wins;
+ * otherwise the binary protocol URL is mapped onto its HTTP equivalent.
+ */
+export function resolveBaseUrl(config: PulsarAdminConfig): string {
+  if (config.webServiceUrl) {
+    return config.webServiceUrl
+  }
+  const mapped = config.serviceUrl
+    .replace(/^pulsar\+ssl:\/\//, 'https://')
+    .replace(/^pulsar:\/\//, 'http://')
+  if (config.tls?.enabled && !mapped.startsWith('https://')) {
+    throw new Error(
+      `TLS is enabled but the resolved Admin API URL is not HTTPS ("${mapped}"). ` +
+        'Set webServiceUrl to an https:// address or use a pulsar+ssl:// service URL.',
+    )
+  }
+  return mapped
+}
+
+function createHttpsAgent(tls: TLSConfig | undefined): https.Agent | undefined {
+  if (!tls?.enabled) {
+    return undefined
+  }
+  return new https.Agent({
+    // Certificate verification stays on; a custom CA is supplied instead of
+    // disabling the check.
+    rejectUnauthorized: true,
+    ca: readPem(tls.trustCerts),
+    cert: readPem(tls.clientCert),
+    key: readPem(tls.clientKey),
+  })
+}
+
+/**
  * Create an Axios instance with authentication interceptor and error handling.
  *
  * NOTE: The authParams in the config must already be decrypted before being
@@ -167,8 +242,9 @@ export interface PulsarAdminConfig {
  */
 export function createAxiosClient(config: PulsarAdminConfig): AxiosInstance {
   const client = axios.create({
-    baseURL: config.webServiceUrl || config.serviceUrl.replace('pulsar://', 'http://'),
+    baseURL: resolveBaseUrl(config),
     timeout: config.timeout || REQUEST_CONFIG.TIMEOUT,
+    httpsAgent: createHttpsAgent(config.tls),
     headers: {
       'Content-Type': 'application/json',
     },
@@ -189,8 +265,10 @@ export function createAxiosClient(config: PulsarAdminConfig): AxiosInstance {
   client.interceptors.response.use(
     (response) => response,
     (error: AxiosError) => {
+      // 404 is surfaced as a typed error rather than a fake success payload, so
+      // callers cannot accidentally dereference a null body.
       if (error.response?.status === 404) {
-        return Promise.resolve({ data: null, status: 404 } as any)
+        throw new NotFoundError(error.config?.url)
       }
       if (error.response?.status === 401) {
         console.warn('[PulsarAdmin] Authentication failed')
@@ -206,6 +284,17 @@ export function createAxiosClient(config: PulsarAdminConfig): AxiosInstance {
   return client
 }
 
+// ========== Path Utilities ==========
+
+/**
+ * Encode a single Admin API path segment so tenant/namespace/topic/subscription
+ * names containing reserved characters ("/", "..", "#", spaces, ...) cannot
+ * break out of or alter the intended path.
+ */
+export function seg(value: string): string {
+  return encodeURIComponent(value)
+}
+
 // ========== Error Utilities ==========
 
 export function getErrorMessage(error: AxiosError): string {
@@ -219,10 +308,7 @@ export function getErrorMessage(error: AxiosError): string {
 
 export function normalizeError(error: AxiosError): Error {
   if (error.response) {
-    const status = error.response.status
-    const data = error.response.data as any
-    const message = data?.reason || data?.message || `HTTP ${status}`
-    return new Error(`Pulsar API Error (${status}): ${message}`)
+    return new Error(`Pulsar API Error: ${getErrorMessage(error)}`)
   } else if (error.request) {
     return new Error('Network Error: Unable to connect to Pulsar cluster')
   }
@@ -234,17 +320,35 @@ export function normalizeError(error: AxiosError): Error {
 // Semaphore 实现用于并发控制
 export class Semaphore {
   private active = 0
-  private waiting: Array<() => void> = []
+  private waiting: Array<{ resolve: () => void; reject: (error: Error) => void }> = []
 
   constructor(private maxConcurrent: number) {}
 
-  async acquire(): Promise<void> {
+  /**
+   * Acquire a permit. A timeout is enforced so that a permit-ordering mistake
+   * degrades into a visible error instead of hanging the client forever.
+   */
+  async acquire(timeoutMs: number = REQUEST_CONFIG.ACQUIRE_TIMEOUT): Promise<void> {
     if (this.active < this.maxConcurrent) {
       this.active++
       return
     }
-    return new Promise<void>(resolve => {
-      this.waiting.push(resolve)
+    return new Promise<void>((resolve, reject) => {
+      const waiter = {
+        resolve: () => {
+          clearTimeout(timer)
+          resolve()
+        },
+        reject,
+      }
+      const timer = setTimeout(() => {
+        const index = this.waiting.indexOf(waiter)
+        if (index >= 0) {
+          this.waiting.splice(index, 1)
+        }
+        reject(new Error(`Timed out after ${timeoutMs}ms waiting for a request slot`))
+      }, timeoutMs)
+      this.waiting.push(waiter)
     })
   }
 
@@ -254,14 +358,33 @@ export class Semaphore {
       const next = this.waiting.shift()
       if (next) {
         this.active++
-        next()
+        next.resolve()
       }
     }
   }
 
   reset(): void {
+    const pending = this.waiting
     this.waiting = []
     this.active = 0
+    pending.forEach(waiter => waiter.reject(new Error('Pulsar admin client was destroyed')))
+  }
+}
+
+/**
+ * Run `fn` while holding one permit of `semaphore`.
+ *
+ * IMPORTANT: only the innermost call that actually performs I/O may hold a
+ * permit. Wrapping an aggregate operation that in turn calls other
+ * semaphore-guarded methods would deadlock once all permits are held by outer
+ * callers waiting on inner ones.
+ */
+export async function withSemaphore<T>(semaphore: Semaphore, fn: () => Promise<T>): Promise<T> {
+  await semaphore.acquire()
+  try {
+    return await fn()
+  } finally {
+    semaphore.release()
   }
 }
 

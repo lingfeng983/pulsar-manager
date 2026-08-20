@@ -1,4 +1,5 @@
 import { ipcMain } from 'electron'
+import type { IpcMainInvokeEvent } from 'electron'
 import { z } from 'zod'
 import { v4 as uuidv4 } from 'uuid'
 import {
@@ -19,6 +20,9 @@ import {
 } from '../database/sqlite'
 import { encrypt, decrypt } from '../services/encryption'
 import { PulsarAdminClient, clientManager } from '../services/pulsar-admin'
+import { createLogger } from '../utils/logger'
+
+const log = createLogger('IPC')
 
 // Re-export everything that domain handlers may need
 export {
@@ -87,15 +91,58 @@ export const TenantSchema = z.string().min(1).regex(/^[a-zA-Z0-9_-]+$/)
 
 export const NamespaceSchema = z.string().min(1).regex(/^[a-zA-Z0-9._-]+$/)
 
-export const TopicSchema = z.string().min(1)
+// Topic / Subscription 名称必须限制字符集：这些值会被拼进 Admin API 路径，
+// 允许 "/" 或 ".." 会导致请求落到非预期资源上。
+export const TopicSchema = z.string().min(1).max(255).regex(/^[a-zA-Z0-9._-]+$/)
 
-export const SubscriptionSchema = z.string().min(1)
+export const SubscriptionSchema = z.string().min(1).max(255).regex(/^[a-zA-Z0-9._-]+$/)
 
 export const TopicPathSchema = z.object({
   clusterId: ClusterIdSchema,
   tenant: TenantSchema,
   namespace: NamespaceSchema,
   topic: TopicSchema,
+})
+
+export const SubscriptionPathSchema = TopicPathSchema.extend({
+  subscription: SubscriptionSchema,
+})
+
+export const SkipMessagesSchema = SubscriptionPathSchema.extend({
+  count: z.number().int().positive().max(100000),
+})
+
+export const ResetCursorSchema = SubscriptionPathSchema.extend({
+  position: z.enum(['earliest', 'latest', 'timestamp']),
+  timestamp: z.number().int().positive().optional().nullable(),
+})
+
+// 订阅类型：渲染层传入的可能是小写（如 'exclusive'），
+// Pulsar Admin API 要求首字母大写的形式，这里统一归一化。
+const SUBSCRIPTION_TYPES = ['Exclusive', 'Shared', 'Failover', 'Key_Shared'] as const
+
+export const SubscriptionTypeSchema = z
+  .string()
+  .transform(value => value.trim().toLowerCase())
+  .refine(
+    value => SUBSCRIPTION_TYPES.some(type => type.toLowerCase() === value),
+    { message: 'Unsupported subscription type' },
+  )
+  .transform(value => SUBSCRIPTION_TYPES.find(type => type.toLowerCase() === value)!)
+
+export const CreateSubscriptionSchema = SubscriptionPathSchema.extend({
+  type: SubscriptionTypeSchema,
+})
+
+export const NamespacePathSchema = z.object({
+  clusterId: ClusterIdSchema,
+  tenant: TenantSchema,
+  namespace: NamespaceSchema,
+})
+
+export const TenantPathSchema = z.object({
+  clusterId: ClusterIdSchema,
+  tenant: TenantSchema,
 })
 
 export const MessageBrowseSchema = z.object({
@@ -213,7 +260,9 @@ export function formatError(error: unknown): string {
 // 获取 Pulsar Admin Client（公共方法）
 export function getAdminClient(clusterId: string): PulsarAdminClient | null {
   const cluster = getClusterById(clusterId)
-  if (!cluster) return null
+  if (!cluster) {
+    return null
+  }
 
   return clientManager.getClient(clusterId, {
     serviceUrl: cluster.service_url,
@@ -222,6 +271,12 @@ export function getAdminClient(clusterId: string): PulsarAdminClient | null {
     auth: cluster.auth_plugin
       ? { authPlugin: cluster.auth_plugin, authParams: decrypt(cluster.auth_params) }
       : undefined,
+    tls: cluster.tls_enabled
+      ? {
+          enabled: true,
+          trustCerts: cluster.tls_trust_certs ? decrypt(cluster.tls_trust_certs) : undefined,
+        }
+      : undefined,
   })
 }
 
@@ -229,4 +284,89 @@ export function getAdminClient(clusterId: string): PulsarAdminClient | null {
 export function cleanupDatabase() {
   closeDatabase()
   dbInitialized = false
+}
+
+// ========== IPC 请求来源校验 ==========
+
+// 只有应用自身的页面可以调用 IPC。开发环境走 Vite dev server，
+// 生产环境是本地 file:// 页面；其他来源（被注入的 iframe、远程内容）一律拒绝。
+function isTrustedSender(event: IpcMainInvokeEvent): boolean {
+  const url = event.senderFrame?.url
+  if (!url) {
+    return false
+  }
+  if (url.startsWith('file://')) {
+    return true
+  }
+  if (process.env.NODE_ENV === 'development') {
+    return url.startsWith('http://localhost:') || url.startsWith('http://127.0.0.1:')
+  }
+  return false
+}
+
+// ========== IPC Handler 包装器 ==========
+
+export type IpcResult<T> = { success: true; data?: T } | { success: false; error: string }
+
+/**
+ * 注册一个需要 Pulsar Admin 客户端的 IPC handler。
+ *
+ * 统一负责：来源校验 → 入参 zod 校验 → 数据库初始化 → 取客户端 →
+ * 执行业务逻辑 → 错误捕获与脱敏。业务代码只需要提供参数映射和一行调用。
+ */
+export function registerClientHandler<S extends z.ZodTypeAny, T>(
+  channel: string,
+  schema: S,
+  mapArgs: (args: unknown[]) => unknown,
+  run: (client: PulsarAdminClient, input: z.infer<S>) => Promise<T>,
+): void {
+  ipcMain.handle(channel, async (event, ...args: unknown[]): Promise<IpcResult<T>> => {
+    try {
+      if (!isTrustedSender(event)) {
+        log.warn(`${channel}: rejected untrusted sender`)
+        return { success: false, error: 'Request rejected' }
+      }
+
+      const parsed = schema.safeParse(mapArgs(args))
+      if (!parsed.success) {
+        const fields = parsed.error.issues.map(issue => issue.path.join('.')).join(', ')
+        log.warn(`${channel}: invalid input parameters`, fields)
+        return { success: false, error: 'Invalid input parameters' }
+      }
+
+      ensureDbInitialized()
+      const input = parsed.data as z.infer<S>
+      const clusterId = (input as { clusterId: string }).clusterId
+      const client = getAdminClient(clusterId)
+      if (!client) {
+        return { success: false, error: 'Cluster not found' }
+      }
+
+      const data = await run(client, input)
+      return { success: true, data }
+    } catch (error) {
+      log.error(`${channel} failed`, formatError(error))
+      return { success: false, error: formatError(error) }
+    }
+  })
+}
+
+/** 注册一个不需要 Admin 客户端的 IPC handler（仍做来源校验与错误兜底）。 */
+export function registerHandler<T>(
+  channel: string,
+  run: (...args: any[]) => Promise<T>,
+): void {
+  ipcMain.handle(channel, async (event, ...args: unknown[]): Promise<IpcResult<T>> => {
+    try {
+      if (!isTrustedSender(event)) {
+        log.warn(`${channel}: rejected untrusted sender`)
+        return { success: false, error: 'Request rejected' }
+      }
+      const data = await run(...args)
+      return { success: true, data }
+    } catch (error) {
+      log.error(`${channel} failed`, formatError(error))
+      return { success: false, error: formatError(error) }
+    }
+  })
 }

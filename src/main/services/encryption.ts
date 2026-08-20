@@ -1,78 +1,112 @@
-import CryptoJS from 'crypto-js'
-import { app } from 'electron'
-import path from 'path'
-import fs from 'fs'
+import crypto from 'node:crypto'
+import { app, safeStorage } from 'electron'
+import path from 'node:path'
+import fs from 'node:fs'
+import { createLogger } from '../utils/logger'
 
-// 密钥文件路径
-function getKeyFilePath(): string {
-  const userDataPath = app.getPath('userData')
-  return path.join(userDataPath, '.encryption-key')
+const log = createLogger('Encryption')
+
+// 旧版密钥文件：明文十六进制，与数据库同目录（等同于明文存储凭据）
+const LEGACY_KEY_FILE = '.encryption-key'
+// 新版密钥文件：由 OS 级密钥库（DPAPI / Keychain / libsecret）保护
+const KEY_FILE = '.encryption-key.v2'
+
+// 新密文格式前缀。base64 字母表不含 ':'，因此可以据此无歧义区分新旧格式。
+const CIPHER_PREFIX = 'v2:'
+const GCM_IV_BYTES = 12
+const GCM_TAG_BYTES = 16
+const CBC_IV_BYTES = 16
+
+// 密钥在进程内缓存，避免每次加解密都读盘
+let cachedKey: Buffer | null = null
+
+function keyFilePath(fileName: string): string {
+  return path.join(app.getPath('userData'), fileName)
 }
 
-// 生成随机密钥
-function generateKey(): string {
-  // 生成 256 位随机密钥
-  const randomBytes = CryptoJS.lib.WordArray.random(32)
-  return randomBytes.toString(CryptoJS.enc.Hex)
+function persistKey(keyHex: string): void {
+  const protectedPath = keyFilePath(KEY_FILE)
+  fs.mkdirSync(path.dirname(protectedPath), { recursive: true })
+
+  if (safeStorage.isEncryptionAvailable()) {
+    fs.writeFileSync(protectedPath, safeStorage.encryptString(keyHex))
+    // 迁移完成后删除明文密钥，否则等于没有加固
+    const legacyPath = keyFilePath(LEGACY_KEY_FILE)
+    if (fs.existsSync(legacyPath)) {
+      fs.rmSync(legacyPath)
+      log.info('Migrated encryption key to OS-protected storage')
+    }
+    return
+  }
+
+  // 平台不支持 safeStorage（部分 Linux 环境无 keyring）时退回明文文件，
+  // 并明确告警，不静默降级
+  log.warn('safeStorage is unavailable; encryption key falls back to a plaintext file')
+  fs.writeFileSync(keyFilePath(LEGACY_KEY_FILE), keyHex, { mode: 0o600 })
 }
 
-// 获取或创建加密密钥
-function getEncryptionKey(): string {
-  const keyFilePath = getKeyFilePath()
+function getEncryptionKey(): Buffer {
+  if (cachedKey) {
+    return cachedKey
+  }
 
-  // 如果密钥文件存在，读取它
-  if (fs.existsSync(keyFilePath)) {
+  const protectedPath = keyFilePath(KEY_FILE)
+  if (fs.existsSync(protectedPath)) {
     try {
-      const encryptedKey = fs.readFileSync(keyFilePath, 'utf-8').trim()
-      // 密钥在文件系统中已加密存储，这里简化处理直接返回
-      // 实际生产环境中应使用机器特定信息进行二次加密
-      return encryptedKey
+      const keyHex = safeStorage.decryptString(fs.readFileSync(protectedPath))
+      cachedKey = Buffer.from(keyHex, 'hex')
+      return cachedKey
     } catch (error) {
-      console.error('[Encryption] Failed to read key file:', error)
+      log.error('Failed to read protected key file', (error as Error).message)
       throw new Error('Failed to read encryption key')
     }
   }
 
-  // 生成新密钥
-  const newKey = generateKey()
-
-  // 确保目录存在
-  const keyDir = path.dirname(keyFilePath)
-  if (!fs.existsSync(keyDir)) {
-    fs.mkdirSync(keyDir, { recursive: true })
+  const legacyPath = keyFilePath(LEGACY_KEY_FILE)
+  let keyHex: string
+  if (fs.existsSync(legacyPath)) {
+    // 沿用原有密钥字节，只把密钥文件改为受保护存储；
+    // 这样已存的 CBC 密文仍可解密，不需要一次性重写数据库。
+    try {
+      keyHex = fs.readFileSync(legacyPath, 'utf-8').trim()
+    } catch (error) {
+      log.error('Failed to read legacy key file', (error as Error).message)
+      throw new Error('Failed to read encryption key')
+    }
+  } else {
+    keyHex = crypto.randomBytes(32).toString('hex')
+    log.info('New encryption key generated')
   }
 
-  // 保存密钥
-  fs.writeFileSync(keyFilePath, newKey, { mode: 0o600 })
-  console.log('[Encryption] New encryption key generated')
-
-  return newKey
+  persistKey(keyHex)
+  cachedKey = Buffer.from(keyHex, 'hex')
+  return cachedKey
 }
 
-// AES-256 加密
+// AES-256-GCM 加密（带完整性校验，密文被篡改时解密会失败而非静默返回错误明文）
 export function encrypt(plaintext: string): string {
   if (!plaintext) {
     return ''
   }
 
   const key = getEncryptionKey()
+  const iv = crypto.randomBytes(GCM_IV_BYTES)
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv)
+  const ciphertext = Buffer.concat([cipher.update(plaintext, 'utf-8'), cipher.final()])
+  const authTag = cipher.getAuthTag()
 
-  // 生成随机 IV
-  const iv = CryptoJS.lib.WordArray.random(16)
-
-  // 执行 AES-256 加密
-  const encrypted = CryptoJS.AES.encrypt(plaintext, CryptoJS.enc.Hex.parse(key), {
-    iv: iv,
-    mode: CryptoJS.mode.CBC,
-    padding: CryptoJS.pad.Pkcs7
-  })
-
-  // 将 IV 和密文合并
-  const combined = iv.concat(encrypted.ciphertext)
-  return combined.toString(CryptoJS.enc.Base64)
+  return CIPHER_PREFIX + Buffer.concat([iv, authTag, ciphertext]).toString('base64')
 }
 
-// AES-256 解密
+// 解密旧版 AES-256-CBC 密文（格式：base64(iv(16) || ciphertext)）
+function decryptLegacyCbc(payload: string, key: Buffer): string {
+  const combined = Buffer.from(payload, 'base64')
+  const iv = combined.subarray(0, CBC_IV_BYTES)
+  const ciphertext = combined.subarray(CBC_IV_BYTES)
+  const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv)
+  return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf-8')
+}
+
 export function decrypt(ciphertext: string): string {
   if (!ciphertext) {
     return ''
@@ -81,34 +115,27 @@ export function decrypt(ciphertext: string): string {
   const key = getEncryptionKey()
 
   try {
-    // 解析 Base64 编码的密文
-    const combined = CryptoJS.enc.Base64.parse(ciphertext)
+    if (!ciphertext.startsWith(CIPHER_PREFIX)) {
+      return decryptLegacyCbc(ciphertext, key)
+    }
 
-    // 提取 IV（前 16 字节）
-    const iv = CryptoJS.lib.WordArray.create(combined.words.slice(0, 4), 16)
+    const combined = Buffer.from(ciphertext.slice(CIPHER_PREFIX.length), 'base64')
+    const iv = combined.subarray(0, GCM_IV_BYTES)
+    const authTag = combined.subarray(GCM_IV_BYTES, GCM_IV_BYTES + GCM_TAG_BYTES)
+    const payload = combined.subarray(GCM_IV_BYTES + GCM_TAG_BYTES)
 
-    // 提取密文
-    const encrypted = CryptoJS.lib.WordArray.create(
-      combined.words.slice(4),
-      combined.sigBytes - 16
-    )
-
-    // 执行解密
-    const decrypted = CryptoJS.AES.decrypt(
-      { ciphertext: encrypted } as CryptoJS.lib.CipherParams,
-      CryptoJS.enc.Hex.parse(key),
-      {
-        iv: iv,
-        mode: CryptoJS.mode.CBC,
-        padding: CryptoJS.pad.Pkcs7
-      }
-    )
-
-    return decrypted.toString(CryptoJS.enc.Utf8)
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv)
+    decipher.setAuthTag(authTag)
+    return Buffer.concat([decipher.update(payload), decipher.final()]).toString('utf-8')
   } catch (error) {
-    console.error('[Encryption] Decryption failed:', error)
+    log.error('Decryption failed', (error as Error).message)
     throw new Error('Decryption failed')
   }
+}
+
+/** 该密文是否为旧格式（用于按需重新加密） */
+export function isLegacyCiphertext(ciphertext: string): boolean {
+  return !!ciphertext && !ciphertext.startsWith(CIPHER_PREFIX)
 }
 
 // 加密敏感配置对象
@@ -149,7 +176,7 @@ export function testEncryption(): boolean {
     const decrypted = decrypt(encrypted)
     return testText === decrypted
   } catch (error) {
-    console.error('[Encryption] Test failed:', error)
+    log.error('Test failed', (error as Error).message)
     return false
   }
 }
