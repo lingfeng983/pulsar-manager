@@ -6,6 +6,22 @@ import type { ResourceAPI } from './resource-api'
 
 // ========== Metrics & Topology API ==========
 
+// 拓扑聚合规模上限：由调用方按场景收紧（首页概览只需少量节点），只能比全局上限更小。
+export interface TopologyLimits {
+  maxTenants?: number
+  maxNamespacesPerTenant?: number
+  maxTopicsPerNamespace?: number
+  maxTopics?: number
+}
+
+// 将调用方传入的上限收敛到 [1, fallback] 区间；未传或非法时用全局上限。
+function clampLimit(value: number | undefined, fallback: number): number {
+  if (!value || value <= 0) {
+    return fallback
+  }
+  return Math.min(value, fallback)
+}
+
 export class MetricsAPI {
   constructor(
     private http: AxiosInstance,
@@ -261,7 +277,9 @@ export class MetricsAPI {
   // ========== 拓扑相关 ==========
 
   // 获取完整的拓扑结构
-  async getClusterTopology(): Promise<{
+  // limits 允许调用方（如首页概览）把规模上限下推到聚合过程，避免只为展示少量节点而遍历整个集群。
+  // 传入值只能收紧、不能放宽全局上限。
+  async getClusterTopology(limits?: TopologyLimits): Promise<{
     brokers: Array<{ name: string; topics: string[]; stats?: any }>
     topics: Array<{
       name: string
@@ -271,8 +289,19 @@ export class MetricsAPI {
       subscriptions: string[]
       producers: number
       consumers: number
+      msgRateIn: number
+      msgRateOut: number
+      backlogSize: number
     }>
   }> {
+    const maxTenants = clampLimit(limits?.maxTenants, AGGREGATION_LIMITS.MAX_TENANTS)
+    const maxNamespaces = clampLimit(limits?.maxNamespacesPerTenant, AGGREGATION_LIMITS.MAX_NAMESPACES_PER_TENANT)
+    const maxTopicsPerNamespace = clampLimit(
+      limits?.maxTopicsPerNamespace,
+      AGGREGATION_LIMITS.MAX_TOPICS_PER_NAMESPACE,
+    )
+    const maxTopics = limits?.maxTopics && limits.maxTopics > 0 ? limits.maxTopics : undefined
+
     return this.enqueueAggregate(async () => {
       const result = {
         brokers: [] as any[],
@@ -286,17 +315,17 @@ export class MetricsAPI {
           result.brokers.push({ name: broker, topics: [] })
         })
 
-        const tenants = (await this.resourceAPI.getTenants()).slice(0, AGGREGATION_LIMITS.MAX_TENANTS)
+        const tenants = (await this.resourceAPI.getTenants()).slice(0, maxTenants)
 
         const tenantTopicPromises = tenants.map(async (tenant) => {
           try {
             const namespaces = (await this.resourceAPI.getNamespaces(tenant.name))
-              .slice(0, AGGREGATION_LIMITS.MAX_NAMESPACES_PER_TENANT)
+              .slice(0, maxNamespaces)
 
             const namespaceTopicPromises = namespaces.map(async (namespace) => {
               try {
                 const topics = (await this.resourceAPI.getTopics(tenant.name, namespace))
-                  .slice(0, AGGREGATION_LIMITS.MAX_TOPICS_PER_NAMESPACE)
+                  .slice(0, maxTopicsPerNamespace)
 
                 const topicStatsPromises = topics.map(async (topic) => {
                   try {
@@ -334,7 +363,9 @@ export class MetricsAPI {
         })
 
         const allTopics = await Promise.all(tenantTopicPromises)
-        const flattenedTopics = allTopics.flat()
+        const flattenedTopics = maxTopics
+          ? allTopics.flat().slice(0, maxTopics)
+          : allTopics.flat()
 
         result.topics = flattenedTopics
 

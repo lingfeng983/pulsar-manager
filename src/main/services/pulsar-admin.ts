@@ -8,6 +8,8 @@ import {
 import { REQUEST_CONFIG } from '../config/constants'
 import { ResourceAPI } from './resource-api'
 import { MetricsAPI } from './metrics-api'
+import type { TopologyLimits } from './metrics-api'
+
 
 // Re-export all types and infrastructure from sub-modules
 export * from './http-client'
@@ -218,9 +220,10 @@ export class PulsarAdminClient {
 
   // ========== 拓扑相关 ==========
 
-  async getClusterTopology() {
-    return this.metricsAPI.getClusterTopology()
+  async getClusterTopology(limits?: TopologyLimits) {
+    return this.metricsAPI.getClusterTopology(limits)
   }
+
 
   async getMetrics(query: string, range?: { start: number; end: number }) {
     return this.metricsAPI.getMetrics(query, range)

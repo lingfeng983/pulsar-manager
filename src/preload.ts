@@ -62,9 +62,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // 拓扑
   topology: {
-    getClusterTopology: (clusterId: string) =>
-      ipcRenderer.invoke('topology:getClusterTopology', clusterId),
+    getClusterTopology: (clusterId: string, limits?: TopologyLimits) =>
+      ipcRenderer.invoke('topology:getClusterTopology', clusterId, limits),
   },
+
 
   // SSH 隧道
   ssh: {
@@ -190,7 +191,8 @@ declare global {
         getNamespaceStats: (clusterId: string, tenant: string, namespace: string) => Promise<APIResponse<NamespaceStats>>
       }
       topology: {
-        getClusterTopology: (clusterId: string) => Promise<APIResponse<ClusterTopology>>
+        getClusterTopology: (clusterId: string, limits?: TopologyLimits) => Promise<APIResponse<ClusterTopology>>
+
       }
       ssh: {
         list: () => Promise<APIResponse<SSHTunnel[]>>
@@ -340,7 +342,15 @@ interface NamespaceStats {
 }
 
 // 集群拓扑
+interface TopologyLimits {
+  maxTenants?: number
+  maxNamespacesPerTenant?: number
+  maxTopicsPerNamespace?: number
+  maxTopics?: number
+}
+
 interface ClusterTopology {
+
   brokers: Array<{
     name: string
     topics: string[]

@@ -50,84 +50,37 @@ const NODE_SIZES: Record<string, number> = {
   TOPIC: 25
 }
 
-// 获取单个集群的拓扑数据
+// 首页概览只展示少量节点，把规模上限下推给主进程，避免为了几个节点遍历整个集群
+const HOME_TOPOLOGY_LIMITS = {
+  maxTenants: 3,
+  maxNamespacesPerTenant: 2,
+  maxTopicsPerNamespace: 3,
+  maxTopics: 8
+}
+
+// 获取单个集群的拓扑数据：直接复用主进程的聚合实现，不在渲染层重复多轮 IPC
 async function fetchClusterTopology(
   clusterId: string,
   clusterName: string,
   clusterStatus: string
 ): Promise<ClusterTopologyData> {
-  const brokers: string[] = []
-  const topics: { name: string; msgRateIn: number }[] = []
-
-  // 并发获取 Brokers 和 Tenants
-  const [brokersResult, tenantsResult] = await Promise.allSettled([
-    window.electronAPI.metrics.getBrokers(clusterId),
-    window.electronAPI.resources.getTenants(clusterId)
-  ])
-
-  // 处理 Brokers
-  if (brokersResult.status === 'fulfilled' && brokersResult.value.success) {
-    brokers.push(...(brokersResult.value.data?.activeBrokers || []))
-  }
-
-  // 处理 Topics（并发获取所有命名空间的 Topics）
-  if (tenantsResult.status === 'fulfilled' && tenantsResult.value.success) {
-    const tenants = tenantsResult.value.data || []
-    
-    // 获取所有命名空间
-    const nsPromises = tenants.slice(0, 3).map(async (tenant) => {
-      const nsResult = await window.electronAPI.resources.getNamespaces(clusterId, tenant.name)
-      if (nsResult.success) {
-        return (nsResult.data || []).slice(0, 2).map((ns: string) => ({ tenant: tenant.name, namespace: ns }))
-      }
-      return []
-    })
-
-    const nsResults = await Promise.all(nsPromises)
-    const allNamespaces = nsResults.flat()
-
-    // 获取 Topics 和统计
-    const topicPromises = allNamespaces.slice(0, 6).map(async ({ tenant, namespace }) => {
-      const topicsResult = await window.electronAPI.resources.getTopics(clusterId, tenant, namespace)
-      if (topicsResult.success) {
-        const topicList = topicsResult.data || []
-        return topicList.slice(0, 3).map((t: string | { name: string }) => ({
-          name: typeof t === 'string' ? t : t.name,
-          tenant,
-          namespace
-        }))
-      }
-      return []
-    })
-
-    const topicResults = await Promise.all(topicPromises)
-    const allTopics = topicResults.flat()
-
-    // 获取每个 Topic 的统计（使用 allSettled 避免单个失败影响整体）
-    const statsPromises = allTopics.slice(0, 8).map(async ({ name, tenant, namespace }) => {
-      const statsResult = await window.electronAPI.resources.getTopicStats(clusterId, tenant, namespace, name)
-      if (statsResult.success && statsResult.data) {
-        return { name, msgRateIn: statsResult.data.msgRateIn || 0 }
-      }
-      return { name, msgRateIn: 0 }
-    })
-
-    const statsResults = await Promise.allSettled(statsPromises)
-    for (const result of statsResults) {
-      if (result.status === 'fulfilled') {
-        topics.push(result.value)
-      }
-    }
+  const response = await window.electronAPI.topology.getClusterTopology(clusterId, HOME_TOPOLOGY_LIMITS)
+  if (!response.success || !response.data) {
+    throw new Error(response.error || '获取拓扑数据失败')
   }
 
   return {
     clusterId,
     clusterName,
     clusterStatus,
-    brokers,
-    topics
+    brokers: (response.data.brokers || []).map(broker => broker.name),
+    topics: (response.data.topics || []).map(topic => ({
+      name: topic.name,
+      msgRateIn: topic.msgRateIn || 0
+    }))
   }
 }
+
 
 // 创建拓扑图配置（使用 useMemo 缓存）
 const createTopologyOption = (
