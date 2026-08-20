@@ -1,0 +1,141 @@
+/* 全局 CSS 变量 - 设计系统 */
+
+:root {
+  /* 亮色主题（默认） */
+  --color-primary: #1677FF;
+  --color-success: #00B42A;
+  --color-warning: #FF7D00;
+  --color-danger: #F53F3F;
+  --color-info: #86909C;
+
+  --color-bg-base: #FFFFFF;
+  --color-bg-secondary: #F2F3F5;
+  --color-bg-elevated: #FFFFFF;
+
+  --color-border: #E5E6EB;
+  --color-text-primary: #1D2129;
+  --color-text-secondary: #86909C;
+  --color-text-tertiary: #C9CDD4;
+
+  --shadow-light: 0 1px 4px rgba(0, 0, 0, 0.06);
+  --shadow-medium: 0 4px 16px rgba(0, 0, 0, 0.12);
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 12px;
+  --spacing-lg: 16px;
+  --spacing-xl: 24px;
+  --spacing-xxl: 32px;
+
+  --font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  --font-mono: 'JetBrains Mono', 'Consolas', 'Monaco', monospace;
+
+  --header-height: 48px;
+  --sidebar-width: 240px;
+  --tab-height: 36px;
+}
+
+/* 暗色主题 */
+[data-theme='dark'] {
+  --color-primary: #4096FF;
+  --color-success: #00C42A;
+  --color-warning: #FF9500;
+  --color-danger: #FF4D4F;
+  --color-info: #86909C;
+
+  --color-bg-base: #17171A;
+  --color-bg-secondary: #232327;
+  --color-bg-elevated: #2E2E33;
+
+  --color-border: #2E2E33;
+  --color-text-primary: #F5F5F7;
+  --color-text-secondary: #C9CDD4;
+  --color-text-tertiary: #86909C;
+
+  --shadow-light: 0 1px 4px rgba(0, 0, 0, 0.2);
+  --shadow-medium: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+/* 护眼主题 */
+[data-theme='eyeCare'] {
+  --color-primary: #5B8FF9;
+  --color-success: #5AD8A6;
+  --color-warning: #F6BD16;
+  --color-danger: #E86452;
+  --color-info: #8A8A8A;
+
+  --color-bg-base: #F5F5DC;
+  --color-bg-secondary: #E8E8D0;
+  --color-bg-elevated: #FFFFF0;
+
+  --color-border: #D4D4BE;
+  --color-text-primary: #2B2B2B;
+  --color-text-secondary: #5C5C5C;
+  --color-text-tertiary: #8A8A8A;
+
+  --shadow-light: 0 1px 4px rgba(0, 0, 0, 0.04);
+  --shadow-medium: 0 4px 16px rgba(0, 0, 0, 0.08);
+}
+
+/* 全局重置和基础样式 */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  font-family: var(--font-family);
+  font-size: 14px;
+  line-height: 1.4;
+  color: var(--color-text-primary);
+  background-color: var(--color-bg-base);
+  overflow: hidden;
+}
+
+/* 滚动条样式 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-bg-secondary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-text-tertiary);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-secondary);
+}
+
+/* 工具类 */
+.text-primary {
+  color: var(--color-text-primary);
+}
+
+.text-secondary {
+  color: var(--color-text-secondary);
+}
+
+.text-tertiary {
+  color: var(--color-text-tertiary);
+}
+
+.bg-base {
+  background-color: var(--color-bg-base);
+}
+
+.bg-secondary {
+  background-color: var(--color-bg-secondary);
+}

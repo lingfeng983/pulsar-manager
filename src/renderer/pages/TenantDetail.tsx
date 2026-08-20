@@ -1,0 +1,204 @@
+import React, { useState, useEffect, useCallback } from 'react'
+import { Card, Tabs, Row, Col, Statistic, Tag, Button, Table, Spin, Alert } from 'antd'
+import {
+  FolderOutlined,
+  DatabaseOutlined,
+  TagOutlined,
+  ArrowRightOutlined,
+} from '@ant-design/icons'
+import { useTabStore } from '../store/tabs'
+
+interface TenantDetailProps {
+  clusterId: string
+  tenant: string
+}
+
+interface NamespaceInfo {
+  name: string
+  replicationClusters: string[]
+}
+
+const TenantDetail: React.FC<TenantDetailProps> = ({ clusterId, tenant }) => {
+  const { addTab } = useTabStore()
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [namespaces, setNamespaces] = useState<NamespaceInfo[]>([])
+  const [tenantInfo, setTenantInfo] = useState<{
+    adminRoles: string[]
+    allowedClusters: string[]
+  } | null>(null)
+
+  const fetchTenantInfo = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const [namespacesResponse, tenantResponse] = await Promise.all([
+        window.electronAPI.resources.getNamespaces(clusterId, tenant),
+        window.electronAPI.resources.getTenantInfo(clusterId, tenant),
+      ])
+
+      if (namespacesResponse.success && namespacesResponse.data) {
+        const nsList: NamespaceInfo[] = namespacesResponse.data.map((ns: string) => ({
+          name: ns.split('/').pop() || ns,
+          replicationClusters: [],
+        }))
+        setNamespaces(nsList)
+      }
+
+      if (tenantResponse.success && tenantResponse.data) {
+        setTenantInfo(tenantResponse.data)
+      }
+    } catch (error) {
+      console.error('Failed to fetch tenant info:', error)
+      setError('获取租户信息失败')
+    } finally {
+      setLoading(false)
+    }
+  }, [clusterId, tenant])
+
+  useEffect(() => {
+    fetchTenantInfo()
+  }, [fetchTenantInfo])
+
+  const handleNamespaceClick = (namespace: string) => {
+    addTab({
+      id: `namespace-${clusterId}-${tenant}-${namespace}`,
+      title: `${tenant} / ${namespace}`,
+      type: 'namespace',
+      data: { clusterId, tenant, namespace },
+    })
+  }
+
+  const namespaceColumns = [
+    {
+      title: '命名空间名称',
+      dataIndex: 'name',
+      key: 'name',
+      render: (name: string) => (
+        <Button type="link" onClick={() => handleNamespaceClick(name)}>
+          {name}
+          <ArrowRightOutlined style={{ marginLeft: 4 }} />
+        </Button>
+      ),
+    },
+    {
+      title: '复制集群',
+      dataIndex: 'replicationClusters',
+      key: 'replicationClusters',
+      render: (clusters: string[]) =>
+        clusters.length > 0 ? (
+          clusters.map((c) => <Tag key={c}>{c}</Tag>)
+        ) : (
+          <span style={{ color: '#909399' }}>默认集群</span>
+        ),
+    },
+  ]
+
+  return (
+    <div style={{ padding: 'var(--spacing-lg)', height: '100%', overflow: 'auto' }}>
+      {loading ? (
+        <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '200px' }}>
+          <Spin size="large" />
+        </div>
+      ) : error ? (
+        <Alert message={error} type="error" showIcon />
+      ) : (
+        <Tabs
+          items={[
+            {
+              key: 'overview',
+              label: '概览',
+              children: (
+                <>
+                  <Row gutter={16}>
+                    <Col span={8}>
+                      <Card>
+                        <Statistic
+                          title="命名空间数量"
+                          value={namespaces.length}
+                          prefix={<FolderOutlined />}
+                        />
+                      </Card>
+                    </Col>
+                    <Col span={8}>
+                      <Card>
+                        <Statistic
+                          title="管理角色数"
+                          value={tenantInfo?.adminRoles?.length || 0}
+                          prefix={<TagOutlined />}
+                        />
+                      </Card>
+                    </Col>
+                    <Col span={8}>
+                      <Card>
+                        <Statistic
+                          title="允许的集群数"
+                          value={tenantInfo?.allowedClusters?.length || 0}
+                          prefix={<DatabaseOutlined />}
+                        />
+                      </Card>
+                    </Col>
+                  </Row>
+
+                  <Card title="租户信息" style={{ marginTop: 'var(--spacing-md)' }}>
+                    <div style={{ padding: '20px' }}>
+                      <div style={{ marginBottom: 'var(--spacing-md)' }}>
+                        <span style={{ fontWeight: 500 }}>租户名称:</span>
+                        <code style={{ marginLeft: 8 }}>{tenant}</code>
+                      </div>
+                      <div style={{ marginBottom: 'var(--spacing-md)' }}>
+                        <span style={{ fontWeight: 500 }}>管理角色:</span>
+                        <div style={{ marginLeft: 8, display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                          {tenantInfo?.adminRoles?.map((role) => (
+                            <Tag key={role}>{role}</Tag>
+                          ))}
+                          {(!tenantInfo?.adminRoles || tenantInfo?.adminRoles?.length === 0) && (
+                            <span style={{ color: '#909399' }}>无</span>
+                          )}
+                        </div>
+                      </div>
+                      <div style={{ marginBottom: 'var(--spacing-md)' }}>
+                        <span style={{ fontWeight: 500 }}>允许的集群:</span>
+                        <div style={{ marginLeft: 8, display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                          {tenantInfo?.allowedClusters?.map((cluster) => (
+                            <Tag key={cluster}>{cluster}</Tag>
+                          ))}
+                          {(!tenantInfo?.allowedClusters || tenantInfo?.allowedClusters?.length === 0) && (
+                            <span style={{ color: '#909399' }}>无</span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </Card>
+                </>
+              ),
+            },
+            {
+              key: 'namespaces',
+              label: '命名空间',
+              children: (
+                <Card title={`命名空间列表 (${namespaces.length})`}>
+                  {namespaces.length > 0 ? (
+                    <Table
+                      dataSource={namespaces}
+                      columns={namespaceColumns}
+                      rowKey="name"
+                      pagination={false}
+                      size="small"
+                    />
+                  ) : (
+                    <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--color-text-secondary)' }}>
+                      暂无命名空间
+                    </div>
+                  )}
+                </Card>
+              ),
+            },
+          ]}
+        />
+      )}
+    </div>
+  )
+}
+
+export default TenantDetail

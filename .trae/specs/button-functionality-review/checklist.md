@@ -1,0 +1,7 @@
+- [x] Checkpoint 1: HomeTopology 放大按钮使用 graphRoam action 实现正确缩放
+- [x] Checkpoint 2: HomeTopology 缩小按钮使用 graphRoam action 实现正确缩放
+- [x] Checkpoint 3: ClusterTopology 放大按钮使用 graphRoam action 实现正确缩放
+- [x] Checkpoint 4: ClusterTopology 缩小按钮使用 graphRoam action 实现正确缩放
+- [x] Checkpoint 5: MetricsDashboard 全屏按钮实现浏览器全屏 API
+- [x] Checkpoint 6: 应用编译通过，无 TypeScript 错误
+- [x] Checkpoint 7: 所有按钮功能在运行时正常工作

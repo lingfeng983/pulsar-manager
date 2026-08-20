@@ -1,0 +1,10 @@
+- [x] Checkpoint 1: MessageBrowser 导出按钮点击触发文件下载
+- [x] Checkpoint 2: MessageBrowser 导出过程有 loading 状态
+- [x] Checkpoint 3: TopicDetail 订阅删除按钮弹出确认对话框
+- [x] Checkpoint 4: TopicDetail 订阅删除成功后列表更新
+- [x] Checkpoint 5: TopicDetail 创建订阅按钮弹出表单
+- [x] Checkpoint 6: TopicDetail 创建订阅功能正常工作
+- [x] Checkpoint 7: TopNav 搜索框输入有反馈
+- [x] Checkpoint 8: TopNav 未实现按钮点击有提示
+- [x] Checkpoint 9: ClusterConfig 编辑模式下可直接保存
+- [x] Checkpoint 10: 所有修改通过 TypeScript 编译检查

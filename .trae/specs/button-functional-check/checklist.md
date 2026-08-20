@@ -1,0 +1,9 @@
+- [x] Checkpoint 1: ClusterTopology 重置视图按钮使用正确的 graphRoam action
+- [x] Checkpoint 2: 左侧菜单监控按钮 onClick 绑定正确
+- [x] Checkpoint 3: 左侧菜单拓扑按钮 onClick 绑定正确
+- [x] Checkpoint 4: 左侧菜单刷新按钮 onClick 绑定正确
+- [x] Checkpoint 5: 左侧菜单折叠/展开按钮 onClick 绑定正确
+- [x] Checkpoint 6: 首页所有按钮 onClick 绑定正确
+- [x] Checkpoint 7: TopicDetail 页面所有按钮 onClick 绑定正确
+- [x] Checkpoint 8: 应用编译通过，无 TypeScript 错误
+- [x] Checkpoint 9: 所有按钮功能在运行时正常工作

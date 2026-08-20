@@ -1,0 +1,6 @@
+- [x] Checkpoint 1: ResourceTree 中 `dataRef.topic` 只存储纯 topic 名称
+- [x] Checkpoint 2: TopicDetail 页面接收到的 `topic` 参数是纯名称
+- [x] Checkpoint 3: `getTopicStats` API 调用参数正确
+- [x] Checkpoint 4: TopicDetail 页面能正确显示统计数据
+- [x] Checkpoint 5: 应用编译通过，无 TypeScript 错误
+- [x] Checkpoint 6: 应用启动正常，无运行时错误
