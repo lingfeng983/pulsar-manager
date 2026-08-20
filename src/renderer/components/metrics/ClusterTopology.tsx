@@ -7,6 +7,7 @@ import { useClusterStore } from '../../store/cluster'
 import type { ClusterConfig } from '../../types'
 import { useFullscreen } from '../../hooks/useFullscreen'
 import { useEchartsResize, zoomGraph, resetGraphView } from '../../hooks/useEcharts'
+import { TOPOLOGY_COLORS } from '../../utils/topologyColors'
 
 interface ClusterTopologyProps {
   clusterId?: string
@@ -54,10 +55,10 @@ const createTopologyOption = (
 ): EChartsOption => {
   // 节点分类
   const categories = [
-    { name: 'Broker', itemStyle: { color: '#409EFF' } },
-    { name: 'Topic', itemStyle: { color: '#67C23A' } },
-    { name: 'Partition', itemStyle: { color: '#E6A23C' } },
-    { name: 'Subscription', itemStyle: { color: '#F56C6C' } }
+    { name: 'Broker', itemStyle: { color: TOPOLOGY_COLORS.primary } },
+    { name: 'Topic', itemStyle: { color: TOPOLOGY_COLORS.success } },
+    { name: 'Partition', itemStyle: { color: TOPOLOGY_COLORS.warning } },
+    { name: 'Subscription', itemStyle: { color: TOPOLOGY_COLORS.danger } }
   ]
 
   // 动态计算节点大小和斥力（根据节点数量）
@@ -123,7 +124,7 @@ const createTopologyOption = (
     target: edge.target,
     value: edge.value,
     lineStyle: {
-      color: '#909399',
+      color: TOPOLOGY_COLORS.edge,
       width: edge.value ? Math.max(1, edge.value / 200) : 1,
       curveness: 0.2,
       opacity: 0.6
@@ -154,7 +155,7 @@ const createTopologyOption = (
           if (node) {
             return `
               <div style="font-weight: 600; font-size: 14px; margin-bottom: 8px">${node.name}</div>
-              <div style="color: #909399">类型: ${node.type === 'broker' ? 'Broker' : node.type === 'topic' ? 'Topic' : node.type === 'partition' ? 'Partition' : 'Subscription'}</div>
+              <div style="color: ${TOPOLOGY_COLORS.edge}">类型: ${node.type === 'broker' ? 'Broker' : node.type === 'topic' ? 'Topic' : node.type === 'partition' ? 'Partition' : 'Subscription'}</div>
               ${node.tenant ? `<div>租户: ${node.tenant}</div>` : ''}
               ${node.namespace ? `<div>命名空间: ${node.namespace}</div>` : ''}
             `
@@ -187,7 +188,7 @@ const createTopologyOption = (
         position: 'bottom',
         formatter: '{b}',
         fontSize: 12,
-        color: '#666',
+        color: TOPOLOGY_COLORS.label,
         fontWeight: 500
       },
       edgeSymbol: ['circle', 'arrow'],
@@ -414,7 +415,7 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({ clusterId: initialClu
             : '集群拓扑'
           }
           {nodes.length > 0 && (
-            <span style={{ fontSize: 12, color: '#909399', marginLeft: 12 }}>
+            <span style={{ fontSize: 12, color: TOPOLOGY_COLORS.edge, marginLeft: 12 }}>
               节点: {nodes.length} | 连接: {edges.length}
             </span>
           )}
@@ -482,7 +483,7 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({ clusterId: initialClu
               title="Brokers"
               value={stats.brokers}
               prefix={<DatabaseOutlined />}
-              valueStyle={{ color: '#409EFF' }}
+              valueStyle={{ color: TOPOLOGY_COLORS.primary }}
             />
           </Card>
         </Col>
@@ -492,7 +493,7 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({ clusterId: initialClu
               title="Topics"
               value={stats.topics}
               prefix={<MessageOutlined />}
-              valueStyle={{ color: '#67C23A' }}
+              valueStyle={{ color: TOPOLOGY_COLORS.success }}
             />
           </Card>
         </Col>
@@ -502,7 +503,7 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({ clusterId: initialClu
               title="Subscriptions"
               value={stats.subscriptions}
               prefix={<BranchesOutlined />}
-              valueStyle={{ color: '#E6A23C' }}
+              valueStyle={{ color: TOPOLOGY_COLORS.warning }}
             />
           </Card>
         </Col>

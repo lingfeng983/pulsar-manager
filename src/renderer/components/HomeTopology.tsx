@@ -6,6 +6,8 @@ import type { EChartsOption } from 'echarts'
 import { useClusterStore } from '../store/cluster'
 import { useFullscreen } from '../hooks/useFullscreen'
 import { useEchartsResize, zoomGraph } from '../hooks/useEcharts'
+import { TOPOLOGY_COLORS } from '../utils/topologyColors'
+
 
 
 interface TopologyNode {
@@ -40,11 +42,12 @@ const NODE_TYPES = {
 
 // 节点颜色配置
 const NODE_COLORS: Record<string, string> = {
-  CLUSTER_CONNECTED: '#409EFF',
-  CLUSTER_DISCONNECTED: '#F56C6C',
-  BROKER: '#67C23A',
-  TOPIC: '#E6A23C'
+  CLUSTER_CONNECTED: TOPOLOGY_COLORS.primary,
+  CLUSTER_DISCONNECTED: TOPOLOGY_COLORS.danger,
+  BROKER: TOPOLOGY_COLORS.success,
+  TOPIC: TOPOLOGY_COLORS.warning
 }
+
 
 // 节点大小配置
 const NODE_SIZES: Record<string, number> = {
@@ -161,8 +164,9 @@ const createTopologyOption = (
           if (node) {
             const statusHtml = node.status
               ? `<div>状态: ${node.status === 'connected'
-                  ? '<span style="color:#67C23A">● 在线</span>'
-                  : '<span style="color:#F56C6C">● 离线</span>'}</div>`
+                  ? `<span style="color:${TOPOLOGY_COLORS.success}">● 在线</span>`
+                  : `<span style="color:${TOPOLOGY_COLORS.danger}">● 离线</span>`}</div>`
+
               : ''
             const countHtml = node.count !== undefined
               ? `<div>${node.type === 'cluster' ? 'Topics' : '消息速率'}: ${node.count}</div>`
@@ -453,7 +457,8 @@ const HomeTopology: React.FC = () => {
               title="集群数"
               value={stats.clusters}
               prefix={<ClusterOutlined />}
-              valueStyle={{ color: '#409EFF' }}
+              valueStyle={{ color: TOPOLOGY_COLORS.primary }}
+
             />
           </Col>
           <Col span={8}>
@@ -461,7 +466,8 @@ const HomeTopology: React.FC = () => {
               title="Brokers"
               value={stats.brokers}
               prefix={<DatabaseOutlined />}
-              valueStyle={{ color: '#67C23A' }}
+              valueStyle={{ color: TOPOLOGY_COLORS.success }}
+
             />
           </Col>
           <Col span={8}>
@@ -469,7 +475,8 @@ const HomeTopology: React.FC = () => {
               title="Topics"
               value={stats.topics}
               prefix={<MessageOutlined />}
-              valueStyle={{ color: '#E6A23C' }}
+              valueStyle={{ color: TOPOLOGY_COLORS.warning }}
+
             />
           </Col>
         </Row>
@@ -507,10 +514,11 @@ const HomeTopology: React.FC = () => {
               <Tag color="orange">Topic</Tag>
             </Space>
             <Space size={8}>
-              <span style={{ display: 'inline-block', width: 12, height: 12, borderRadius: '50%', backgroundColor: '#409EFF' }} />
-              <span style={{ fontSize: 12, color: '#666' }}>在线</span>
-              <span style={{ display: 'inline-block', width: 12, height: 12, borderRadius: '50%', backgroundColor: '#F56C6C' }} />
-              <span style={{ fontSize: 12, color: '#666' }}>离线</span>
+              <span style={{ display: 'inline-block', width: 12, height: 12, borderRadius: '50%', backgroundColor: TOPOLOGY_COLORS.primary }} />
+              <span style={{ fontSize: 12, color: TOPOLOGY_COLORS.label }}>在线</span>
+              <span style={{ display: 'inline-block', width: 12, height: 12, borderRadius: '50%', backgroundColor: TOPOLOGY_COLORS.danger }} />
+              <span style={{ fontSize: 12, color: TOPOLOGY_COLORS.label }}>离线</span>
+
             </Space>
           </div>
         </div>
