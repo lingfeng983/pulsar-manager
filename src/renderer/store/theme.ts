@@ -1,13 +1,13 @@
-import { create } from 'zustand'
+import {create} from 'zustand';
 
-export type ThemeType = 'light' | 'dark' | 'eyeCare'
+export type ThemeType = 'light' | 'dark' | 'eyeCare';
 
 interface ThemeState {
-  theme: ThemeType
-  setTheme: (theme: ThemeType) => void
+    theme: ThemeType;
+    setTheme: (theme: ThemeType) => void;
 }
 
-export const useThemeStore = create<ThemeState>((set) => ({
-  theme: 'light',
-  setTheme: (theme) => set({ theme }),
-}))
+export const useThemeStore = create<ThemeState>(set => ({
+    theme: 'light',
+    setTheme: theme => set({theme}),
+}));

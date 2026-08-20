@@ -1,156 +1,157 @@
-import { app, BrowserWindow, shell, session } from 'electron'
-import path from 'path'
-import { registerIPCHandlers, cleanupDatabase } from './ipc/handlers'
+import {app, BrowserWindow, shell, session, dialog} from 'electron';
+import path from 'path';
+import {registerIPCHandlers, cleanupDatabase} from './ipc/handlers';
 
-process.on('uncaughtException', (error) => {
-  console.error('[Main] Uncaught Exception:', error)
-})
+process.on('uncaughtException', error => {
+    console.error('[Main] Uncaught Exception:', error);
+});
 
-process.on('unhandledRejection', (reason) => {
-  console.error('[Main] Unhandled Rejection:', reason)
-})
+process.on('unhandledRejection', reason => {
+    console.error('[Main] Unhandled Rejection:', reason);
+});
 
-app.commandLine.appendSwitch('disable-features', 'AutofillServerCommunication')
-app.commandLine.appendSwitch('autofill-server-url', '')
+app.commandLine.appendSwitch('disable-features', 'AutofillServerCommunication');
+app.commandLine.appendSwitch('autofill-server-url', '');
 
 // 内容安全策略：仅允许本地资源与本地 Vite dev server，禁止加载远程脚本。
 // dev 环境需放开 ws/http localhost 以支持 HMR。
 const CSP_DIRECTIVES = [
-  "default-src 'self'",
-  // Vite dev 需要 inline/eval；生产构建后可进一步收紧
-  "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
-  "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data:",
-  "font-src 'self' data:",
-  process.env.NODE_ENV === 'development'
-    ? "connect-src 'self' ws: http://localhost:* http://127.0.0.1:*"
-    : "connect-src 'self'",
-].join('; ')
+    "default-src 'self'",
+    // Vite dev 需要 inline/eval；生产构建后可进一步收紧
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "font-src 'self' data:",
+    process.env.NODE_ENV === 'development'
+        ? "connect-src 'self' ws: http://localhost:* http://127.0.0.1:*"
+        : "connect-src 'self'",
+].join('; ');
 
-let mainWindow: BrowserWindow | null = null
+let mainWindow: BrowserWindow | null = null;
 
 function createWindow() {
-  mainWindow = new BrowserWindow({
-    width: 1400,
-    height: 900,
-    minWidth: 1000,
-    minHeight: 700,
-    webPreferences: {
-      preload: path.join(__dirname, '../preload.js'),
-      sandbox: true,
-      contextIsolation: true,
-      nodeIntegration: false,
-      disableBlinkFeatures: 'AutofillEnabled',
-    },
-    titleBarStyle: 'default',
-    frame: true,
-    show: false,
-  })
+    mainWindow = new BrowserWindow({
+        width: 1400,
+        height: 900,
+        minWidth: 1000,
+        minHeight: 700,
+        webPreferences: {
+            preload: path.join(__dirname, '../preload.js'),
+            sandbox: true,
+            contextIsolation: true,
+            nodeIntegration: false,
+            disableBlinkFeatures: 'AutofillEnabled',
+        },
+        titleBarStyle: 'default',
+        frame: true,
+        show: false,
+    });
 
-  // 开发环境加载 Vite 服务器
-  if (process.env.NODE_ENV === 'development') {
-    const vitePort = process.env.VITE_PORT || 5173
-    mainWindow.loadURL(`http://localhost:${vitePort}`)
-    mainWindow.webContents.openDevTools()
-  } else {
-    mainWindow.loadFile(path.join(__dirname, '../../renderer/index.html'))
-  }
-
-  mainWindow.webContents.on('console-message', (_event, level, message) => {
-    if (message.includes('Autofill.enable') && message.includes("wasn't found")) {
-      return
+    // 开发环境加载 Vite 服务器
+    if (process.env.NODE_ENV === 'development') {
+        const vitePort = process.env.VITE_PORT || 5173;
+        mainWindow.loadURL(`http://localhost:${vitePort}`);
+        mainWindow.webContents.openDevTools();
+    } else {
+        mainWindow.loadFile(path.join(__dirname, '../../renderer/index.html'));
     }
-  })
 
-  mainWindow.once('ready-to-show', () => {
-    mainWindow?.show()
-  })
+    mainWindow.webContents.on('console-message', (_event, level, message) => {
+        if (message.includes('Autofill.enable') && message.includes("wasn't found")) {
+            return;
+        }
+    });
 
-  mainWindow.on('closed', () => {
-    mainWindow = null
-  })
+    mainWindow.once('ready-to-show', () => {
+        mainWindow?.show();
+    });
 
-  // 渲染进程崩溃（'crashed' 在 Electron 29 已移除，改用 render-process-gone）
-  mainWindow.webContents.on('render-process-gone', (_event, details) => {
-    console.error('[Main] Renderer process gone:', details.reason)
-    const { dialog } = require('electron')
-    dialog.showMessageBox({
-      type: 'error',
-      title: '页面崩溃',
-      message: '应用页面发生崩溃，是否重新加载？',
-      buttons: ['重新加载', '退出'],
-      defaultId: 0,
-    }).then(({ response }) => {
-      if (response === 0) {
-        mainWindow?.reload()
-      } else {
-        app.quit()
-      }
-    })
-  })
+    mainWindow.on('closed', () => {
+        mainWindow = null;
+    });
 
-  // 处理外部链接
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    // Only allow http and https URLs
-    if (url.startsWith('http://') || url.startsWith('https://')) {
-      shell.openExternal(url)
-    }
-    return { action: 'deny' }
-  })
+    // 渲染进程崩溃（'crashed' 在 Electron 29 已移除，改用 render-process-gone）
+    mainWindow.webContents.on('render-process-gone', (_event, details) => {
+        console.error('[Main] Renderer process gone:', details.reason);
+        dialog
+            .showMessageBox({
+                type: 'error',
+                title: '页面崩溃',
+                message: '应用页面发生崩溃，是否重新加载？',
+                buttons: ['重新加载', '退出'],
+                defaultId: 0,
+            })
+            .then(({response}) => {
+                if (response === 0) {
+                    mainWindow?.reload();
+                } else {
+                    app.quit();
+                }
+            });
+    });
+
+    // 处理外部链接
+    mainWindow.webContents.setWindowOpenHandler(({url}) => {
+        // Only allow http and https URLs
+        if (url.startsWith('http://') || url.startsWith('https://')) {
+            shell.openExternal(url);
+        }
+        return {action: 'deny'};
+    });
 }
 
 // 单实例锁定，防止多开
-const gotTheLock = app.requestSingleInstanceLock()
+const gotTheLock = app.requestSingleInstanceLock();
 
 if (!gotTheLock) {
-  app.quit()
+    app.quit();
 } else {
-  app.on('second-instance', () => {
-    // Someone tried to run a second instance, focus our window instead
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore()
-      mainWindow.focus()
-    }
-  })
+    app.on('second-instance', () => {
+        // Someone tried to run a second instance, focus our window instead
+        if (mainWindow) {
+            if (mainWindow.isMinimized()) mainWindow.restore();
+            mainWindow.focus();
+        }
+    });
 
-  // 应用就绪
-  app.whenReady().then(() => {
-    // 下发 CSP，避免渲染层被注入的脚本直接调用 IPC
-    session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
-      callback({
-        responseHeaders: {
-          ...details.responseHeaders,
-          'Content-Security-Policy': [CSP_DIRECTIVES],
-        },
-      })
-    })
+    // 应用就绪
+    app.whenReady().then(() => {
+        // 下发 CSP，避免渲染层被注入的脚本直接调用 IPC
+        session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+            callback({
+                responseHeaders: {
+                    ...details.responseHeaders,
+                    'Content-Security-Policy': [CSP_DIRECTIVES],
+                },
+            });
+        });
 
-    // 注册 IPC handlers（包括数据库初始化）
-    registerIPCHandlers()
+        // 注册 IPC handlers（包括数据库初始化）
+        registerIPCHandlers();
 
-    createWindow()
+        createWindow();
 
-    app.on('activate', () => {
-      if (BrowserWindow.getAllWindows().length === 0) {
-        createWindow()
-      }
-    })
-  })
+        app.on('activate', () => {
+            if (BrowserWindow.getAllWindows().length === 0) {
+                createWindow();
+            }
+        });
+    });
 }
 
 // 所有窗口关闭时退出应用（macOS 除外）
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit()
-  }
-})
+    if (process.platform !== 'darwin') {
+        app.quit();
+    }
+});
 
 // 应用退出时清理资源
 app.on('will-quit', () => {
-  cleanupDatabase()
-})
+    cleanupDatabase();
+});
 
 // IPC handlers 将在后续模块中注册
 export function getMainWindow() {
-  return mainWindow
+    return mainWindow;
 }
