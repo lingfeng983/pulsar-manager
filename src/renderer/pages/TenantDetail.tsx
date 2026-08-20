@@ -7,6 +7,8 @@ import {
   ArrowRightOutlined,
 } from '@ant-design/icons'
 import { useTabStore } from '../store/tabs'
+import { loadNamespaces } from '../hooks/resourceCache'
+import { shortName } from '../utils/format'
 
 interface TenantDetailProps {
   clusterId: string
@@ -32,18 +34,16 @@ const TenantDetail: React.FC<TenantDetailProps> = ({ clusterId, tenant }) => {
     setLoading(true)
     setError(null)
     try {
-      const [namespacesResponse, tenantResponse] = await Promise.all([
-        window.electronAPI.resources.getNamespaces(clusterId, tenant),
+      const [namespaceNames, tenantResponse] = await Promise.all([
+        loadNamespaces(clusterId, tenant),
         window.electronAPI.resources.getTenantInfo(clusterId, tenant),
       ])
 
-      if (namespacesResponse.success && namespacesResponse.data) {
-        const nsList: NamespaceInfo[] = namespacesResponse.data.map((ns: string) => ({
-          name: ns.split('/').pop() || ns,
-          replicationClusters: [],
-        }))
-        setNamespaces(nsList)
-      }
+      const nsList: NamespaceInfo[] = namespaceNames.map((ns: string) => ({
+        name: shortName(ns),
+        replicationClusters: [],
+      }))
+      setNamespaces(nsList)
 
       if (tenantResponse.success && tenantResponse.data) {
         setTenantInfo(tenantResponse.data)

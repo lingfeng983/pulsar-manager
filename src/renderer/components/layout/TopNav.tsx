@@ -15,6 +15,9 @@ import {
 import { useThemeStore } from '../../store/theme'
 import { useTabStore } from '../../store/tabs'
 import { useClusterStore } from '../../store/cluster'
+import { loadTenants, loadNamespaces, loadTopics } from '../../hooks/resourceCache'
+import { shortName } from '../../utils/format'
+import { downloadBlob } from '../../utils/download'
 
 interface SearchResult {
   key: string
@@ -90,61 +93,63 @@ const TopNav: React.FC = () => {
         }
       })
 
-      // 搜索租户、命名空间、Topic
+      // 搜索租户、命名空间、Topic（走共享缓存，避免每次输入都重新打全量请求）
       for (const cluster of clusters) {
-        if (cluster.status !== 'connected') continue
+        if (cluster.status !== 'connected') {
+          continue
+        }
 
         try {
-          const tenantsResponse = await window.electronAPI.resources.getTenants(cluster.id)
-          if (tenantsResponse.success && tenantsResponse.data) {
-            for (const tenant of tenantsResponse.data) {
-              if (tenant.name.toLowerCase().includes(keyword.toLowerCase())) {
-                results.push({
-                  key: `tenant-${cluster.id}-${tenant.name}`,
-                  label: `${cluster.name} / ${tenant.name}`,
-                  type: 'tenant',
-                  data: { clusterId: cluster.id, tenant: tenant.name },
-                })
-              }
+          const tenants = await loadTenants(cluster.id)
+          for (const tenant of tenants) {
+            if (tenant.name.toLowerCase().includes(keyword.toLowerCase())) {
+              results.push({
+                key: `tenant-${cluster.id}-${tenant.name}`,
+                label: `${cluster.name} / ${tenant.name}`,
+                type: 'tenant',
+                data: { clusterId: cluster.id, tenant: tenant.name },
+              })
+            }
 
-              // 搜索命名空间
-              try {
-                const namespacesResponse = await window.electronAPI.resources.getNamespaces(cluster.id, tenant.name)
-                if (namespacesResponse.success && namespacesResponse.data) {
-                  for (const namespace of namespacesResponse.data) {
-                    const nsName = namespace.split('/').pop() || namespace
-                    if (nsName.toLowerCase().includes(keyword.toLowerCase())) {
+            // 搜索命名空间
+            try {
+              const namespaces = await loadNamespaces(cluster.id, tenant.name)
+              for (const namespace of namespaces) {
+                const nsName = shortName(namespace)
+                if (nsName.toLowerCase().includes(keyword.toLowerCase())) {
+                  results.push({
+                    key: `namespace-${cluster.id}-${tenant.name}-${nsName}`,
+                    label: `${cluster.name} / ${tenant.name} / ${nsName}`,
+                    type: 'namespace',
+                    data: { clusterId: cluster.id, tenant: tenant.name, namespace: nsName },
+                  })
+                }
+
+                // 搜索 Topic
+                try {
+                  const topics = await loadTopics(cluster.id, tenant.name, nsName)
+                  for (const topic of topics) {
+                    const topicName = shortName(topic.name)
+                    if (topicName.toLowerCase().includes(keyword.toLowerCase())) {
                       results.push({
-                        key: `namespace-${cluster.id}-${tenant.name}-${nsName}`,
-                        label: `${cluster.name} / ${tenant.name} / ${nsName}`,
-                        type: 'namespace',
-                        data: { clusterId: cluster.id, tenant: tenant.name, namespace: nsName },
+                        key: `topic-${cluster.id}-${tenant.name}-${nsName}-${topicName}`,
+                        label: `${cluster.name} / ${tenant.name} / ${nsName} / ${topicName}`,
+                        type: 'topic',
+                        data: { clusterId: cluster.id, tenant: tenant.name, namespace: nsName, topic: topicName },
                       })
                     }
-
-                    // 搜索 Topic
-                    try {
-                      const topicsResponse = await window.electronAPI.resources.getTopics(cluster.id, tenant.name, nsName)
-                      if (topicsResponse.success && topicsResponse.data) {
-                        for (const topic of topicsResponse.data) {
-                          const topicName = topic.name.split('/').pop() || topic.name
-                          if (topicName.toLowerCase().includes(keyword.toLowerCase())) {
-                            results.push({
-                              key: `topic-${cluster.id}-${tenant.name}-${nsName}-${topicName}`,
-                              label: `${cluster.name} / ${tenant.name} / ${nsName} / ${topicName}`,
-                              type: 'topic',
-                              data: { clusterId: cluster.id, tenant: tenant.name, namespace: nsName, topic: topicName },
-                            })
-                          }
-                        }
-                      }
-                    } catch {}
                   }
+                } catch {
+                  // 单个命名空间取 Topic 失败不影响其余结果
                 }
-              } catch {}
+              }
+            } catch {
+              // 单个租户取命名空间失败不影响其余结果
             }
           }
-        } catch {}
+        } catch {
+          // 单个集群搜索失败不影响其余集群
+        }
       }
 
       setSearchResults(results.slice(0, 20))
@@ -240,15 +245,10 @@ const TopNav: React.FC = () => {
     try {
       const response = await window.electronAPI.logs.getRecent(100)
       if (response.success && response.data) {
-        const blob = new Blob([JSON.stringify(response.data, null, 2)], { type: 'application/json' })
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = `logs_${new Date().toISOString().slice(0, 10)}.json`
-        document.body.appendChild(a)
-        a.click()
-        document.body.removeChild(a)
-        URL.revokeObjectURL(url)
+        downloadBlob(
+          JSON.stringify(response.data, null, 2),
+          `logs_${new Date().toISOString().slice(0, 10)}.json`,
+        )
         message.success('日志导出成功')
       } else {
         message.error(response.error || '导出失败')

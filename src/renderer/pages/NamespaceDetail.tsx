@@ -7,6 +7,8 @@ import {
   ArrowRightOutlined,
 } from '@ant-design/icons'
 import { useTabStore } from '../store/tabs'
+import { loadTopics } from '../hooks/resourceCache'
+import { shortName } from '../utils/format'
 
 interface NamespaceDetailProps {
   clusterId: string
@@ -34,19 +36,17 @@ const NamespaceDetail: React.FC<NamespaceDetailProps> = ({ clusterId, tenant, na
     setLoading(true)
     setError(null)
     try {
-      const [topicsResponse, nsResponse] = await Promise.all([
-        window.electronAPI.resources.getTopics(clusterId, tenant, namespace),
+      const [topicItems, nsResponse] = await Promise.all([
+        loadTopics(clusterId, tenant, namespace),
         window.electronAPI.resources.getNamespaceInfo(clusterId, tenant, namespace),
       ])
 
-      if (topicsResponse.success && topicsResponse.data) {
-        const topicList: TopicInfo[] = topicsResponse.data.map((t: any) => ({
-          name: t.name.split('/').pop() || t.name,
-          persistent: t.persistent,
-          partitionIndex: t.partitionIndex,
-        }))
-        setTopics(topicList)
-      }
+      const topicList: TopicInfo[] = topicItems.map((t) => ({
+        name: shortName(t.name),
+        persistent: t.persistent,
+        partitionIndex: t.partitionIndex,
+      }))
+      setTopics(topicList)
 
       if (nsResponse.success && nsResponse.data) {
         setNamespaceInfo(nsResponse.data)

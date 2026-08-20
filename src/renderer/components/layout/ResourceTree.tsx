@@ -15,6 +15,8 @@ import {
 } from '@ant-design/icons'
 import { useClusterStore } from '../../store/cluster'
 import { useTabStore } from '../../store/tabs'
+import { loadTenants, loadNamespaces, loadTopics, invalidateResourceCache } from '../../hooks/resourceCache'
+import { shortName } from '../../utils/format'
 import type { Tenant, Topic } from '../../types'
 
 interface ResourceTreeNode extends DataNode {
@@ -80,55 +82,49 @@ const ResourceTree: React.FC = () => {
 
       try {
         if (type === 'cluster' && clusterId) {
-          const response = await window.electronAPI.resources.getTenants(clusterId)
-          if (response.success && response.data) {
-            return response.data.map((t: Tenant) => ({
-              title: (
-                <Space>
-                  <FolderOutlined />
-                  <span>{t.name}</span>
-                </Space>
-              ),
-              key: `tenant-${clusterId}-${t.name}`,
-              dataRef: { type: 'tenant' as const, clusterId, tenant: t.name },
-              children: [],
-              isLeaf: false,
-            }))
-          }
+          const tenants = await loadTenants(clusterId)
+          return tenants.map((t: Tenant) => ({
+            title: (
+              <Space>
+                <FolderOutlined />
+                <span>{t.name}</span>
+              </Space>
+            ),
+            key: `tenant-${clusterId}-${t.name}`,
+            dataRef: { type: 'tenant' as const, clusterId, tenant: t.name },
+            children: [],
+            isLeaf: false,
+          }))
         } else if (type === 'tenant' && clusterId && tenant) {
-          const response = await window.electronAPI.resources.getNamespaces(clusterId, tenant)
-          if (response.success && response.data) {
-            return response.data.map((ns: string) => ({
+          const namespaces = await loadNamespaces(clusterId, tenant)
+          return namespaces.map((ns: string) => ({
+            title: (
+              <Space>
+                <DatabaseOutlined />
+                <span>{ns}</span>
+              </Space>
+            ),
+            key: `ns-${clusterId}-${tenant}-${ns}`,
+            dataRef: { type: 'namespace' as const, clusterId, tenant, namespace: ns },
+            children: [],
+            isLeaf: false,
+          }))
+        } else if (type === 'namespace' && clusterId && tenant && namespace) {
+          const topics = await loadTopics(clusterId, tenant, namespace)
+          return topics.map((topic: Topic) => {
+            const topicName = shortName(topic.name)
+            return {
               title: (
                 <Space>
-                  <DatabaseOutlined />
-                  <span>{ns}</span>
+                  <TableOutlined />
+                  <span style={{ fontSize: 12 }}>{topicName}</span>
                 </Space>
               ),
-              key: `ns-${clusterId}-${tenant}-${ns}`,
-              dataRef: { type: 'namespace' as const, clusterId, tenant, namespace: ns },
-              children: [],
-              isLeaf: false,
-            }))
-          }
-        } else if (type === 'namespace' && clusterId && tenant && namespace) {
-          const response = await window.electronAPI.resources.getTopics(clusterId, tenant, namespace)
-          if (response.success && response.data) {
-            return response.data.map((topic: Topic) => {
-              const topicName = topic.name.split('/').pop() || topic.name
-              return {
-                title: (
-                  <Space>
-                    <TableOutlined />
-                    <span style={{ fontSize: 12 }}>{topicName}</span>
-                  </Space>
-                ),
-                key: `topic-${clusterId}-${tenant}-${namespace}-${topicName}`,
-                dataRef: { type: 'topic' as const, clusterId, tenant, namespace, topic: topicName, persistent: topic.persistent },
-                isLeaf: true,
-              }
-            })
-          }
+              key: `topic-${clusterId}-${tenant}-${namespace}-${topicName}`,
+              dataRef: { type: 'topic' as const, clusterId, tenant, namespace, topic: topicName, persistent: topic.persistent },
+              isLeaf: true,
+            }
+          })
         }
       } catch (error) {
         console.error('Failed to load tree node data:', error)
@@ -376,6 +372,8 @@ const ResourceTree: React.FC = () => {
   // 刷新整个树（重置状态）
   const handleRefresh = useCallback(async () => {
     setLoading(true)
+    // 强制刷新时清空资源缓存，确保拉取到最新的租户/命名空间/Topic
+    invalidateResourceCache()
     const previousExpanded = [...expandedKeys]
     // Don't collapse - just refresh data
     try {

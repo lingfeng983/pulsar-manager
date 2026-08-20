@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import {
   Card,
   Table,
@@ -27,6 +27,7 @@ import {
 } from '@ant-design/icons'
 import type { Message } from '../types'
 import dayjs from 'dayjs'
+import { downloadBlob } from '../utils/download'
 
 const { TextArea } = Input
 
@@ -38,6 +39,16 @@ interface MessageBrowserProps {
 }
 
 const MessageBrowser: React.FC<MessageBrowserProps> = ({ clusterId, tenant, namespace, topic }) => {
+  const mountedRef = useRef(true)
+  const messagesRequestRef = useRef(0)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+
   const [messages, setMessages] = useState<Message[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -77,7 +88,14 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({ clusterId, tenant, name
 
   // 获取消息
   const fetchMessages = useCallback(async () => {
-    if (!subscription) return
+    if (!subscription) {
+      return
+    }
+
+    // 3 秒轮询下单次 peek 可能超过一个周期，请求会叠加。用自增请求号确保
+    // 只有最后一次发起的请求能写回 state，避免乱序响应让列表回退。
+    const requestId = ++messagesRequestRef.current
+    const isCurrent = () => mountedRef.current && messagesRequestRef.current === requestId
 
     setLoading(true)
     setError(null)
@@ -90,6 +108,9 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({ clusterId, tenant, name
         subscription,
         count: Math.min(count, MAX_DISPLAY_COUNT),
       })
+      if (!isCurrent()) {
+        return
+      }
       if (response.success && response.data) {
         setMessages(response.data.slice(0, MAX_DISPLAY_COUNT))
         setHasLoaded(true)
@@ -97,9 +118,13 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({ clusterId, tenant, name
         setError(response.error || 'Failed to fetch messages')
       }
     } catch (error) {
-      setError(String(error))
+      if (isCurrent()) {
+        setError(String(error))
+      }
     } finally {
-      setLoading(false)
+      if (isCurrent()) {
+        setLoading(false)
+      }
     }
   }, [clusterId, tenant, namespace, topic, subscription, count])
 
@@ -168,15 +193,11 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({ clusterId, tenant, name
         extension = 'csv'
       }
 
-      const blob = new Blob([content], { type: mimeType })
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `messages_${topic}_${dayjs().format('YYYYMMDD_HHmmss')}.${extension}`
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      URL.revokeObjectURL(url)
+      downloadBlob(
+        content,
+        `messages_${topic}_${dayjs().format('YYYYMMDD_HHmmss')}.${extension}`,
+        mimeType,
+      )
 
       message.success(`成功导出 ${messages.length} 条消息 (${extension.toUpperCase()})`)
     } catch (error) {
