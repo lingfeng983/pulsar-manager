@@ -2,17 +2,10 @@ import { AxiosInstance } from 'axios'
 import { Semaphore, withRetry, withSemaphore, seg } from './http-client'
 import { AGGREGATION_LIMITS } from '../config/constants'
 import type { BrokerStats, TopicStats } from './http-client'
+import type { TopologyLimits } from '../../shared/types'
 import type { ResourceAPI } from './resource-api'
 
 // ========== Metrics & Topology API ==========
-
-// 拓扑聚合规模上限：由调用方按场景收紧（首页概览只需少量节点），只能比全局上限更小。
-export interface TopologyLimits {
-  maxTenants?: number
-  maxNamespacesPerTenant?: number
-  maxTopicsPerNamespace?: number
-  maxTopics?: number
-}
 
 // 将调用方传入的上限收敛到 [1, fallback] 区间；未传或非法时用全局上限。
 function clampLimit(value: number | undefined, fallback: number): number {

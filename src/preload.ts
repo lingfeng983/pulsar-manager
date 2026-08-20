@@ -1,14 +1,37 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type {
+  APIResponse,
+  AggregatedStats,
+  BrokerInfo,
+  ClusterConfig,
+  ClusterConfigDraft,
+  ClusterTopology,
+  Message,
+  MessageBrowseParams,
+  MessageSendParams,
+  MetricData,
+  NamespaceStats,
+  OperationLog,
+  SSHConfig,
+  SSHTunnel,
+  Tenant,
+  TimeRange,
+  Topic,
+  TopicStats,
+  TopologyLimits,
+} from './shared/types'
+
 
 // 暴露安全的 API 给渲染进程
 contextBridge.exposeInMainWorld('electronAPI', {
   // 集群管理
   cluster: {
     list: () => ipcRenderer.invoke('cluster:list'),
-    add: (config: ClusterConfig) => ipcRenderer.invoke('cluster:add', config),
-    update: (id: string, config: ClusterConfig) => ipcRenderer.invoke('cluster:update', id, config),
+    add: (config: ClusterConfigDraft) => ipcRenderer.invoke('cluster:add', config),
+    update: (id: string, config: ClusterConfigDraft) => ipcRenderer.invoke('cluster:update', id, config),
     delete: (id: string) => ipcRenderer.invoke('cluster:delete', id),
-    testConnection: (config: ClusterConfig) => ipcRenderer.invoke('cluster:testConnection', config),
+    testConnection: (config: ClusterConfigDraft) => ipcRenderer.invoke('cluster:testConnection', config),
+
   },
 
   // 资源管理
@@ -97,72 +120,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 })
 
-// 类型定义
-interface ClusterConfig {
-  id?: string
-  name: string
-  serviceUrl: string
-  webServiceUrl?: string
-  authPlugin?: string
-  authParams?: string
-  tlsEnabled?: boolean
-  tlsTrustCerts?: string
-  useSshTunnel?: boolean
-  sshConfigId?: string
-  adminApiTimeout?: number
-  status?: 'connected' | 'disconnected' | 'warning'
-  version?: string
-  createdAt?: string
-  updatedAt?: string
-}
-
-interface SSHConfig {
-  host: string
-  port?: number
-  username: string
-  authType: 'password' | 'privateKey'
-  password?: string
-  privateKey?: string
-  passphrase?: string
-  remoteHost?: string
-  remoteAdminPort?: number
-  remoteBrokerPort?: number
-}
-
-interface MessageBrowseParams {
-  clusterId: string
-  tenant: string
-  namespace: string
-  topic: string
-  subscription: string
-  count?: number
-}
-
-interface MessageSendParams {
-  clusterId: string
-  tenant: string
-  namespace: string
-  topic: string
-  message: string
-  properties?: Record<string, string>
-}
-
-interface TimeRange {
-  start: number
-  end: number
-  step?: string
-}
-
 // 全局类型声明
+
 declare global {
   interface Window {
     electronAPI: {
       cluster: {
         list: () => Promise<APIResponse<ClusterConfig[]>>
-        add: (config: ClusterConfig) => Promise<APIResponse<{ id: string }>>
-        update: (id: string, config: ClusterConfig) => Promise<APIResponse<void>>
+        add: (config: ClusterConfigDraft) => Promise<APIResponse<{ id: string }>>
+        update: (id: string, config: ClusterConfigDraft) => Promise<APIResponse<void>>
         delete: (id: string) => Promise<APIResponse<void>>
-        testConnection: (config: ClusterConfig) => Promise<APIResponse<{ connected: boolean; version?: string }>>
+        testConnection: (config: ClusterConfigDraft) => Promise<APIResponse<{ connected: boolean; version?: string }>>
+
       }
       resources: {
         getTenants: (clusterId: string) => Promise<APIResponse<Tenant[]>>
@@ -217,157 +186,5 @@ declare global {
   }
 }
 
-interface APIResponse<T> {
-  success: boolean
-  data?: T
-  error?: string
-}
-
-interface Tenant {
-  name: string
-  adminRoles: string[]
-  allowedClusters: string[]
-}
-
-interface Topic {
-  name: string
-  persistent: boolean
-  partitionIndex: number
-  topicUri: string
-}
-
-interface TopicStats {
-  name: string
-  totalStorageSize: number
-  backlogSize: number
-  msgRateIn: number
-  msgRateOut: number
-  subscriptions: Record<string, SubscriptionStats>
-  producers: ProducerStats[]
-  consumers: ConsumerStats[]
-}
-
-interface SubscriptionStats {
-  name: string
-  msgBacklog: number
-  msgRateExpired: number
-  consumerCount: number
-  type: string
-}
-
-interface ProducerStats {
-  producerId: number
-  producerName: string
-  connected: boolean
-  msgRateOut: number
-}
-
-interface ConsumerStats {
-  consumerId: number
-  consumerName: string
-  connected: boolean
-  msgRateOut: number
-  msgBacklog: number
-}
-
-interface Message {
-  messageId: string
-  producerName: string
-  sequenceId: number
-  publishTime: number
-  properties: Record<string, string>
-  data: string
-}
-
-interface MetricData {
-  timestamp: number
-  value: number
-}
-
-interface SSHTunnel {
-  id: string
-  host: string
-  port: number
-  username: string
-  authType: string
-  status: string
-  localAdminPort: number
-  localBrokerPort: number
-}
-
-interface OperationLog {
-  id: number
-  cluster_id: string
-  action: string
-  resource_type: string
-  resource_id: string
-  resource_name: string
-  details: string
-  result: string
-  error_message: string
-  created_at: string
-}
-
-// 聚合统计
-interface AggregatedStats {
-  totalTopics: number
-  totalPartitions: number
-  totalSubscriptions: number
-  totalProducers: number
-  totalConsumers: number
-  totalMsgRateIn: number
-  totalMsgRateOut: number
-  totalThroughputIn: number
-  totalThroughputOut: number
-  totalBacklog: number
-}
-
-// Broker 信息
-interface BrokerInfo {
-  activeBrokers: string[]
-  allBrokers: string[]
-}
-
-// 命名空间统计
-interface NamespaceStats {
-  topicCount: number
-  subscriptionCount: number
-  producerCount: number
-  consumerCount: number
-  totalMsgRateIn: number
-  totalMsgRateOut: number
-  totalThroughputIn: number
-  totalThroughputOut: number
-  totalBacklog: number
-}
-
-// 集群拓扑
-interface TopologyLimits {
-  maxTenants?: number
-  maxNamespacesPerTenant?: number
-  maxTopicsPerNamespace?: number
-  maxTopics?: number
-}
-
-interface ClusterTopology {
-
-  brokers: Array<{
-    name: string
-    topics: string[]
-    stats?: any
-  }>
-  topics: Array<{
-    name: string
-    tenant: string
-    namespace: string
-    partitions: number
-    subscriptions: string[]
-    producers: number
-    consumers: number
-    msgRateIn: number
-    msgRateOut: number
-    backlogSize: number
-  }>
-}
-
 export {}
+

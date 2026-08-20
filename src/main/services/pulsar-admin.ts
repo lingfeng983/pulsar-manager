@@ -8,7 +8,8 @@ import {
 import { REQUEST_CONFIG } from '../config/constants'
 import { ResourceAPI } from './resource-api'
 import { MetricsAPI } from './metrics-api'
-import type { TopologyLimits } from './metrics-api'
+import type { TopologyLimits } from '../../shared/types'
+
 
 
 // Re-export all types and infrastructure from sub-modules

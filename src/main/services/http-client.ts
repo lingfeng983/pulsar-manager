@@ -5,88 +5,24 @@ import { REQUEST_CONFIG } from '../config/constants'
 
 // ========== Type Definitions ==========
 
+// 跨进程共享的领域类型统一定义在 src/shared/types，这里转出以保持
+// `import { TopicStats } from './http-client'` 这类既有引用可用。
+export type {
+  Tenant,
+  Namespace,
+  Topic,
+  TopicStats,
+  SubscriptionStats,
+  ProducerStats,
+  ConsumerStats,
+  Message,
+} from '../../shared/types'
+
 export interface ClusterInfo {
   name: string
   serviceUrl: string
   brokerServiceUrl?: string
   version?: string
-}
-
-export interface Tenant {
-  name: string
-  adminRoles: string[]
-  allowedClusters: string[]
-}
-
-export interface Namespace {
-  name: string
-  tenant: string
-  clusters: string[]
-  replicationClusters: string[]
-}
-
-export interface Topic {
-  name: string
-  persistent: boolean
-  partitionIndex: number  // -1 表示非分区 Topic
-  topicUri: string
-}
-
-export interface TopicStats {
-  name: string
-  persistent: boolean
-  partitionIndex: number
-  // 存储相关
-  totalStorageSize: number
-  storageSize: number
-  backlogSize: number
-  // 消息统计
-  msgRateIn: number
-  msgRateOut: number
-  msgThroughputIn: number
-  msgThroughputOut: number
-  // 订阅信息
-  subscriptions: Record<string, SubscriptionStats>
-  producers: ProducerStats[]
-  consumers: ConsumerStats[]
-  // 非分区 Topic 的分区数
-  numPartitions: number
-}
-
-export interface SubscriptionStats {
-  name: string
-  msgBacklog: number
-  msgRateExpired: number
-  consumerCount: number
-  blockedSubscriptionOnUnackedMsgs: boolean
-  lastExpireTimestamp: number
-  lastConsumedFlowTimestamp: number
-  msgConsumerBacklog: number
-  unackedMessages: number
-  type: string  // exclusive, shared, failover, key_shared
-}
-
-export interface ProducerStats {
-  producerId: number
-  producerName: string
-  connected: boolean
-  msgRateOut: number
-  msgThroughputOut: number
-  avgMsgSize: number
-  clientVersion: string
-}
-
-export interface ConsumerStats {
-  consumerId: number
-  consumerName: string
-  connected: boolean
-  msgRateOut: number
-  msgRateRedeliver: number
-  msgThroughputOut: number
-  msgBacklog: number
-  unackedMessages: number
-  blockedConsumerOnUnackedMsgs: boolean
-  clientVersion: string
 }
 
 export interface BrokerStats {
@@ -117,16 +53,6 @@ export interface BrokerStats {
     topicsCount: number
     partitionsCount: number
   }
-}
-
-export interface Message {
-  messageId: string
-  producerName: string
-  sequenceId: number
-  publishTime: number
-  properties: Record<string, string>
-  data: string  // Base64 encoded
-  topicName: string
 }
 
 export interface TopicConfig {
