@@ -1,74 +1,43 @@
 import {
-  ipcMain,
   insertOperationLog,
   MessageBrowseSchema,
   MessageSendSchema,
-  ensureDbInitialized,
-  formatError,
-  getAdminClient,
+  registerClientHandler,
 } from './_shared'
 
 export function registerMessageHandlers() {
-  ipcMain.handle('messages:browse', async (_, params) => {
-    try {
-      const validated = MessageBrowseSchema.safeParse(params)
-      if (!validated.success) {
-        console.warn('[IPC] messages:browse validation failed:', validated.error)
-        return { success: false, error: 'Invalid input parameters' }
-      }
+  registerClientHandler(
+    'messages:browse',
+    MessageBrowseSchema,
+    ([params]) => params,
+    (client, { tenant, namespace, topic, subscription, count }) =>
+      client.peekMessages(tenant, namespace, topic, subscription, count),
+  )
 
-      const { clusterId, tenant, namespace, topic, subscription, count } = validated.data
-
-      ensureDbInitialized()
-      const client = getAdminClient(clusterId)
-      if (!client) {
-        return { success: false, error: 'Cluster not found' }
-      }
-
-      const messages = await client.peekMessages(tenant, namespace, topic, subscription, count)
-
-      return { success: true, data: messages }
-    } catch (error) {
-      console.error('[IPC] messages:browse error:', error)
-      return { success: false, error: formatError(error) }
-    }
-  })
-
-  ipcMain.handle('messages:send', async (_, params) => {
-    try {
-      const validated = MessageSendSchema.safeParse(params)
-      if (!validated.success) {
-        console.warn('[IPC] messages:send validation failed:', validated.error)
-        return { success: false, error: 'Invalid input parameters' }
-      }
-
-      const { clusterId, tenant, namespace, topic, message, properties } = validated.data
-
-      ensureDbInitialized()
-      const client = getAdminClient(clusterId)
-      if (!client) {
-        return { success: false, error: 'Cluster not found' }
-      }
-
+  registerClientHandler(
+    'messages:send',
+    MessageSendSchema,
+    ([params]) => params,
+    async (client, { clusterId, tenant, namespace, topic, message, properties }) => {
       const result = await client.sendMessage(tenant, namespace, topic, message, properties)
 
-      if (result.success) {
-        // 记录操作日志
-        insertOperationLog({
-          cluster_id: clusterId,
-          action: 'send',
-          resource_type: 'message',
-          resource_id: `${tenant}/${namespace}/${topic}`,
-          resource_name: topic,
-          details: `Sent message to ${tenant}/${namespace}/${topic}`,
-          result: 'success',
-        })
+      // Producer API 未启用等情况会返回 success: false，此时不应记为成功日志，
+      // 也不应让上层以为消息已发出
+      if (!result.success) {
+        throw new Error(result.error || '发送失败')
       }
 
-      return result
-    } catch (error) {
-      console.error('[IPC] messages:send error:', error)
-      return { success: false, error: formatError(error) }
-    }
-  })
+      insertOperationLog({
+        cluster_id: clusterId,
+        action: 'send',
+        resource_type: 'message',
+        resource_id: `${tenant}/${namespace}/${topic}`,
+        resource_name: topic,
+        details: `Sent message to ${tenant}/${namespace}/${topic}`,
+        result: 'success',
+      })
+
+      return { messageId: result.messageId }
+    },
+  )
 }

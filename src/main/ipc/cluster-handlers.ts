@@ -7,6 +7,7 @@ import {
   updateCluster,
   deleteCluster,
   insertOperationLog,
+  runInTransaction,
   PulsarAdminClient,
   clientManager,
   ClusterConfigSchema,
@@ -17,6 +18,9 @@ import {
   normalizeCluster,
   formatError,
 } from './_shared'
+import { createLogger } from '../utils/logger'
+
+const log = createLogger('IPC')
 
 export function registerClusterHandlers() {
   ipcMain.handle('cluster:list', async () => {
@@ -28,7 +32,7 @@ export function registerClusterHandlers() {
         data: clusters.map(normalizeCluster).map(decryptSensitiveFields),
       }
     } catch (error) {
-      console.error('[IPC] cluster:list error:', error)
+      log.error('cluster:list failed', formatError(error))
       return { success: false, error: formatError(error) }
     }
   })
@@ -41,29 +45,31 @@ export function registerClusterHandlers() {
       const id = uuidv4()
       const encrypted = encryptSensitiveFields(validated)
 
-      insertCluster({
-        id,
-        name: encrypted.name,
-        service_url: encrypted.serviceUrl,
-        web_service_url: encrypted.webServiceUrl,
-        auth_plugin: encrypted.authPlugin,
-        auth_params: encrypted.authParams,
-        tls_enabled: encrypted.tlsEnabled ? 1 : 0,
-        tls_trust_certs: encrypted.tlsTrustCerts,
-        use_ssh_tunnel: encrypted.useSshTunnel ? 1 : 0,
-        ssh_config_id: encrypted.sshConfigId,
-        admin_api_timeout: encrypted.adminApiTimeout || 5000,
-        status: 'disconnected',
-      })
+      // 集群记录与操作日志必须一起提交，避免出现只写了一半的状态
+      runInTransaction(() => {
+        insertCluster({
+          id,
+          name: encrypted.name,
+          service_url: encrypted.serviceUrl,
+          web_service_url: encrypted.webServiceUrl,
+          auth_plugin: encrypted.authPlugin,
+          auth_params: encrypted.authParams,
+          tls_enabled: encrypted.tlsEnabled ? 1 : 0,
+          tls_trust_certs: encrypted.tlsTrustCerts,
+          use_ssh_tunnel: encrypted.useSshTunnel ? 1 : 0,
+          ssh_config_id: encrypted.sshConfigId,
+          admin_api_timeout: encrypted.adminApiTimeout || 5000,
+          status: 'disconnected',
+        })
 
-      // 记录操作日志
-      insertOperationLog({
-        cluster_id: id,
-        action: 'create',
-        resource_type: 'cluster',
-        resource_id: id,
-        resource_name: validated.name,
-        result: 'success',
+        insertOperationLog({
+          cluster_id: id,
+          action: 'create',
+          resource_type: 'cluster',
+          resource_id: id,
+          resource_name: validated.name,
+          result: 'success',
+        })
       })
 
       return {
@@ -71,7 +77,7 @@ export function registerClusterHandlers() {
         data: { id, ...validated },
       }
     } catch (error) {
-      console.error('[IPC] cluster:add error:', error)
+      log.error('cluster:add failed', formatError(error))
       return { success: false, error: formatError(error) }
     }
   })
@@ -82,32 +88,36 @@ export function registerClusterHandlers() {
       const validated = ClusterConfigSchema.parse(config)
       const encrypted = encryptSensitiveFields(validated)
 
-      updateCluster(id, {
-        name: encrypted.name,
-        service_url: encrypted.serviceUrl,
-        web_service_url: encrypted.webServiceUrl,
-        auth_plugin: encrypted.authPlugin,
-        auth_params: encrypted.authParams,
-        tls_enabled: encrypted.tlsEnabled ? 1 : 0,
-        tls_trust_certs: encrypted.tlsTrustCerts,
-        use_ssh_tunnel: encrypted.useSshTunnel ? 1 : 0,
-        ssh_config_id: encrypted.sshConfigId,
-        admin_api_timeout: encrypted.adminApiTimeout || 5000,
+      runInTransaction(() => {
+        updateCluster(id, {
+          name: encrypted.name,
+          service_url: encrypted.serviceUrl,
+          web_service_url: encrypted.webServiceUrl,
+          auth_plugin: encrypted.authPlugin,
+          auth_params: encrypted.authParams,
+          tls_enabled: encrypted.tlsEnabled ? 1 : 0,
+          tls_trust_certs: encrypted.tlsTrustCerts,
+          use_ssh_tunnel: encrypted.useSshTunnel ? 1 : 0,
+          ssh_config_id: encrypted.sshConfigId,
+          admin_api_timeout: encrypted.adminApiTimeout || 5000,
+        })
+
+        insertOperationLog({
+          cluster_id: id,
+          action: 'update',
+          resource_type: 'cluster',
+          resource_id: id,
+          resource_name: validated.name,
+          result: 'success',
+        })
       })
 
-      // 记录操作日志
-      insertOperationLog({
-        cluster_id: id,
-        action: 'update',
-        resource_type: 'cluster',
-        resource_id: id,
-        resource_name: validated.name,
-        result: 'success',
-      })
+      // 必须丢弃缓存的客户端，否则后续请求仍使用旧的地址、凭据和超时设置
+      clientManager.removeClient(id)
 
       return { success: true, data: { id, ...validated } }
     } catch (error) {
-      console.error('[IPC] cluster:update error:', error)
+      log.error('cluster:update failed', formatError(error))
       return { success: false, error: formatError(error) }
     }
   })
@@ -117,26 +127,27 @@ export function registerClusterHandlers() {
       ensureDbInitialized()
       const cluster = getClusterById(id)
 
-      // 先记录操作日志（在删除之前）
-      if (cluster) {
-        insertOperationLog({
-          cluster_id: id,
-          action: 'delete',
-          resource_type: 'cluster',
-          resource_id: id,
-          resource_name: cluster.name,
-          result: 'success',
-        })
-      }
+      runInTransaction(() => {
+        deleteCluster(id)
 
-      deleteCluster(id)
+        if (cluster) {
+          insertOperationLog({
+            cluster_id: null,
+            action: 'delete',
+            resource_type: 'cluster',
+            resource_id: id,
+            resource_name: cluster.name,
+            result: 'success',
+          })
+        }
+      })
 
       // 清除客户端缓存
       clientManager.removeClient(id)
 
       return { success: true }
     } catch (error) {
-      console.error('[IPC] cluster:delete error:', error)
+      log.error('cluster:delete failed', formatError(error))
       return { success: false, error: formatError(error) }
     }
   })
@@ -172,7 +183,7 @@ export function registerClusterHandlers() {
         data: { connected: result.connected, version: result.version },
       }
     } catch (error) {
-      console.error('[IPC] cluster:testConnection error:', error)
+      log.error('cluster:testConnection failed', formatError(error))
       return { success: false, error: formatError(error) }
     }
   })

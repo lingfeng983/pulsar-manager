@@ -81,6 +81,15 @@ export function closeDatabase(): void {
   }
 }
 
+/**
+ * 在单个事务中执行多次写入。业务写入与操作日志必须一起成功或一起回滚，
+ * 否则会留下「集群已写但无日志」或「日志已记但删除失败」的不一致状态。
+ */
+export function runInTransaction<T>(fn: () => T): T {
+  const database = getDatabase()
+  return database.transaction(fn)()
+}
+
 // 集群相关操作
 export interface ClusterRecord {
   id: string
@@ -312,11 +321,11 @@ export function insertOperationLog(log: Omit<OperationLogRecord, 'id' | 'created
       @details, @result, @error_message, @created_at
     )
   `)
-  stmt.run({ 
-    ...log, 
-    details: log.details || null, 
-    error_message: log.error_message || null, 
-    created_at: now 
+  stmt.run({
+    ...log,
+    details: log.details || null,
+    error_message: log.error_message || null,
+    created_at: now
   })
 }
 

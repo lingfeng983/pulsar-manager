@@ -17,6 +17,7 @@ import {
   getSetting,
   setSetting,
   insertOperationLog,
+  runInTransaction,
 } from '../database/sqlite'
 import { encrypt, decrypt } from '../services/encryption'
 import { PulsarAdminClient, clientManager } from '../services/pulsar-admin'
@@ -43,6 +44,7 @@ export {
   getSetting,
   setSetting,
   insertOperationLog,
+  runInTransaction,
   encrypt,
   decrypt,
   PulsarAdminClient,

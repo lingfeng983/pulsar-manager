@@ -11,6 +11,9 @@ import {
   ensureDbInitialized,
   formatError,
 } from './_shared'
+import { createLogger } from '../utils/logger'
+
+const log = createLogger('IPC')
 
 export function registerSystemHandlers() {
   // ========== SSH 隧道 ==========
@@ -36,19 +39,20 @@ export function registerSystemHandlers() {
         })),
       }
     } catch (error) {
-      console.error('[IPC] ssh:list error:', error)
+      log.error('ssh:list failed', formatError(error))
       return { success: false, error: formatError(error) }
     }
   })
 
   ipcMain.handle('ssh:connect', async (_, config) => {
     try {
+      ensureDbInitialized()
       const validated = SSHConfigSchema.parse(config)
 
-      // TODO: 实现实际的 SSH 隧道连接
+      // 端口转发尚未实现。此前这里会随机编造一个本地端口并以
+      // status='connected' 落库，让上层误以为隧道可用。现在改为：
+      // 保存配置（端口留 0 表示未分配、状态为未连接），并明确返回失败。
       const tunnelId = uuidv4()
-      const localPort = Math.floor(Math.random() * 10000) + 20000
-
       insertSSHTunnel({
         id: tunnelId,
         host: validated.host,
@@ -58,20 +62,21 @@ export function registerSystemHandlers() {
         password: validated.password ? encrypt(validated.password) : undefined,
         private_key: validated.privateKey ? encrypt(validated.privateKey) : undefined,
         passphrase: validated.passphrase ? encrypt(validated.passphrase) : undefined,
-        local_admin_port: localPort,
-        local_broker_port: localPort + 1,
+        local_admin_port: 0,
+        local_broker_port: 0,
         remote_host: validated.remoteHost,
         remote_admin_port: validated.remoteAdminPort || 8080,
         remote_broker_port: validated.remoteBrokerPort || 6650,
-        status: 'connected',
+        status: 'disconnected',
       })
 
       return {
-        success: true,
-        data: { tunnelId, localPort, localBrokerPort: localPort + 1 },
+        success: false,
+        error: 'SSH 隧道转发尚未实现，配置已保存但隧道未建立',
+        data: { tunnelId },
       }
     } catch (error) {
-      console.error('[IPC] ssh:connect error:', error)
+      log.error('ssh:connect failed', formatError(error))
       return { success: false, error: formatError(error) }
     }
   })
@@ -82,7 +87,7 @@ export function registerSystemHandlers() {
       updateSSHTunnel(tunnelId, { status: 'disconnected' })
       return { success: true }
     } catch (error) {
-      console.error('[IPC] ssh:disconnect error:', error)
+      log.error('ssh:disconnect failed', formatError(error))
       return { success: false, error: formatError(error) }
     }
   })
@@ -95,7 +100,7 @@ export function registerSystemHandlers() {
       setSetting('theme', theme)
       return { success: true }
     } catch (error) {
-      console.error('[IPC] theme:set error:', error)
+      log.error('theme:set failed', formatError(error))
       return { success: false, error: formatError(error) }
     }
   })
@@ -106,7 +111,7 @@ export function registerSystemHandlers() {
       const theme = getSetting('theme') || 'light'
       return { success: true, data: theme }
     } catch (error) {
-      console.error('[IPC] theme:get error:', error)
+      log.error('theme:get failed, falling back to light', formatError(error))
       return { success: true, data: 'light' }
     }
   })
@@ -119,7 +124,7 @@ export function registerSystemHandlers() {
       const value = getSetting(key)
       return { success: true, data: value }
     } catch (error) {
-      console.error('[IPC] settings:get error:', error)
+      log.error('settings:get failed', formatError(error))
       return { success: false, error: formatError(error) }
     }
   })
@@ -130,7 +135,7 @@ export function registerSystemHandlers() {
       setSetting(key, value)
       return { success: true }
     } catch (error) {
-      console.error('[IPC] settings:set error:', error)
+      log.error('settings:set failed', formatError(error))
       return { success: false, error: formatError(error) }
     }
   })
@@ -144,7 +149,7 @@ export function registerSystemHandlers() {
       const logs = getRecentOperationLogs(limit || 50)
       return { success: true, data: logs }
     } catch (error) {
-      console.error('[IPC] logs:getRecent error:', error)
+      log.error('logs:getRecent failed', formatError(error))
       return { success: false, error: formatError(error) }
     }
   })
@@ -164,7 +169,7 @@ export function registerSystemHandlers() {
         },
       }
     } catch (error) {
-      console.error('[IPC] system:checkUpdate error:', error)
+      log.error('system:checkUpdate failed', formatError(error))
       return { success: false, error: formatError(error) }
     }
   })

@@ -1,131 +1,72 @@
 import {
-  ipcMain,
-  ensureDbInitialized,
-  formatError,
-  getAdminClient,
-  validateClusterId,
+  z,
+  registerClientHandler,
+  ClusterIdSchema,
+  NamespacePathSchema,
 } from './_shared'
 import { updateCluster } from '../database/sqlite'
 
+const ClusterOnlySchema = z.object({ clusterId: ClusterIdSchema })
+
+const MetricsQuerySchema = z.object({
+  clusterId: ClusterIdSchema,
+  query: z.string().trim().min(1),
+  range: z
+    .object({ start: z.number(), end: z.number() })
+    .optional()
+    .nullable(),
+})
+
 export function registerMetricsHandlers() {
   // 获取集群聚合统计
-  ipcMain.handle('metrics:getAggregatedStats', async (_, clusterId) => {
-    try {
-      if (!validateClusterId(clusterId)) {
-        return { success: false, error: 'Invalid cluster ID' }
+  registerClientHandler(
+    'metrics:getAggregatedStats',
+    ClusterOnlySchema,
+    ([clusterId]) => ({ clusterId }),
+    async (client, { clusterId }) => {
+      try {
+        const stats = await client.getAggregatedStats()
+        updateCluster(clusterId, { status: 'connected' })
+        return stats
+      } catch (error) {
+        updateCluster(clusterId, { status: 'disconnected' })
+        throw error
       }
-
-      ensureDbInitialized()
-      const client = getAdminClient(clusterId)
-      if (!client) {
-        return { success: false, error: 'Cluster not found' }
-      }
-
-      const stats = await client.getAggregatedStats()
-
-      // 更新集群状态为连接
-      updateCluster(clusterId, { status: 'connected' })
-
-      return { success: true, data: stats }
-    } catch (error) {
-      console.error('[IPC] metrics:getAggregatedStats error:', error)
-      // 更新集群状态为断开
-      updateCluster(clusterId, { status: 'disconnected' })
-      return { success: false, error: formatError(error) }
-    }
-  })
+    },
+  )
 
   // 获取 Broker 列表
-  ipcMain.handle('metrics:getBrokers', async (_, clusterId) => {
-    try {
-      if (!validateClusterId(clusterId)) {
-        return { success: false, error: 'Invalid cluster ID' }
-      }
-
-      ensureDbInitialized()
-      const client = getAdminClient(clusterId)
-      if (!client) {
-        return { success: false, error: 'Cluster not found' }
-      }
-
-      const brokers = await client.getBrokers()
-
-      return { success: true, data: brokers }
-    } catch (error) {
-      console.error('[IPC] metrics:getBrokers error:', error)
-      return { success: false, error: formatError(error) }
-    }
-  })
+  registerClientHandler(
+    'metrics:getBrokers',
+    ClusterOnlySchema,
+    ([clusterId]) => ({ clusterId }),
+    client => client.getBrokers(),
+  )
 
   // 获取命名空间统计
-  ipcMain.handle('metrics:getNamespaceStats', async (_, clusterId, tenant, namespace) => {
-    try {
-      if (!validateClusterId(clusterId)) {
-        return { success: false, error: 'Invalid cluster ID' }
-      }
-
-      ensureDbInitialized()
-      const client = getAdminClient(clusterId)
-      if (!client) {
-        return { success: false, error: 'Cluster not found' }
-      }
-
-      const stats = await client.getNamespaceStats(tenant, namespace)
-
-      return { success: true, data: stats }
-    } catch (error) {
-      console.error('[IPC] metrics:getNamespaceStats error:', error)
-      return { success: false, error: formatError(error) }
-    }
-  })
+  registerClientHandler(
+    'metrics:getNamespaceStats',
+    NamespacePathSchema,
+    ([clusterId, tenant, namespace]) => ({ clusterId, tenant, namespace }),
+    (client, { tenant, namespace }) => client.getNamespaceStats(tenant, namespace),
+  )
 
   // 查询 metrics 指标
-  ipcMain.handle('metrics:query', async (_, clusterId, query, range) => {
-    try {
-      if (!validateClusterId(clusterId)) {
-        return { success: false, error: 'Invalid cluster ID' }
-      }
-
-      if (typeof query !== 'string' || query.trim() === '') {
-        return { success: false, error: 'Invalid query parameter' }
-      }
-
-      ensureDbInitialized()
-      const client = getAdminClient(clusterId)
-      if (!client) {
-        return { success: false, error: 'Cluster not found' }
-      }
-
-      const metrics = await client.getMetrics(query, range)
-
-      return { success: true, data: metrics }
-    } catch (error) {
-      console.error('[IPC] metrics:query error:', error)
-      return { success: false, error: formatError(error) }
-    }
-  })
+  registerClientHandler(
+    'metrics:query',
+    MetricsQuerySchema,
+    ([clusterId, query, range]) => ({ clusterId, query, range }),
+    (client, { query, range }) =>
+      client.getMetrics(query, (range ?? undefined) as { start: number; end: number } | undefined),
+  )
 
   // ========== 拓扑 ==========
 
   // 获取集群拓扑
-  ipcMain.handle('topology:getClusterTopology', async (_, clusterId) => {
-    try {
-      if (!validateClusterId(clusterId)) {
-        return { success: false, error: 'Invalid cluster ID' }
-      }
-
-      ensureDbInitialized()
-      const client = getAdminClient(clusterId)
-      if (!client) {
-        return { success: false, error: 'Cluster not found' }
-      }
-
-      const topology = await client.getClusterTopology()
-
-      return { success: true, data: topology }
-    } catch (error) {
-      console.error('[IPC] topology:getClusterTopology error:', error)
-      return { success: false, error: formatError(error) }
-    }
-  })
+  registerClientHandler(
+    'topology:getClusterTopology',
+    ClusterOnlySchema,
+    ([clusterId]) => ({ clusterId }),
+    client => client.getClusterTopology(),
+  )
 }
