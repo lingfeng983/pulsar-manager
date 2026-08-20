@@ -1,12 +1,14 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
-import { Card, Row, Col, Select, Button, Space, Spin, Alert, Statistic, Progress, Tag, DatePicker, Empty } from 'antd'
+import { Card, Row, Col, Select, Button, Space, Spin, Alert, Statistic, Progress, Tag, DatePicker, Empty, Typography } from 'antd'
 import { ReloadOutlined, FullscreenOutlined } from '@ant-design/icons'
 import ReactECharts from 'echarts-for-react'
 import type { EChartsOption } from 'echarts'
 import dayjs from 'dayjs'
 import { useClusterStore } from '../store/cluster'
+import { formatThroughput, toKilobytesPerSecond } from '../utils/format'
 
 const { RangePicker } = DatePicker
+const { Text } = Typography
 
 interface MetricsData {
   timestamp: number
@@ -311,8 +313,9 @@ const MetricsDashboard: React.FC = () => {
     
     return filteredIn.map((d, i) => ({
       time: dayjs(d.timestamp).format('HH:mm'),
-      in: d.value,
-      out: filteredOut[i]?.value || 0,
+      // 源数据单位是字节/秒，图表轴标注的是 KB/s，这里必须换算
+      in: toKilobytesPerSecond(d.value),
+      out: toKilobytesPerSecond(filteredOut[i]?.value || 0),
     }))
   }, [metricsHistory.throughputIn, metricsHistory.throughputOut, dateRange, filterMetricsByDateRange])
 
@@ -466,7 +469,7 @@ const MetricsDashboard: React.FC = () => {
                 valueStyle={{ color: stats?.totalBacklog && stats.totalBacklog > 5000 ? 'var(--color-danger)' : 'var(--color-text-secondary)' }}
               />
               <div style={{ marginTop: 8 }}>
-                <Text type="secondary">吞吐量: {(stats?.totalThroughputIn || 0).toFixed(2)} KB/s</Text>
+                <Text type="secondary">吞吐量: {formatThroughput(stats?.totalThroughputIn)}</Text>
               </div>
             </Card>
           </Col>
@@ -577,17 +580,6 @@ const MetricsDashboard: React.FC = () => {
       </Spin>
     </div>
   )
-}
-
-// 辅助组件
-const Text: React.FC<{ type?: 'secondary' | 'success' | 'warning' | 'danger'; children: React.ReactNode }> = ({ type, children }) => {
-  const colors: Record<string, string> = {
-    secondary: 'var(--color-text-secondary)',
-    success: 'var(--color-success)',
-    warning: 'var(--color-warning)',
-    danger: 'var(--color-danger)',
-  }
-  return <span style={{ color: type ? colors[type] : undefined }}>{children}</span>
 }
 
 export default MetricsDashboard

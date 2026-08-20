@@ -3,6 +3,7 @@ import {
   Modal,
   Form,
   Input,
+  InputNumber,
   Select,
   Switch,
   Button,
@@ -175,7 +176,7 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({
         label="API 超时时间"
         extra="单位：毫秒"
       >
-        <Input type="number" placeholder="5000" />
+        <InputNumber min={100} max={600000} step={500} placeholder="5000" style={{ width: '100%' }} />
       </Form.Item>
     </>
   )
