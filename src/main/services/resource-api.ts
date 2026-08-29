@@ -1,7 +1,251 @@
 import {AxiosInstance} from 'axios';
-import {Semaphore, withRetry, withSemaphore, orNotFound, getErrorMessage, seg} from './http-client';
-import {API_ENDPOINTS} from '../config/constants';
-import type {ClusterInfo, Tenant, Topic, TopicStats, TopicConfig, Message} from './http-client';
+import {Semaphore, withRetry, withSemaphore, orNotFound, seg, mapWithConcurrency} from './http-client';
+import {API_ENDPOINTS, REQUEST_CONFIG} from '../config/constants';
+import type {
+    ClusterInfo,
+    Tenant,
+    Topic,
+    TopicStats,
+    TopicConfig,
+    TopicConfigPatch,
+    SubscriptionStats,
+    ProducerStats,
+    ConsumerStats,
+} from './http-client';
+
+// ========== Topic 路径 ==========
+
+/**
+ * 持久与非持久 Topic 在 Admin API 中是两段不同的路径前缀。
+ * 把 `persistent` 写死会让非持久 Topic 的管理操作全部落到不存在的资源上，
+ * 且 broker 返回的是 404 而不是"不支持"，看起来像 topic 不见了。
+ */
+function topicSegment(persistent: boolean): string {
+    return persistent ? 'persistent' : 'non-persistent';
+}
+
+function topicPath(tenant: string, namespace: string, topic: string, persistent: boolean): string {
+    return `/admin/v2/${topicSegment(persistent)}/${seg(tenant)}/${seg(namespace)}/${seg(topic)}`;
+}
+
+function subscriptionPath(
+    tenant: string,
+    namespace: string,
+    topic: string,
+    subscription: string,
+    persistent: boolean,
+): string {
+    return `${topicPath(tenant, namespace, topic, persistent)}/subscription/${seg(subscription)}`;
+}
+
+/**
+ * 列表接口返回的 name 已经是 `tenant/ns/topic` 完整形态（scheme 被剥掉），
+ * 再拼一次前缀会得到 `tenant/ns/tenant/ns/topic`。这里统一收口。
+ */
+function shortTopicName(topic: string): string {
+    if (!topic.includes('/')) {
+        return topic;
+    }
+    const parts = topic.split('/');
+    return parts.length >= 3 ? parts[parts.length - 1] : topic;
+}
+
+function partitionIndexOf(topicUri: string): number {
+    const match = topicUri.match(/-partition-(\d+)$/);
+    return match ? Number(match[1]) : -1;
+}
+
+/**
+ * 把 Admin API 返回的 topic URI 列表折叠成 Topic 条目：
+ * 分区行（`...-partition-N`）并回基名，分区 URI 按序号升序排列
+ * （字符串序在 10 个分区以上会乱成 -1, -10, -11, -2）。
+ */
+function collapseTopicUris(topicUris: string[]): Topic[] {
+    const byName = new Map<string, Topic>();
+
+    for (const topicUri of topicUris) {
+        const fullName = topicUri.split('://').pop() || '';
+        const persistent = topicUri.startsWith('persistent://');
+        const partition = fullName.match(/^(.*)-partition-(\d+)$/);
+
+        if (!partition) {
+            if (!byName.has(fullName)) {
+                byName.set(fullName, {name: fullName, persistent, topicUri: fullName, partitions: []});
+            }
+            continue;
+        }
+
+        const baseName = partition[1];
+        let entry = byName.get(baseName);
+        if (!entry) {
+            entry = {name: baseName, persistent, topicUri: baseName, partitions: []};
+            byName.set(baseName, entry);
+        }
+        entry.partitions.push(topicUri);
+    }
+
+    for (const entry of byName.values()) {
+        entry.partitions.sort((a, b) => partitionIndexOf(a) - partitionIndexOf(b));
+    }
+
+    return [...byName.values()];
+}
+
+// 实测本 broker 只有这三个策略存在 topic 级写入口，其余只能在命名空间级别设置。
+const WRITABLE_TOPIC_CONFIG_KEYS: (keyof TopicConfigPatch)[] = [
+    'retentionTimeInMinutes',
+    'retentionSizeInMB',
+    'numPartitions',
+];
+
+// 创建与更新共用同一个请求体形状，只有动词不同。
+function tenantPolicy(config: Partial<Tenant>): {adminRoles: string[]; allowedClusters: string[]} {
+    return {
+        adminRoles: config.adminRoles || [],
+        allowedClusters: config.allowedClusters || [],
+    };
+}
+
+/**
+ * 解析 /partitions 响应。实测本 broker 返回 `{"partitions":2,"deleted":false}`，
+ * 而规范里这个端点返回分区 URI 数组，两种形态都要能落回分区 URI 列表。
+ * 只有数量时按 Pulsar 固定的 `-partition-N` 命名规则还原 URI。
+ */
+function parsePartitionsMeta(
+    data: unknown,
+    tenant: string,
+    namespace: string,
+    topic: string,
+    persistent: boolean,
+): {partitions: string[]; deleted: boolean} {
+    const scheme = `${topicSegment(persistent)}://`;
+    const baseUri = `${scheme}${tenant}/${namespace}/${topic}`;
+
+    if (Array.isArray(data)) {
+        return {partitions: data.map(String), deleted: false};
+    }
+
+    const meta = data as {partitions?: unknown; deleted?: unknown} | null;
+    if (!meta || typeof meta !== 'object') {
+        return {partitions: [], deleted: false};
+    }
+
+    const deleted = meta.deleted === true;
+    if (Array.isArray(meta.partitions)) {
+        return {partitions: meta.partitions.map(String), deleted};
+    }
+    if (typeof meta.partitions === 'number') {
+        return {
+            partitions: Array.from({length: meta.partitions}, (_, i) => `${baseUri}-partition-${i}`),
+            deleted,
+        };
+    }
+    return {partitions: [], deleted};
+}
+
+function numberOrUndefined(value: unknown): number | undefined {
+    return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function numberOr(value: unknown, fallback: number): number {
+    return numberOrUndefined(value) ?? fallback;
+}
+
+// ownerBroker 在 stats 顶层（非分区）或每个分区条目里（分区聚合），取并集。
+function collectOwnerBrokers(stats: any): string[] {
+    const brokers = new Set<string>();
+    if (typeof stats?.ownerBroker === 'string' && stats.ownerBroker) {
+        brokers.add(stats.ownerBroker);
+    }
+    for (const partition of Object.values(stats?.partitions || {})) {
+        const owner = (partition as any)?.ownerBroker;
+        if (typeof owner === 'string' && owner) {
+            brokers.add(owner);
+        }
+    }
+    return [...brokers];
+}
+
+/**
+ * 把 Admin API 的原始 stats 映射成 shared/types 里的 TopicStats。
+ * 差异都是实测得到的：生产者叫 publishers 且速率是入向的，消费者挂在各订阅的
+ * consumers 数组下，订阅对象没有 name，顶层也没有 name / 分区信息。
+ * 不映射的话渲染层拿到的 producers/consumers/consumerCount 永远是空，
+ * 页面显示 0，看起来像"集群没有流量"。
+ */
+function normalizeTopicStats(raw: unknown, base: TopicStats, partitions: string[]): TopicStats {
+    const data = (raw && typeof raw === 'object' ? raw : {}) as any;
+    const subscriptions: Record<string, SubscriptionStats> = {};
+    const consumers: ConsumerStats[] = [];
+
+    for (const [name, rawSub] of Object.entries((data.subscriptions as any) || {})) {
+        const sub = rawSub as any;
+        const subConsumers = Array.isArray(sub?.consumers) ? sub.consumers : [];
+        subscriptions[name] = {
+            name,
+            msgBacklog: numberOr(sub?.msgBacklog, 0),
+            backlogSize: numberOr(sub?.backlogSize, 0),
+            msgRateExpired: numberOr(sub?.msgRateExpired, 0),
+            consumerCount: subConsumers.length,
+            unackedMessages: numberOr(sub?.unackedMessages, 0),
+            type: typeof sub?.type === 'string' ? sub.type : 'Unknown',
+            blockedSubscriptionOnUnackedMsgs: sub?.blockedSubscriptionOnUnackedMsgs,
+            lastExpireTimestamp: numberOrUndefined(sub?.lastExpireTimestamp),
+            lastConsumedFlowTimestamp: numberOrUndefined(sub?.lastConsumedFlowTimestamp),
+            msgRateOut: numberOrUndefined(sub?.msgRateOut),
+            msgThroughputOut: numberOrUndefined(sub?.msgThroughputOut),
+            durable: typeof sub?.isDurable === 'boolean' ? sub.isDurable : undefined,
+        };
+        for (const rawConsumer of subConsumers) {
+            consumers.push({
+                consumerName: String(rawConsumer?.consumerName ?? ''),
+                // 出现在 consumers 里就是已连接的订阅端
+                connected: true,
+                msgRateOut: numberOr(rawConsumer?.msgRateOut, 0),
+                msgThroughputOut: numberOrUndefined(rawConsumer?.msgThroughputOut),
+                msgRateRedeliver: numberOrUndefined(rawConsumer?.msgRateRedeliver),
+                unackedMessages: numberOr(rawConsumer?.unackedMessages, 0),
+                availablePermits: numberOrUndefined(rawConsumer?.availablePermits),
+                blockedConsumerOnUnackedMsgs: rawConsumer?.blockedConsumerOnUnackedMsgs,
+                address: rawConsumer?.address,
+                connectedSince: rawConsumer?.connectedSince,
+                clientVersion: rawConsumer?.clientVersion,
+                subscription: name,
+            });
+        }
+    }
+
+    const producers: ProducerStats[] = (Array.isArray(data.publishers) ? data.publishers : []).map((raw: any) => ({
+        producerId: numberOr(raw?.producerId, 0),
+        producerName: String(raw?.producerName ?? ''),
+        connected: true,
+        msgRateIn: numberOr(raw?.msgRateIn, 0),
+        msgThroughputIn: numberOr(raw?.msgThroughputIn, 0),
+        avgMsgSize: numberOrUndefined(raw?.averageMsgSize),
+        address: raw?.address,
+        connectedSince: raw?.connectedSince,
+        clientVersion: raw?.clientVersion,
+    }));
+
+    return {
+        ...base,
+        msgRateIn: numberOr(data.msgRateIn, 0),
+        msgRateOut: numberOr(data.msgRateOut, 0),
+        msgThroughputIn: numberOr(data.msgThroughputIn, 0),
+        msgThroughputOut: numberOr(data.msgThroughputOut, 0),
+        storageSize: numberOr(data.storageSize, 0),
+        backlogSize: numberOr(data.backlogSize, 0),
+        avgMsgSize: numberOrUndefined(data.averageMsgSize),
+        producers,
+        consumers,
+        subscriptions,
+        partitions,
+        ownerBrokers: collectOwnerBrokers(data),
+        deduplicationStatus: typeof data.deduplicationStatus === 'string' ? data.deduplicationStatus : undefined,
+        backlogQuotaLimitSize: numberOrUndefined(data.backlogQuotaLimitSize),
+        backlogQuotaLimitTime: numberOrUndefined(data.backlogQuotaLimitTime),
+    };
+}
 
 // ========== Resource API ==========
 
@@ -16,6 +260,15 @@ export class ResourceAPI {
     }
 
     // ========== 集群操作 ==========
+
+    // 集群名称列表。创建租户时 allowedClusters 必须引用这里的名字，
+    // 而不是应用里保存的连接名。
+    async getPulsarClusters(): Promise<string[]> {
+        return this.enqueue(async () => {
+            const response = await withRetry(() => this.http.get('/admin/v2/clusters'));
+            return ((response.data as string[]) || []).filter(Boolean);
+        });
+    }
 
     // 获取集群信息
     async getClusterInfo(): Promise<ClusterInfo> {
@@ -45,8 +298,12 @@ export class ResourceAPI {
             const response = await withRetry(() => this.http.get('/admin/v2/tenants'));
             const tenants = (response.data as string[]) || [];
 
-            // 并行获取每个租户的详细信息（受同一信号量限流，见 fetchTenantDetail）
-            const tenantInfos = await Promise.all(tenants.map(name => this.fetchTenantDetail(name)));
+            // 逐个取租户详情。外层已持有一个许可、内部不能再 acquire（否则死锁），
+            // 但也不能 Promise.all 一次性打出 N 个请求把 broker 压垮，
+            // 用一个本地并发窗口兜住扇出规模。
+            const tenantInfos = await mapWithConcurrency(tenants, REQUEST_CONFIG.FANOUT_CONCURRENCY, name =>
+                this.fetchTenantDetail(name),
+            );
 
             return tenantInfos;
         });
@@ -66,16 +323,16 @@ export class ResourceAPI {
     // 创建租户
     async createTenant(name: string, config: Partial<Tenant>): Promise<void> {
         return this.enqueue(async () => {
-            await this.http.put(`/admin/v2/tenants/${seg(name)}`, {
-                adminRoles: config.adminRoles || [],
-                allowedClusters: config.allowedClusters || [],
-            });
+            await this.http.put(`/admin/v2/tenants/${seg(name)}`, tenantPolicy(config));
         });
     }
 
-    // 更新租户
+    // 更新租户：实测必须用 POST。PUT 是创建语义，对已存在的租户返回
+    // 409 `Tenant already exist`，所以之前"编辑租户"这个操作从来没能成功。
     async updateTenant(name: string, config: Partial<Tenant>): Promise<void> {
-        return this.createTenant(name, config);
+        return this.enqueue(async () => {
+            await this.http.post(`/admin/v2/tenants/${seg(name)}`, tenantPolicy(config));
+        });
     }
 
     // 删除租户
@@ -137,35 +394,32 @@ export class ResourceAPI {
         });
     }
 
-    // ========== Topic 操作 ==========
-
-    // 获取命名空间下的所有 Topic
+    // 获取命名空间下的所有 Topic（持久 + 非持久）。
+    // 实测两点：
+    //  1. `/namespaces/{t}/{ns}/topics` 只列 persistent，非持久必须再问一次
+    //     `/non-persistent/{t}/{ns}`，否则非持久 topic 在界面上完全不可见；
+    //  2. 分区 topic 按分区逐条列出（...-partition-0 / -1 / ...），
+    //     折叠回基名后分区信息不需要任何额外请求即为真值。
     async getTopics(tenant: string, namespace: string): Promise<Topic[]> {
-        return this.enqueue(() =>
-            orNotFound(async () => {
-                // 获取命名空间下的所有Topic（包括分区和非分区）
-                const response = await withRetry(() =>
-                    this.http.get(`/admin/v2/namespaces/${seg(tenant)}/${seg(namespace)}/topics`),
-                );
-
-                const topics: Topic[] = [];
-
-                for (const topicUri of (response.data as string[]) || []) {
-                    const topicName = topicUri.split('://').pop()!;
-                    topics.push({
-                        name: topicName,
-                        persistent: topicUri.startsWith('persistent://'),
-                        partitionIndex: -1,
-                        topicUri,
-                    });
-                }
-
-                return topics;
-            }, []),
-        );
+        return this.enqueue(async () => {
+            const [persistentUris, nonPersistentUris] = await Promise.all([
+                this.fetchTopicUris(`/admin/v2/namespaces/${seg(tenant)}/${seg(namespace)}/topics`),
+                this.fetchTopicUris(`/admin/v2/non-persistent/${seg(tenant)}/${seg(namespace)}`),
+            ]);
+            return collapseTopicUris([...persistentUris, ...nonPersistentUris]);
+        });
     }
 
-    // 获取 Topic 统计信息
+    private async fetchTopicUris(path: string): Promise<string[]> {
+        return orNotFound(async () => {
+            const response = await withRetry(() => this.http.get(path));
+            return ((response.data as string[]) || []).filter(Boolean);
+        }, [] as string[]);
+    }
+
+    // ========== Topic 操作 ==========
+
+    // 获取 Topic 统计信息（归一化后的形状见 shared/types 的 TopicStats）
     async getTopicStats(
         tenant: string,
         namespace: string,
@@ -173,108 +427,205 @@ export class ResourceAPI {
         persistent: boolean = true,
     ): Promise<TopicStats> {
         return this.enqueue(async () => {
-            let topicName = topic;
+            const topicName = shortTopicName(topic);
+            const fullName = `${tenant}/${namespace}/${topicName}`;
+            const base = topicPath(tenant, namespace, topicName, persistent);
 
-            if (topic.includes('/')) {
-                const parts = topic.split('/');
-                if (parts.length >= 3) {
-                    topicName = parts[parts.length - 1];
-                }
-            }
-
-            const topicType = persistent ? 'persistent' : 'non-persistent';
-
-            const emptyStats: TopicStats = {
-                name: `${tenant}/${namespace}/${topicName}`,
+            const empty = (): TopicStats => ({
+                name: fullName,
                 persistent,
-                partitionIndex: -1,
-                totalStorageSize: 0,
-                storageSize: 0,
-                backlogSize: 0,
                 msgRateIn: 0,
                 msgRateOut: 0,
                 msgThroughputIn: 0,
                 msgThroughputOut: 0,
-                subscriptions: {},
+                storageSize: 0,
+                backlogSize: 0,
                 producers: [],
                 consumers: [],
-                numPartitions: 0,
-            };
+                subscriptions: {},
+                partitions: [],
+                ownerBrokers: [],
+            });
 
             return orNotFound(async () => {
-                const response = await withRetry(() =>
-                    this.http.get(`/admin/v2/${topicType}/${seg(tenant)}/${seg(namespace)}/${seg(topicName)}/stats`),
-                );
-                if (response.data === null) {
-                    return emptyStats;
+                // 分区 topic 的基名没有 /stats 路由（实测 404），只有 /partitioned-stats；
+                // 反过来非分区 topic 没有 /partitioned-stats。所以先 /stats，404 再降级。
+                const stats = await orNotFound(() => withRetry(() => this.http.get(`${base}/stats`)), null);
+                if (stats) {
+                    // 能命中 /stats 说明它是非分区 topic（分区 topic 的基名在这里 404），
+                    // 因此分区列表必然为空，不必再问一次 /partitions。
+                    return normalizeTopicStats(stats.data, empty(), []);
                 }
-                return {...response.data, persistent};
-            }, emptyStats);
+
+                const partitioned = await orNotFound(
+                    () => withRetry(() => this.http.get(`${base}/partitioned-stats`)),
+                    null,
+                );
+                if (!partitioned) {
+                    return empty();
+                }
+                const partitionUris = Object.keys((partitioned.data as any)?.partitions || {});
+                return normalizeTopicStats(partitioned.data, empty(), partitionUris);
+            }, empty());
         });
     }
 
-    // 获取 Topic 配置
+    // 获取 Topic 配置：逐个端点独立降级，任何单个策略端点缺失都不应让整份配置读不出来
     async getTopicConfig(
         tenant: string,
         namespace: string,
         topic: string,
         persistent: boolean = true,
     ): Promise<TopicConfig> {
-        const fallback: TopicConfig = {topicName: `${tenant}/${namespace}/${topic}`};
-        return this.enqueue(() =>
-            orNotFound<TopicConfig>(async () => {
-                const topicType = persistent ? 'persistent' : 'non-persistent';
-                const response = await withRetry(() =>
-                    this.http.get(`/admin/v2/${topicType}/${seg(tenant)}/${seg(namespace)}/${seg(topic)}/info`),
-                );
-                return {
-                    topicName: `${tenant}/${namespace}/${topic}`,
-                    numPartitions: response.data?.numPartitions,
-                    permissions: response.data?.policies?.permissions,
-                };
-            }, fallback),
-        );
+        return this.enqueue(async () => {
+            const topicName = shortTopicName(topic);
+            const base = topicPath(tenant, namespace, topicName, persistent);
+            const config: TopicConfig = {
+                topicName: `${tenant}/${namespace}/${topicName}`,
+                persistent,
+                partitions: [],
+                ownerBrokers: [],
+            };
+
+            // 实测本 broker 只在 topic 级提供 partitions / retention / permissions，
+            // backlog-quota、ttl、max-producers 等没有 topic 级路由，
+            // 生效值只能从 stats 里读（backlogQuotaLimitSize / deduplicationStatus）。
+            const [partitions, retention, permissions, stats] = await Promise.all([
+                orNotFound(() => this.http.get(`${base}/partitions`), null),
+                orNotFound(() => this.http.get(`${base}/retention`), null),
+                orNotFound(() => this.http.get(`${base}/permissions`), null),
+                orNotFound(() => this.http.get(`${base}/stats`), null),
+            ]);
+
+            if (partitions) {
+                config.partitions = parsePartitionsMeta(
+                    partitions.data,
+                    tenant,
+                    namespace,
+                    topicName,
+                    persistent,
+                ).partitions;
+            }
+
+            const retentionData = retention?.data as any;
+            if (retentionData && typeof retentionData === 'object') {
+                config.retentionTimeInMinutes = numberOrUndefined(retentionData.retentionTimeInMinutes);
+                config.retentionSizeInMB = numberOrUndefined(retentionData.retentionSizeInMB);
+            }
+
+            const permissionData = permissions?.data as any;
+            if (permissionData && typeof permissionData === 'object') {
+                config.permissions = permissionData;
+            }
+
+            const statsData = stats?.data as any;
+            if (statsData && typeof statsData === 'object') {
+                config.backlogQuotaLimitSize = numberOrUndefined(statsData.backlogQuotaLimitSize);
+                config.backlogQuotaLimitTime = numberOrUndefined(statsData.backlogQuotaLimitTime);
+                if (typeof statsData.deduplicationStatus === 'string') {
+                    config.deduplicationEnabled = statsData.deduplicationStatus.toLowerCase() === 'enabled';
+                }
+                config.ownerBrokers = collectOwnerBrokers(statsData);
+            }
+
+            return config;
+        });
     }
 
-    // 更新 Topic 配置
+    // 更新 Topic 配置：只写有真实 topic 级入口的策略，其余显式报错。
+    // 之前是往不存在的 /config 端点 PUT 整个对象，用户改了却没生效也不报错。
     async updateTopicConfig(
         tenant: string,
         namespace: string,
         topic: string,
-        config: Partial<TopicConfig>,
+        patch: TopicConfigPatch,
         persistent: boolean = true,
     ): Promise<void> {
         return this.enqueue(async () => {
-            const topicType = persistent ? 'persistent' : 'non-persistent';
-            await this.http.put(`/admin/v2/${topicType}/${seg(tenant)}/${seg(namespace)}/${seg(topic)}/config`, config);
+            const topicName = shortTopicName(topic);
+            const base = topicPath(tenant, namespace, topicName, persistent);
+            const keys = Object.keys(patch).filter(key => (patch as any)[key] !== undefined);
+
+            const unsupported = keys.filter(key => !WRITABLE_TOPIC_CONFIG_KEYS.includes(key as keyof TopicConfigPatch));
+            if (unsupported.length > 0) {
+                throw new Error(
+                    `以下策略不支持在 topic 级别设置：${unsupported.join('、')}。` +
+                        '本 broker 没有对应的 topic 级 Admin 端点，请在命名空间级别修改。',
+                );
+            }
+            if (keys.length === 0) {
+                throw new Error('没有需要更新的配置项');
+            }
+
+            if (keys.includes('retentionTimeInMinutes') || keys.includes('retentionSizeInMB')) {
+                // POST /retention 整体替换 RetentionPolicies：先读回现值再合并，
+                // 否则只改 retentionSize 会把 retentionTime 清零。
+                const current = (await orNotFound(() => this.http.get(`${base}/retention`), null))?.data as any;
+                await this.http.post(`${base}/retention`, {
+                    retentionTimeInMinutes:
+                        patch.retentionTimeInMinutes ?? numberOr(current?.retentionTimeInMinutes, 0),
+                    retentionSizeInMB: patch.retentionSizeInMB ?? numberOr(current?.retentionSizeInMB, 0),
+                });
+            }
+
+            if (typeof patch.numPartitions === 'number') {
+                // 实测 PUT 是"创建分区 topic"，对已存在的分区 topic 返回
+                // 409 `Partitioned topic already exists`；POST 才是更新分区数。
+                await this.http.post(`${base}/partitions`, patch.numPartitions);
+            }
         });
     }
 
-    // 创建 Topic（分区）
-    async createPartitionedTopic(tenant: string, namespace: string, topic: string, partitions: number): Promise<void> {
+    // 创建 Topic：partitions 省略或为 0 时创建非分区 topic（PUT topic 本体，实测 204），
+    // 否则创建分区 topic（PUT /partitions，body 为裸数字）
+    async createTopic(
+        tenant: string,
+        namespace: string,
+        topic: string,
+        persistent: boolean = true,
+        partitions?: number,
+    ): Promise<void> {
         return this.enqueue(async () => {
-            await this.http.put(
-                `/admin/v2/persistent/${seg(tenant)}/${seg(namespace)}/${seg(topic)}/partitions`,
-                partitions,
-            );
+            const topicName = shortTopicName(topic);
+            const base = topicPath(tenant, namespace, topicName, persistent);
+            if (partitions && partitions > 0) {
+                await this.http.put(`${base}/partitions`, partitions);
+            } else {
+                await this.http.put(base, {});
+            }
         });
     }
 
-    // 删除 Topic
-    async deleteTopic(tenant: string, namespace: string, topic: string): Promise<void> {
+    /**
+     * 删除 Topic。分区 topic 删基名会被 broker 拒绝（409，要求调用 delete-partitioned-topic），
+     * 实测必须用 DELETE {base}/partitions 才能连带清掉全部分区。
+     */
+    async deleteTopic(tenant: string, namespace: string, topic: string, persistent: boolean = true): Promise<void> {
         return this.enqueue(async () => {
-            await this.http.delete(`/admin/v2/persistent/${seg(tenant)}/${seg(namespace)}/${seg(topic)}`);
+            const topicName = shortTopicName(topic);
+            const base = topicPath(tenant, namespace, topicName, persistent);
+            const meta = await orNotFound(async () => {
+                const response = await this.http.get(`${base}/partitions`);
+                return response.data;
+            }, null);
+            const partitions = meta ? parsePartitionsMeta(meta, tenant, namespace, topicName, persistent) : null;
+            await this.http.delete(partitions && partitions.partitions.length > 0 ? `${base}/partitions` : base);
         });
     }
 
     // ========== 订阅操作 ==========
 
     // 获取 Topic 的所有订阅
-    async getSubscriptions(tenant: string, namespace: string, topic: string): Promise<string[]> {
+    async getSubscriptions(
+        tenant: string,
+        namespace: string,
+        topic: string,
+        persistent: boolean = true,
+    ): Promise<string[]> {
         return this.enqueue(() =>
             orNotFound(async () => {
                 const response = await withRetry(() =>
-                    this.http.get(`/admin/v2/persistent/${seg(tenant)}/${seg(namespace)}/${seg(topic)}/subscriptions`),
+                    this.http.get(`${topicPath(tenant, namespace, shortTopicName(topic), persistent)}/subscriptions`),
                 );
                 return (response.data as string[]) || [];
             }, []),
@@ -282,27 +633,34 @@ export class ResourceAPI {
     }
 
     // 删除订阅
-    async deleteSubscription(tenant: string, namespace: string, topic: string, subscription: string): Promise<void> {
+    async deleteSubscription(
+        tenant: string,
+        namespace: string,
+        topic: string,
+        subscription: string,
+        persistent: boolean = true,
+    ): Promise<void> {
         return this.enqueue(async () => {
             await this.http.delete(
-                `/admin/v2/persistent/${seg(tenant)}/${seg(namespace)}/${seg(topic)}/subscription/${seg(subscription)}`,
+                subscriptionPath(tenant, namespace, shortTopicName(topic), subscription, persistent),
             );
         });
     }
 
-    // 创建订阅
+    // 创建订阅。
+    // 订阅类型由第一个连上来的 consumer 决定，Admin 侧只能指定起始位置；
+    // 之前把 {type} 当 body PUT 过去，broker 期望的是 MessageId 映射表，等于必然失败。
     async createSubscription(
         tenant: string,
         namespace: string,
         topic: string,
         name: string,
-        type: string,
+        persistent: boolean = true,
+        initialPosition: 'Latest' | 'Earliest' = 'Latest',
     ): Promise<void> {
         return this.enqueue(async () => {
-            await this.http.put(
-                `/admin/v2/persistent/${seg(tenant)}/${seg(namespace)}/${seg(topic)}/subscription/${seg(name)}`,
-                {type},
-            );
+            const path = subscriptionPath(tenant, namespace, shortTopicName(topic), name, persistent);
+            await this.http.put(path, null, {params: {initialPosition}});
         });
     }
 
@@ -313,11 +671,11 @@ export class ResourceAPI {
         topic: string,
         subscription: string,
         numMessages: number,
+        persistent: boolean = true,
     ): Promise<void> {
         return this.enqueue(async () => {
-            await this.http.post(
-                `/admin/v2/persistent/${seg(tenant)}/${seg(namespace)}/${seg(topic)}/subscription/${seg(subscription)}/skip/${numMessages}`,
-            );
+            const path = subscriptionPath(tenant, namespace, shortTopicName(topic), subscription, persistent);
+            await this.http.post(`${path}/skip/${numMessages}`);
         });
     }
 
@@ -328,109 +686,63 @@ export class ResourceAPI {
         topic: string,
         subscription: string,
         timestamp: number,
+        persistent: boolean = true,
     ): Promise<void> {
         return this.enqueue(async () => {
-            await this.http.post(
-                `/admin/v2/persistent/${seg(tenant)}/${seg(namespace)}/${seg(topic)}/subscription/${seg(subscription)}/resetcursor`,
-                {timestamp},
-            );
+            const path = subscriptionPath(tenant, namespace, shortTopicName(topic), subscription, persistent);
+            await this.http.post(`${path}/resetcursor/${timestamp}`);
         });
     }
 
-    // 重置订阅游标到最早位置
-    async resetCursorToEarliest(tenant: string, namespace: string, topic: string, subscription: string): Promise<void> {
-        return this.enqueue(async () => {
-            await this.http.post(
-                `/admin/v2/persistent/${seg(tenant)}/${seg(namespace)}/${seg(topic)}/subscription/${seg(subscription)}/seekEarliest`,
-            );
-        });
-    }
-
-    // 重置订阅游标到最新位置
-    async resetCursorToLatest(tenant: string, namespace: string, topic: string, subscription: string): Promise<void> {
-        return this.enqueue(async () => {
-            await this.http.post(
-                `/admin/v2/persistent/${seg(tenant)}/${seg(namespace)}/${seg(topic)}/subscription/${seg(subscription)}/seekLatest`,
-            );
-        });
-    }
-
-    // ========== 消息操作 ==========
-
-    // 消费消息
-    async peekMessages(
+    // 重置订阅游标到最早位置：POST 不带时间戳即回到最早
+    async resetCursorToEarliest(
         tenant: string,
         namespace: string,
         topic: string,
         subscription: string,
-        count: number = 10,
-    ): Promise<Message[]> {
+        persistent: boolean = true,
+    ): Promise<void> {
         return this.enqueue(async () => {
-            const response = await withRetry(
-                () =>
-                    this.http.get(
-                        `/admin/v2/persistent/${seg(tenant)}/${seg(namespace)}/${seg(topic)}/subscription/${seg(subscription)}/peek/${count}`,
-                    ),
-                2,
-            );
-            return response.data;
+            const path = subscriptionPath(tenant, namespace, shortTopicName(topic), subscription, persistent);
+            await this.http.post(`${path}/resetcursor`);
         });
     }
 
-    // 发送消息（通过 HTTP Producer）
-    async sendMessage(
+    // 重置订阅游标到最新位置。
+    // 实测本 broker 没有 seekLatest 路由（404），能表达"跳到最新"的是 skip_all。
+    async resetCursorToLatest(
         tenant: string,
         namespace: string,
         topic: string,
-        message: string,
-        properties?: Record<string, string>,
-    ): Promise<{success: boolean; messageId?: string; error?: string}> {
-        try {
-            // Pulsar HTTP Producer API
-            const response = await this.http.post(
-                `/admin/v2/producers/${seg(tenant)}/${seg(namespace)}/${seg(topic)}/send`,
-                {
-                    payload: Buffer.from(message).toString('base64'),
-                    properties: properties || {},
-                },
-                {
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    timeout: 5000,
-                },
-            );
-
-            return {
-                success: true,
-                messageId: response.data?.messageId || response.data,
-            };
-        } catch (error: any) {
-            console.error('[PulsarAdmin] Send message error:', error);
-
-            // 检查是否是 HTTP 405 (Method Not Allowed) - 表示 Producer API 未启用
-            if (error.response?.status === 405) {
-                return {
-                    success: false,
-                    error: 'HTTP Producer 未启用。请在 broker.conf 中启用 httpEnable(true) 或使用 Pulsar Client SDK 发送消息',
-                };
-            }
-
-            return {
-                success: false,
-                error: getErrorMessage(error),
-            };
-        }
+        subscription: string,
+        persistent: boolean = true,
+    ): Promise<void> {
+        return this.enqueue(async () => {
+            const path = subscriptionPath(tenant, namespace, shortTopicName(topic), subscription, persistent);
+            await this.http.post(`${path}/skip_all`);
+        });
     }
 
-    // 获取积压消息数量
-    async getBacklog(tenant: string, namespace: string, topic: string, subscription: string): Promise<number> {
-        return this.enqueue(async () => {
-            const response = await this.http.get(
-                `/admin/v2/persistent/${seg(tenant)}/${seg(namespace)}/${seg(topic)}/subscription/${seg(subscription)}/backlog`,
-            );
-            return response.data;
-        });
+    // ========== 消息操作 ==========
+    //
+    // 发送与读取走原生 pulsar-client（见 services/pulsar-native-client）：
+    // admin REST 上的 producers/.../send 与 subscription/.../peek 路由实测都是 404。
+
+    // 获取订阅积压。实测没有 `.../subscription/{sub}/backlog` 路由，
+    // 数据在 topic stats 的 subscriptions[sub] 里，一次请求即可取到。
+    async getBacklog(
+        tenant: string,
+        namespace: string,
+        topic: string,
+        subscription: string,
+        persistent: boolean = true,
+    ): Promise<{messageCount: number; sizeInBytes: number}> {
+        const stats = await this.getTopicStats(tenant, namespace, topic, persistent);
+        const sub = stats.subscriptions?.[subscription];
+        return {
+            messageCount: sub?.msgBacklog ?? 0,
+            sizeInBytes: sub?.backlogSize ?? 0,
+        };
     }
 
     // ========== 连接测试 ==========

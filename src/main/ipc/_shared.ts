@@ -113,11 +113,16 @@ export const SubscriptionSchema = z
     .max(255)
     .regex(/^[a-zA-Z0-9._-]+$/);
 
+// 持久 / 非持久在 Admin API 里是两段不同的路径前缀。缺省沿用历史行为（持久），
+// 这样尚未传该参数的旧调用不会突然 404。
+export const PersistentSchema = z.boolean().default(true);
+
 export const TopicPathSchema = z.object({
     clusterId: ClusterIdSchema,
     tenant: TenantSchema,
     namespace: NamespaceSchema,
     topic: TopicSchema,
+    persistent: PersistentSchema,
 });
 
 export const SubscriptionPathSchema = TopicPathSchema.extend({
@@ -133,21 +138,39 @@ export const ResetCursorSchema = SubscriptionPathSchema.extend({
     timestamp: z.number().int().positive().optional().nullable(),
 });
 
-// 订阅类型：渲染层传入的可能是小写（如 'exclusive'），
-// Pulsar Admin API 要求首字母大写的形式，这里统一归一化。
-const SUBSCRIPTION_TYPES = ['Exclusive', 'Shared', 'Failover', 'Key_Shared'] as const;
+// 订阅类型由第一个连上来的 consumer 决定，Admin 侧没有写入口；
+// 创建订阅时唯一能指定的是起始读取位置。大小写按 broker 的枚举字面量归一化。
+const INITIAL_POSITIONS = ['Latest', 'Earliest'] as const;
 
-export const SubscriptionTypeSchema = z
+export const InitialPositionSchema = z
     .string()
     .transform(value => value.trim().toLowerCase())
-    .refine(value => SUBSCRIPTION_TYPES.some(type => type.toLowerCase() === value), {
-        message: 'Unsupported subscription type',
+    .refine(value => INITIAL_POSITIONS.some(position => position.toLowerCase() === value), {
+        message: 'Unsupported initial position',
     })
-    .transform(value => SUBSCRIPTION_TYPES.find(type => type.toLowerCase() === value)!);
+    .transform(value => INITIAL_POSITIONS.find(position => position.toLowerCase() === value)!);
 
 export const CreateSubscriptionSchema = SubscriptionPathSchema.extend({
-    type: SubscriptionTypeSchema,
+    initialPosition: InitialPositionSchema.optional().default('Latest'),
 });
+
+// 只有这三项存在 topic 级写入口；.strict() 让表单里那些改不动的策略
+// 在参数校验阶段就报错，而不是"提交成功但值没变"。
+export const TopicConfigPatchSchema = z
+    .object({
+        retentionTimeInMinutes: z
+            .number()
+            .int()
+            .min(0)
+            .max(365 * 24 * 60),
+        retentionSizeInMB: z
+            .number()
+            .int()
+            .min(0)
+            .max(1024 * 1024),
+        numPartitions: z.number().int().min(0).max(1000),
+    })
+    .strict();
 
 export const NamespacePathSchema = z.object({
     clusterId: ClusterIdSchema,
@@ -160,22 +183,72 @@ export const TenantPathSchema = z.object({
     tenant: TenantSchema,
 });
 
-export const MessageBrowseSchema = z.object({
+// ========== 资源增删改（Tenant / Namespace / Topic）==========
+// 删除类通道复用上面的 TenantPathSchema / NamespacePathSchema / TopicPathSchema。
+
+// allowedClusters 为空时 broker 会拒绝创建（租户在任何集群上都不被允许），
+// 因此在参数校验阶段就要求至少一个集群，而不是等请求失败再报错。
+export const CreateTenantSchema = z.object({
     clusterId: ClusterIdSchema,
-    tenant: TenantSchema,
-    namespace: NamespaceSchema,
-    topic: TopicSchema,
-    subscription: SubscriptionSchema,
-    count: z.number().min(1).max(1000).optional().default(10),
+    name: TenantSchema,
+    adminRoles: z.array(z.string().min(1).max(255)).max(50).default([]),
+    allowedClusters: z.array(z.string().min(1).max(255)).min(1).max(50),
 });
 
-export const MessageSendSchema = z.object({
+export const UpdateTenantSchema = z.object({
+    clusterId: ClusterIdSchema,
+    tenant: TenantSchema,
+    adminRoles: z.array(z.string().min(1).max(255)).max(50),
+    allowedClusters: z.array(z.string().min(1).max(255)).min(1).max(50),
+});
+
+export const CreateNamespaceSchema = z.object({
+    clusterId: ClusterIdSchema,
+    tenant: TenantSchema,
+    name: NamespaceSchema,
+});
+
+// partitions = 0 表示非分区 topic：这两条路径在 Admin API 里是不同的端点，
+// 不能像旧代码那样一律走 /partitions。
+export const CreateTopicSchema = z.object({
     clusterId: ClusterIdSchema,
     tenant: TenantSchema,
     namespace: NamespaceSchema,
-    topic: TopicSchema,
-    message: z.string().min(1),
-    properties: z.record(z.string()).optional(),
+    name: TopicSchema,
+    persistent: PersistentSchema,
+    partitions: z.number().int().min(0).max(1000).default(0),
+});
+
+export const MessageSendSchema = TopicPathSchema.extend({
+    // 5MB 是 broker 默认的单条消息上限，超过直接被拒；在参数校验阶段就拦住
+    message: z
+        .string()
+        .min(1)
+        .max(5 * 1024 * 1024),
+    properties: z.record(z.string().max(1024), z.string().max(1024)).optional(),
+});
+
+// maxMessages = 0 表示一直收到手动停止为止；默认给一个上限，
+// 避免对大积压订阅点一下"开始消费"就把主进程内存打满。
+export const ConsumeStartSchema = SubscriptionPathSchema.extend({
+    subscriptionType: z.enum(['Exclusive', 'Shared', 'Failover', 'Key_Shared']).default('Shared'),
+    initialPosition: InitialPositionSchema.default('Earliest'),
+    autoAck: z.boolean().default(true),
+    maxMessages: z.number().int().min(0).max(10000).default(500),
+});
+
+export const ReadStartSchema = TopicPathSchema.extend({
+    from: z.enum(['earliest', 'latest', 'timestamp']).default('earliest'),
+    timestamp: z.number().int().positive().optional(),
+    maxMessages: z.number().int().min(0).max(10000).default(500),
+});
+
+export const SessionIdSchema = z.object({
+    sessionId: z
+        .string()
+        .min(1)
+        .max(64)
+        .regex(/^s\d+$/),
 });
 
 // 验证函数
@@ -223,28 +296,10 @@ export function encryptSensitiveFields(config: z.infer<typeof ClusterConfigSchem
 }
 
 // 解密敏感字段
-export function decryptSensitiveFields(cluster: any) {
-    const decrypted = {...cluster};
-    if (decrypted.auth_params) {
-        try {
-            decrypted.authParams = decrypt(decrypted.auth_params);
-        } catch (error) {
-            console.error('[IPC] Failed to decrypt auth_params:', error);
-            throw new Error('Failed to decrypt sensitive configuration data');
-        }
-    }
-    if (decrypted.tls_trust_certs) {
-        try {
-            decrypted.tlsTrustCerts = decrypt(decrypted.tls_trust_certs);
-        } catch (error) {
-            console.error('[IPC] Failed to decrypt tls_trust_certs:', error);
-            throw new Error('Failed to decrypt sensitive configuration data');
-        }
-    }
-    return decrypted;
-}
 
-// 标准化集群数据
+// 标准化集群数据。
+// 注意：authParams / tlsTrustCerts 属于凭据，只在主进程内解密使用，
+// 绝不随集群列表下发到渲染进程；这里只暴露"是否已配置"的布尔标记。
 export function normalizeCluster(cluster: any) {
     return {
         id: cluster.id,
@@ -252,9 +307,9 @@ export function normalizeCluster(cluster: any) {
         serviceUrl: cluster.service_url,
         webServiceUrl: cluster.web_service_url,
         authPlugin: cluster.auth_plugin,
-        authParams: cluster.auth_params,
+        hasAuthParams: !!cluster.auth_params,
         tlsEnabled: !!cluster.tls_enabled,
-        tlsTrustCerts: cluster.tls_trust_certs,
+        hasTlsTrustCerts: !!cluster.tls_trust_certs,
         useSshTunnel: !!cluster.use_ssh_tunnel,
         sshConfigId: cluster.ssh_config_id,
         adminApiTimeout: cluster.admin_api_timeout || 5000,
@@ -277,24 +332,51 @@ export function formatError(error: unknown): string {
     return JSON.stringify(error);
 }
 
-// 获取 Pulsar Admin Client（公共方法）
-export function getAdminClient(clusterId: string): PulsarAdminClient | null {
+// 集群连接参数（含解密后的凭据）。admin HTTP 与原生客户端共用这一份，
+// 保证解密只发生在一处，也不会出现两条链路读到不同的配置。
+// 注意：返回值只在主进程内使用，绝不随 IPC 下发到渲染进程。
+export interface ClusterConnectionConfig {
+    serviceUrl: string;
+    webServiceUrl?: string | null;
+    adminApiTimeoutMs: number;
+    authPlugin?: string | null;
+    authParams?: string | null;
+    tlsEnabled: boolean;
+    tlsTrustCerts?: string | null;
+}
+
+export function buildConnectionConfig(clusterId: string): ClusterConnectionConfig | null {
     const cluster = getClusterById(clusterId);
     if (!cluster) {
         return null;
     }
-
-    return clientManager.getClient(clusterId, {
+    return {
         serviceUrl: cluster.service_url,
         webServiceUrl: cluster.web_service_url,
-        timeout: cluster.admin_api_timeout,
-        auth: cluster.auth_plugin
-            ? {authPlugin: cluster.auth_plugin, authParams: decrypt(cluster.auth_params)}
-            : undefined,
-        tls: cluster.tls_enabled
+        adminApiTimeoutMs: cluster.admin_api_timeout || 5000,
+        authPlugin: cluster.auth_plugin,
+        authParams: cluster.auth_params ? decrypt(cluster.auth_params) : null,
+        tlsEnabled: !!cluster.tls_enabled,
+        tlsTrustCerts: cluster.tls_trust_certs ? decrypt(cluster.tls_trust_certs) : null,
+    };
+}
+
+// 获取 Pulsar Admin Client（公共方法）
+export function getAdminClient(clusterId: string): PulsarAdminClient | null {
+    const config = buildConnectionConfig(clusterId);
+    if (!config) {
+        return null;
+    }
+
+    return clientManager.getClient(clusterId, {
+        serviceUrl: config.serviceUrl,
+        webServiceUrl: config.webServiceUrl,
+        timeout: config.adminApiTimeoutMs,
+        auth: config.authPlugin ? {authPlugin: config.authPlugin, authParams: config.authParams} : undefined,
+        tls: config.tlsEnabled
             ? {
                   enabled: true,
-                  trustCerts: cluster.tls_trust_certs ? decrypt(cluster.tls_trust_certs) : undefined,
+                  trustCerts: config.tlsTrustCerts || undefined,
               }
             : undefined,
     });
@@ -329,16 +411,17 @@ function isTrustedSender(event: IpcMainInvokeEvent): boolean {
 export type IpcResult<T> = {success: true; data?: T} | {success: false; error: string};
 
 /**
- * 注册一个需要 Pulsar Admin 客户端的 IPC handler。
- *
- * 统一负责：来源校验 → 入参 zod 校验 → 数据库初始化 → 取客户端 →
- * 执行业务逻辑 → 错误捕获与脱敏。业务代码只需要提供参数映射和一行调用。
+ * 注册一个 IPC handler 的公共骨架：来源校验 → 入参 zod 校验 → 数据库初始化 →
+ * 解析依赖（resolve）→ 执行业务逻辑 → 错误捕获与脱敏。
+ * resolve 返回 null 表示依赖不可用（如集群已被删除）。
  */
-export function registerClientHandler<S extends z.ZodTypeAny, T>(
+function registerResolvedHandler<S extends z.ZodTypeAny, R, T>(
     channel: string,
     schema: S,
     mapArgs: (args: unknown[]) => unknown,
-    run: (client: PulsarAdminClient, input: z.infer<S>) => Promise<T>,
+    resolve: (input: z.infer<S>) => R | null,
+    resolveFailure: string,
+    run: (resolved: R, input: z.infer<S>) => Promise<T>,
 ): void {
     ipcMain.handle(channel, async (event, ...args: unknown[]): Promise<IpcResult<T>> => {
         try {
@@ -356,19 +439,54 @@ export function registerClientHandler<S extends z.ZodTypeAny, T>(
 
             ensureDbInitialized();
             const input = parsed.data as z.infer<S>;
-            const clusterId = (input as {clusterId: string}).clusterId;
-            const client = getAdminClient(clusterId);
-            if (!client) {
-                return {success: false, error: 'Cluster not found'};
+            const resolved = resolve(input);
+            if (!resolved) {
+                return {success: false, error: resolveFailure};
             }
 
-            const data = await run(client, input);
+            const data = await run(resolved, input);
             return {success: true, data};
         } catch (error) {
             log.error(`${channel} failed`, formatError(error));
             return {success: false, error: formatError(error)};
         }
     });
+}
+
+/**
+ * 注册一个需要 Pulsar Admin 客户端的 IPC handler。
+ */
+export function registerClientHandler<S extends z.ZodTypeAny, T>(
+    channel: string,
+    schema: S,
+    mapArgs: (args: unknown[]) => unknown,
+    run: (client: PulsarAdminClient, input: z.infer<S>) => Promise<T>,
+): void {
+    registerResolvedHandler(
+        channel,
+        schema,
+        mapArgs,
+        input => getAdminClient((input as {clusterId: string}).clusterId),
+        'Cluster not found',
+        run,
+    );
+}
+
+/** 注册一个走原生 pulsar-client 的 IPC handler（收发不经过 admin REST）。 */
+export function registerNativeHandler<S extends z.ZodTypeAny, T>(
+    channel: string,
+    schema: S,
+    mapArgs: (args: unknown[]) => unknown,
+    run: (config: ClusterConnectionConfig, input: z.infer<S>) => Promise<T>,
+): void {
+    registerResolvedHandler(
+        channel,
+        schema,
+        mapArgs,
+        input => buildConnectionConfig((input as {clusterId: string}).clusterId),
+        'Cluster not found',
+        run,
+    );
 }
 
 /** 注册一个不需要 Admin 客户端的 IPC handler（仍做来源校验与错误兜底）。 */
@@ -385,5 +503,20 @@ export function registerHandler<T>(channel: string, run: (...args: any[]) => Pro
             log.error(`${channel} failed`, formatError(error));
             return {success: false, error: formatError(error)};
         }
+    });
+}
+
+/**
+ * 注册一个原始 IPC handler：只在入口做来源校验，其余（入参解析、事务、
+ * 自定义返回结构）完全交给业务代码。用于返回结构不统一、无法套用
+ * registerHandler 的场景（如 testConnection 失败也要回传结构化结果）。
+ */
+export function registerRawHandler(channel: string, handler: (...args: unknown[]) => Promise<unknown>): void {
+    ipcMain.handle(channel, async (event, ...args: unknown[]) => {
+        if (!isTrustedSender(event)) {
+            log.warn(`${channel}: rejected untrusted sender`);
+            return {success: false, error: 'Request rejected'};
+        }
+        return handler(...args);
     });
 }

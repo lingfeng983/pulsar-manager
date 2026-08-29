@@ -15,6 +15,8 @@ export type {
     SubscriptionStats,
     ProducerStats,
     ConsumerStats,
+    TopicConfig,
+    TopicConfigPatch,
     Message,
 } from '../../shared/types';
 
@@ -53,12 +55,6 @@ export interface BrokerStats {
         topicsCount: number;
         partitionsCount: number;
     };
-}
-
-export interface TopicConfig {
-    topicName: string;
-    numPartitions?: number;
-    permissions?: Record<string, string[]>;
 }
 
 // 认证配置
@@ -244,7 +240,7 @@ export function normalizeError(error: AxiosError): Error {
 // Semaphore 实现用于并发控制
 export class Semaphore {
     private active = 0;
-    private waiting: Array<{resolve: () => void; reject: (error: Error) => void}> = [];
+    private waiting: Array<{resolve: () => void; reject: (error: Error) => void; cancel: () => void}> = [];
 
     constructor(private maxConcurrent: number) {}
 
@@ -263,7 +259,12 @@ export class Semaphore {
                     clearTimeout(timer);
                     resolve();
                 },
-                reject,
+                reject: (error: Error) => {
+                    clearTimeout(timer);
+                    reject(error);
+                },
+                // reset() 用它清掉尚未触发的超时定时器，避免留下悬挂 timer
+                cancel: () => clearTimeout(timer),
             };
             const timer = setTimeout(() => {
                 const index = this.waiting.indexOf(waiter);
@@ -277,7 +278,8 @@ export class Semaphore {
     }
 
     release(): void {
-        this.active--;
+        // 多余的 release 不能把计数压成负数，否则后续 acquire 会超发许可
+        this.active = Math.max(0, this.active - 1);
         if (this.waiting.length > 0 && this.active < this.maxConcurrent) {
             const next = this.waiting.shift();
             if (next) {
@@ -291,8 +293,41 @@ export class Semaphore {
         const pending = this.waiting;
         this.waiting = [];
         this.active = 0;
-        pending.forEach(waiter => waiter.reject(new Error('Pulsar admin client was destroyed')));
+        pending.forEach(waiter => {
+            waiter.cancel();
+            waiter.reject(new Error('Pulsar admin client was destroyed'));
+        });
     }
+}
+
+/**
+ * 以固定并发度跑完 items，返回与输入同序的结果。
+ *
+ * 用于聚合操作内部的扇出：外层已经持有一个信号量许可，内部再去 acquire 会死锁，
+ * 但直接 Promise.all(items.map(...)) 又会一次性打出 N 个请求，把 broker 压垮。
+ * 这里用一个本地的并发窗口兜住扇出规模。
+ */
+export async function mapWithConcurrency<T, R>(
+    items: T[],
+    concurrency: number,
+    fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+    const results = new Array<R>(items.length);
+    let cursor = 0;
+    const limit = Math.max(1, Math.min(concurrency, items.length));
+
+    const workers = Array.from({length: limit}, async () => {
+        for (;;) {
+            const index = cursor++;
+            if (index >= items.length) {
+                return;
+            }
+            results[index] = await fn(items[index], index);
+        }
+    });
+
+    await Promise.all(workers);
+    return results;
 }
 
 /**
@@ -303,8 +338,12 @@ export class Semaphore {
  * semaphore-guarded methods would deadlock once all permits are held by outer
  * callers waiting on inner ones.
  */
-export async function withSemaphore<T>(semaphore: Semaphore, fn: () => Promise<T>): Promise<T> {
-    await semaphore.acquire();
+export async function withSemaphore<T>(
+    semaphore: Semaphore,
+    fn: () => Promise<T>,
+    acquireTimeoutMs?: number,
+): Promise<T> {
+    await semaphore.acquire(acquireTimeoutMs);
     try {
         return await fn();
     } finally {

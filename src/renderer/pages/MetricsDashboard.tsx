@@ -22,6 +22,7 @@ import dayjs from 'dayjs';
 import {useClusterStore} from '../store/cluster';
 import {formatThroughput, toKilobytesPerSecond} from '../utils/format';
 import {useFullscreen} from '../hooks/useFullscreen';
+import {useCommand} from '../hooks/useKeybindings';
 
 const {RangePicker} = DatePicker;
 const {Text} = Typography;
@@ -272,6 +273,10 @@ const MetricsDashboard: React.FC = () => {
         },
         [selectedCluster],
     );
+
+    useCommand('refreshMetrics', () => {
+        void loadAggregatedStats(true);
+    });
 
     // 初始加载和定时刷新
     useEffect(() => {

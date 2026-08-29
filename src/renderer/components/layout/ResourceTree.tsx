@@ -1,5 +1,5 @@
 import React, {useState, useEffect, useCallback, useMemo} from 'react';
-import {Tree, Button, Space, Spin, message, Menu, Modal} from 'antd';
+import {Tree, Button, Space, Spin, message, Menu, Modal, Input} from 'antd';
 import type {DataNode} from 'antd/es/tree';
 import {
     ClusterOutlined,
@@ -12,11 +12,25 @@ import {
     ApartmentOutlined,
     EyeOutlined,
     DeleteOutlined,
+    PlusOutlined,
+    EditOutlined,
 } from '@ant-design/icons';
 import {useClusterStore} from '../../store/cluster';
 import {useTabStore} from '../../store/tabs';
-import {loadTenants, loadNamespaces, loadTopics, invalidateResourceCache} from '../../hooks/resourceCache';
+import {
+    loadTenants,
+    loadNamespaces,
+    loadTopics,
+    invalidateResourceCache,
+    invalidateTenants,
+    invalidateNamespaces,
+    invalidateTopics,
+    invalidateTopicStats,
+} from '../../hooks/resourceCache';
 import {shortName} from '../../utils/format';
+import {useCommand} from '../../hooks/useKeybindings';
+import TenantFormModal from '../tenant/TenantFormModal';
+import TopicFormModal from '../topic/TopicFormModal';
 import type {Tenant, Topic} from '../../types';
 
 interface ResourceTreeNode extends DataNode {
@@ -39,6 +53,19 @@ const ResourceTree: React.FC = () => {
     const [contextMenu, setContextMenu] = useState<{x: number; y: number; node: ResourceTreeNode | null} | null>(null);
     const {clusters, fetchClusters, setActiveCluster, deleteClusterAsync, expandedClusterId} = useClusterStore();
     const {addTab} = useTabStore();
+    const [tenantForm, setTenantForm] = useState<{
+        open: boolean;
+        mode: 'create' | 'edit';
+        clusterId: string;
+        tenant?: string;
+        initial?: {adminRoles: string[]; allowedClusters: string[]};
+    }>({open: false, mode: 'create', clusterId: ''});
+    const [topicForm, setTopicForm] = useState<{
+        open: boolean;
+        clusterId: string;
+        tenant: string;
+        namespace: string;
+    }>({open: false, clusterId: '', tenant: '', namespace: ''});
 
     // 将集群转换为树节点
     const clusterToTreeData = useMemo(() => {
@@ -139,6 +166,46 @@ const ResourceTree: React.FC = () => {
 
         return [];
     }, []);
+
+    // 变更后重新读取某个节点的子节点。handleLoadData 会跳过"已有子节点"的节点，
+    // 所以增删改之后必须走这个强制重载，否则树会一直显示旧列表。
+    const reloadNodeChildren = useCallback(
+        async (node: ResourceTreeNode) => {
+            if (!node.dataRef) return;
+            const children = await loadTreeNodeData(node);
+            setTreeData(prev => {
+                const update = (nodes: DataNode[]): DataNode[] =>
+                    nodes.map(n => {
+                        if (n.key === node.key) {
+                            return {...n, children};
+                        }
+                        if (n.children) {
+                            return {...n, children: update(n.children)};
+                        }
+                        return n;
+                    });
+                return update(prev);
+            });
+        },
+        [loadTreeNodeData],
+    );
+
+    // 增删改之后要重载的是"父节点"，这里按 key 约定合成父节点，
+    // 不必先在 treeData 里把它找出来。
+    const clusterNode = (clusterId: string): ResourceTreeNode => ({
+        key: `cluster-${clusterId}`,
+        dataRef: {type: 'cluster', clusterId},
+    });
+
+    const tenantNode = (clusterId: string, tenant: string): ResourceTreeNode => ({
+        key: `tenant-${clusterId}-${tenant}`,
+        dataRef: {type: 'tenant', clusterId, tenant},
+    });
+
+    const namespaceNode = (clusterId: string, tenant: string, namespace: string): ResourceTreeNode => ({
+        key: `ns-${clusterId}-${tenant}-${namespace}`,
+        dataRef: {type: 'namespace', clusterId, tenant, namespace},
+    });
 
     // 初始加载
     useEffect(() => {
@@ -269,6 +336,46 @@ const ResourceTree: React.FC = () => {
     }, [contextMenu, closeContextMenu]);
 
     // 右键菜单操作
+    // 命名空间只需要一个名字，用轻量确认框即可，不必再做一个表单组件。
+    const promptCreateNamespace = useCallback(
+        (clusterId: string, tenant: string) => {
+            let draft = '';
+            Modal.confirm({
+                title: `新建命名空间（${tenant}）`,
+                icon: null,
+                content: (
+                    <Input
+                        autoFocus
+                        placeholder="命名空间名"
+                        onChange={e => {
+                            draft = e.target.value;
+                        }}
+                    />
+                ),
+                okText: '创建',
+                cancelText: '取消',
+                onOk: async () => {
+                    const name = draft.trim();
+                    if (!name) {
+                        message.warning('请输入命名空间名');
+                        return Promise.reject(new Error('name required'));
+                    }
+                    const response = await window.electronAPI.resources.createNamespace(clusterId, tenant, name);
+                    if (!response.success) {
+                        message.error(response.error || '创建失败');
+                        return Promise.reject(new Error('create failed'));
+                    }
+                    message.success('命名空间已创建');
+                    invalidateNamespaces(clusterId, tenant);
+                    const parentKey = `tenant-${clusterId}-${tenant}`;
+                    setExpandedKeys(prev => (prev.includes(parentKey) ? prev : [...prev, parentKey]));
+                    await reloadNodeChildren(tenantNode(clusterId, tenant));
+                },
+            });
+        },
+        [reloadNodeChildren],
+    );
+
     const handleContextMenuAction = useCallback(
         async (action: string, node: ResourceTreeNode) => {
             const dataRef = node.dataRef;
@@ -338,12 +445,126 @@ const ResourceTree: React.FC = () => {
                                 }
                             },
                         });
+                    } else if (dataRef?.type === 'tenant' && dataRef.clusterId && dataRef.tenant) {
+                        const {clusterId, tenant} = dataRef;
+                        Modal.confirm({
+                            title: '确认删除租户',
+                            content: `删除租户 "${tenant}"。broker 会拒绝删除仍包含命名空间的租户。`,
+                            okText: '删除',
+                            okType: 'danger',
+                            cancelText: '取消',
+                            onOk: async () => {
+                                const response = await window.electronAPI.resources.deleteTenant(clusterId, tenant);
+                                if (!response.success) {
+                                    message.error(response.error || '删除失败');
+                                    return;
+                                }
+                                message.success('租户已删除');
+                                invalidateTenants(clusterId);
+                                await reloadNodeChildren(clusterNode(clusterId));
+                            },
+                        });
+                    } else if (
+                        dataRef?.type === 'namespace' &&
+                        dataRef.clusterId &&
+                        dataRef.tenant &&
+                        dataRef.namespace
+                    ) {
+                        const {clusterId, tenant, namespace} = dataRef;
+                        Modal.confirm({
+                            title: '确认删除命名空间',
+                            content: `删除 "${tenant}/${namespace}" 会同时删除其中所有 Topic，且不可恢复。`,
+                            okText: '删除',
+                            okType: 'danger',
+                            cancelText: '取消',
+                            onOk: async () => {
+                                const response = await window.electronAPI.resources.deleteNamespace(
+                                    clusterId,
+                                    tenant,
+                                    namespace,
+                                );
+                                if (!response.success) {
+                                    message.error(response.error || '删除失败');
+                                    return;
+                                }
+                                message.success('命名空间已删除');
+                                invalidateNamespaces(clusterId, tenant);
+                                invalidateTopics(clusterId, tenant, namespace);
+                                await reloadNodeChildren(tenantNode(clusterId, tenant));
+                            },
+                        });
+                    } else if (dataRef?.type === 'topic' && dataRef.clusterId && dataRef.tenant && dataRef.namespace) {
+                        const {clusterId, tenant, namespace, topic, persistent} = dataRef;
+                        Modal.confirm({
+                            title: '确认删除 Topic',
+                            content: `删除 "${tenant}/${namespace}/${topic}" 会丢弃其全部消息与订阅游标，不可恢复。`,
+                            okText: '删除',
+                            okType: 'danger',
+                            cancelText: '取消',
+                            onOk: async () => {
+                                const response = await window.electronAPI.resources.deleteTopic(
+                                    clusterId,
+                                    tenant,
+                                    namespace,
+                                    topic ?? '',
+                                    persistent,
+                                );
+                                if (!response.success) {
+                                    message.error(response.error || '删除失败');
+                                    return;
+                                }
+                                message.success('Topic 已删除');
+                                invalidateTopics(clusterId, tenant, namespace);
+                                invalidateTopicStats(clusterId, tenant, namespace, topic ?? '');
+                                await reloadNodeChildren(namespaceNode(clusterId, tenant, namespace));
+                            },
+                        });
+                    }
+                    break;
+                case 'createTenant':
+                    if (dataRef?.clusterId) {
+                        setTenantForm({open: true, mode: 'create', clusterId: dataRef.clusterId});
+                    }
+                    break;
+                case 'editTenant':
+                    if (dataRef?.clusterId && dataRef.tenant) {
+                        const {clusterId, tenant} = dataRef;
+                        const response = await window.electronAPI.resources.getTenantInfo(clusterId, tenant);
+                        if (!response.success || !response.data) {
+                            message.error(response.error || '读取租户信息失败');
+                            return;
+                        }
+                        setTenantForm({
+                            open: true,
+                            mode: 'edit',
+                            clusterId,
+                            tenant,
+                            initial: {
+                                adminRoles: response.data.adminRoles ?? [],
+                                allowedClusters: response.data.allowedClusters ?? [],
+                            },
+                        });
+                    }
+                    break;
+                case 'createNamespace':
+                    if (dataRef?.clusterId && dataRef.tenant) {
+                        promptCreateNamespace(dataRef.clusterId, dataRef.tenant);
+                    }
+                    break;
+                case 'createTopic':
+                    if (dataRef?.clusterId && dataRef.tenant && dataRef.namespace) {
+                        setTopicForm({
+                            open: true,
+                            clusterId: dataRef.clusterId,
+                            tenant: dataRef.tenant,
+                            namespace: dataRef.namespace,
+                        });
                     }
                     break;
             }
             closeContextMenu();
         },
-        [addTab, setActiveCluster, deleteClusterAsync, closeContextMenu],
+        [addTab, setActiveCluster, deleteClusterAsync, closeContextMenu, reloadNodeChildren, promptCreateNamespace],
     );
 
     // 构建右键菜单
@@ -360,12 +581,38 @@ const ResourceTree: React.FC = () => {
                 {key: 'topology', label: '查看拓扑', icon: <ApartmentOutlined />},
                 {key: 'metrics', label: '查看监控', icon: <BarChartOutlined />},
                 {type: 'divider' as const},
+                {key: 'createTenant', label: '新建租户', icon: <PlusOutlined />},
+                {type: 'divider' as const},
                 {key: 'delete', label: '删除集群', icon: <DeleteOutlined />, danger: true},
             ];
         }
 
+        if (dataRef?.type === 'tenant') {
+            return [
+                ...baseItems,
+                {key: 'createNamespace', label: '新建命名空间', icon: <PlusOutlined />},
+                {key: 'editTenant', label: '编辑租户', icon: <EditOutlined />},
+                {type: 'divider' as const},
+                {key: 'delete', label: '删除租户', icon: <DeleteOutlined />, danger: true},
+            ];
+        }
+
+        if (dataRef?.type === 'namespace') {
+            return [
+                ...baseItems,
+                {key: 'createTopic', label: '新建 Topic', icon: <PlusOutlined />},
+                {type: 'divider' as const},
+                {key: 'delete', label: '删除命名空间', icon: <DeleteOutlined />, danger: true},
+            ];
+        }
+
         if (dataRef?.type === 'topic') {
-            return [...baseItems, {key: 'metrics', label: '查看监控', icon: <BarChartOutlined />}];
+            return [
+                ...baseItems,
+                {key: 'metrics', label: '查看监控', icon: <BarChartOutlined />},
+                {type: 'divider' as const},
+                {key: 'delete', label: '删除 Topic', icon: <DeleteOutlined />, danger: true},
+            ];
         }
 
         return baseItems;
@@ -399,6 +646,10 @@ const ResourceTree: React.FC = () => {
             setLoading(false);
         }
     }, [fetchClusters, expandedKeys, clusters]);
+
+    useCommand('refreshResources', () => {
+        void handleRefresh();
+    });
 
     // 打开监控仪表盘
     const handleOpenMetrics = useCallback(() => {
@@ -551,6 +802,41 @@ const ResourceTree: React.FC = () => {
                     }}
                 />
             )}
+            {/* 资源增删改表单 */}
+            <TenantFormModal
+                open={tenantForm.open}
+                mode={tenantForm.mode}
+                clusterId={tenantForm.clusterId}
+                tenant={tenantForm.tenant}
+                initial={tenantForm.initial}
+                onClose={() => setTenantForm(prev => ({...prev, open: false}))}
+                onSaved={async tenantName => {
+                    const {clusterId, mode} = tenantForm;
+                    invalidateTenants(clusterId);
+                    if (mode === 'create') {
+                        const parentKey = `cluster-${clusterId}`;
+                        setExpandedKeys(prev => (prev.includes(parentKey) ? prev : [...prev, parentKey]));
+                        await reloadNodeChildren(clusterNode(clusterId));
+                    } else {
+                        invalidateNamespaces(clusterId, tenantName);
+                        await reloadNodeChildren(tenantNode(clusterId, tenantName));
+                    }
+                }}
+            />
+            <TopicFormModal
+                open={topicForm.open}
+                clusterId={topicForm.clusterId}
+                tenant={topicForm.tenant}
+                namespace={topicForm.namespace}
+                onClose={() => setTopicForm(prev => ({...prev, open: false}))}
+                onSaved={async () => {
+                    const {clusterId, tenant, namespace} = topicForm;
+                    invalidateTopics(clusterId, tenant, namespace);
+                    const parentKey = `ns-${clusterId}-${tenant}-${namespace}`;
+                    setExpandedKeys(prev => (prev.includes(parentKey) ? prev : [...prev, parentKey]));
+                    await reloadNodeChildren(namespaceNode(clusterId, tenant, namespace));
+                }}
+            />
         </div>
     );
 };

@@ -1,26 +1,33 @@
-import {insertOperationLog, MessageBrowseSchema, MessageSendSchema, registerClientHandler} from './_shared';
+import {
+    ConsumeStartSchema,
+    MessageSendSchema,
+    ReadStartSchema,
+    SessionIdSchema,
+    SubscriptionPathSchema,
+    insertOperationLog,
+    registerClientHandler,
+    registerHandler,
+    registerNativeHandler,
+} from './_shared';
+import {nativeClientManager} from '../services/pulsar-native-client';
+import {sendToRenderer} from './stream';
+import {MESSAGE_STREAM_CHANNELS} from '../../shared/types';
+import type {ConsumeStartParams, MessageBatch, ReadStartParams, SessionEndEvent} from '../../shared/types';
 
 export function registerMessageHandlers() {
-    registerClientHandler(
-        'messages:browse',
-        MessageBrowseSchema,
-        ([params]) => params,
-        (client, {tenant, namespace, topic, subscription, count}) =>
-            client.peekMessages(tenant, namespace, topic, subscription, count),
-    );
-
-    registerClientHandler(
+    registerNativeHandler(
         'messages:send',
         MessageSendSchema,
         ([params]) => params,
-        async (client, {clusterId, tenant, namespace, topic, message, properties}) => {
-            const result = await client.sendMessage(tenant, namespace, topic, message, properties);
-
-            // Producer API 未启用等情况会返回 success: false，此时不应记为成功日志，
-            // 也不应让上层以为消息已发出
-            if (!result.success) {
-                throw new Error(result.error || '发送失败');
-            }
+        async (config, {clusterId, tenant, namespace, topic, persistent, message, properties}) => {
+            const result = await nativeClientManager.send(clusterId, config, {
+                tenant,
+                namespace,
+                topic,
+                persistent,
+                message,
+                properties,
+            });
 
             insertOperationLog({
                 cluster_id: clusterId,
@@ -32,7 +39,56 @@ export function registerMessageHandlers() {
                 result: 'success',
             });
 
-            return {messageId: result.messageId};
+            return result;
         },
+    );
+
+    registerNativeHandler(
+        'messages:startConsume',
+        ConsumeStartSchema,
+        ([params]) => params,
+        (config, input: ConsumeStartParams) =>
+            nativeClientManager.startConsume(
+                input.clusterId,
+                config,
+                input,
+                (batch: MessageBatch) => sendToRenderer(MESSAGE_STREAM_CHANNELS.consumeBatch, batch),
+                (event: SessionEndEvent) => sendToRenderer(MESSAGE_STREAM_CHANNELS.sessionEnd, event),
+            ),
+    );
+
+    registerNativeHandler(
+        'messages:startRead',
+        ReadStartSchema,
+        ([params]) => params,
+        (config, input: ReadStartParams) =>
+            nativeClientManager.startRead(
+                input.clusterId,
+                config,
+                input,
+                (batch: MessageBatch) => sendToRenderer(MESSAGE_STREAM_CHANNELS.readBatch, batch),
+                (event: SessionEndEvent) => sendToRenderer(MESSAGE_STREAM_CHANNELS.sessionEnd, event),
+            ),
+    );
+
+    // 停止只需要会话 id，不需要集群连接；会话可能早已因出错自行结束，所以回 stopped 而不是报错。
+    const registerStop = (channel: string) =>
+        registerHandler(channel, async (params: unknown) => {
+            const parsed = SessionIdSchema.safeParse(params);
+            if (!parsed.success) {
+                throw new Error('Invalid session id');
+            }
+            return {stopped: await nativeClientManager.stopSessionById(parsed.data.sessionId)};
+        });
+
+    registerStop('messages:stopConsume');
+    registerStop('messages:stopRead');
+
+    registerClientHandler(
+        'messages:getBacklog',
+        SubscriptionPathSchema,
+        ([params]) => params,
+        (client, {tenant, namespace, topic, subscription, persistent}) =>
+            client.getBacklog(tenant, namespace, topic, subscription, persistent),
     );
 }

@@ -14,7 +14,7 @@ interface NamespaceDetailProps {
 interface TopicInfo {
     name: string;
     persistent: boolean;
-    partitionIndex: number;
+    partitions: string[];
 }
 
 const NamespaceDetail: React.FC<NamespaceDetailProps> = ({clusterId, tenant, namespace}) => {
@@ -39,7 +39,7 @@ const NamespaceDetail: React.FC<NamespaceDetailProps> = ({clusterId, tenant, nam
             const topicList: TopicInfo[] = topicItems.map(t => ({
                 name: shortName(t.name),
                 persistent: t.persistent,
-                partitionIndex: t.partitionIndex,
+                partitions: t.partitions,
             }));
             setTopics(topicList);
 
@@ -58,12 +58,12 @@ const NamespaceDetail: React.FC<NamespaceDetailProps> = ({clusterId, tenant, nam
         fetchNamespaceInfo();
     }, [fetchNamespaceInfo]);
 
-    const handleTopicClick = (topic: string) => {
+    const handleTopicClick = (topic: string, persistent: boolean) => {
         addTab({
             id: `topic-${clusterId}-${tenant}-${namespace}-${topic}`,
             title: topic,
             type: 'topic',
-            data: {clusterId, tenant, namespace, topic},
+            data: {clusterId, tenant, namespace, topic, persistent},
         });
     };
 
@@ -72,8 +72,8 @@ const NamespaceDetail: React.FC<NamespaceDetailProps> = ({clusterId, tenant, nam
             title: 'Topic 名称',
             dataIndex: 'name',
             key: 'name',
-            render: (name: string, _: TopicInfo) => (
-                <Button type="link" onClick={() => handleTopicClick(name)}>
+            render: (name: string, record: TopicInfo) => (
+                <Button type="link" onClick={() => handleTopicClick(name, record.persistent)}>
                     {name}
                     <ArrowRightOutlined style={{marginLeft: 4}} />
                 </Button>
@@ -88,10 +88,10 @@ const NamespaceDetail: React.FC<NamespaceDetailProps> = ({clusterId, tenant, nam
             ),
         },
         {
-            title: '分区索引',
-            dataIndex: 'partitionIndex',
-            key: 'partitionIndex',
-            render: (index: number) => (index >= 0 ? index : '非分区'),
+            title: '分区',
+            dataIndex: 'partitions',
+            key: 'partitions',
+            render: (partitions: string[]) => (partitions.length > 0 ? `${partitions.length} 个分区` : '非分区'),
         },
     ];
 

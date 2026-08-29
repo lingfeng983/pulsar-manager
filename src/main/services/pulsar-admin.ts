@@ -3,7 +3,7 @@ import {createAxiosClient, Semaphore, PulsarAdminConfig} from './http-client';
 import {REQUEST_CONFIG} from '../config/constants';
 import {ResourceAPI} from './resource-api';
 import {MetricsAPI} from './metrics-api';
-import type {TopologyLimits} from '../../shared/types';
+import type {TopicConfigPatch, TopologyLimits} from '../../shared/types';
 
 // Re-export all types and infrastructure from sub-modules
 export * from './http-client';
@@ -23,6 +23,7 @@ export type {
     BrokerStats,
     Message,
     TopicConfig,
+    TopicConfigPatch,
     AuthConfig,
     TLSConfig,
     PulsarAdminConfig,
@@ -51,6 +52,11 @@ export class PulsarAdminClient {
 
     async getClusterInfo() {
         return this.resourceAPI.getClusterInfo();
+    }
+
+    // Pulsar 侧的集群名称列表：创建租户时 allowedClusters 引用的是这里的名字。
+    async getPulsarClusters() {
+        return this.resourceAPI.getPulsarClusters();
     }
 
     // ========== 租户操作 ==========
@@ -107,66 +113,109 @@ export class PulsarAdminClient {
         return this.resourceAPI.getTopicConfig(tenant, namespace, topic, persistent);
     }
 
-    async updateTopicConfig(tenant: string, namespace: string, topic: string, config: any, persistent: boolean = true) {
-        return this.resourceAPI.updateTopicConfig(tenant, namespace, topic, config, persistent);
+    async updateTopicConfig(
+        tenant: string,
+        namespace: string,
+        topic: string,
+        patch: TopicConfigPatch,
+        persistent: boolean = true,
+    ) {
+        return this.resourceAPI.updateTopicConfig(tenant, namespace, topic, patch, persistent);
     }
 
-    async createPartitionedTopic(tenant: string, namespace: string, topic: string, partitions: number) {
-        return this.resourceAPI.createPartitionedTopic(tenant, namespace, topic, partitions);
+    async createTopic(
+        tenant: string,
+        namespace: string,
+        topic: string,
+        persistent: boolean = true,
+        partitions?: number,
+    ) {
+        return this.resourceAPI.createTopic(tenant, namespace, topic, persistent, partitions);
     }
 
-    async deleteTopic(tenant: string, namespace: string, topic: string) {
-        return this.resourceAPI.deleteTopic(tenant, namespace, topic);
+    async deleteTopic(tenant: string, namespace: string, topic: string, persistent: boolean = true) {
+        return this.resourceAPI.deleteTopic(tenant, namespace, topic, persistent);
     }
 
     // ========== 订阅操作 ==========
 
-    async getSubscriptions(tenant: string, namespace: string, topic: string) {
-        return this.resourceAPI.getSubscriptions(tenant, namespace, topic);
+    async getSubscriptions(tenant: string, namespace: string, topic: string, persistent: boolean = true) {
+        return this.resourceAPI.getSubscriptions(tenant, namespace, topic, persistent);
     }
 
-    async deleteSubscription(tenant: string, namespace: string, topic: string, subscription: string) {
-        return this.resourceAPI.deleteSubscription(tenant, namespace, topic, subscription);
+    async deleteSubscription(
+        tenant: string,
+        namespace: string,
+        topic: string,
+        subscription: string,
+        persistent: boolean = true,
+    ) {
+        return this.resourceAPI.deleteSubscription(tenant, namespace, topic, subscription, persistent);
     }
 
-    async createSubscription(tenant: string, namespace: string, topic: string, name: string, type: string) {
-        return this.resourceAPI.createSubscription(tenant, namespace, topic, name, type);
+    async createSubscription(
+        tenant: string,
+        namespace: string,
+        topic: string,
+        name: string,
+        persistent: boolean = true,
+        initialPosition: 'Latest' | 'Earliest' = 'Latest',
+    ) {
+        return this.resourceAPI.createSubscription(tenant, namespace, topic, name, persistent, initialPosition);
     }
 
-    async skipMessages(tenant: string, namespace: string, topic: string, subscription: string, numMessages: number) {
-        return this.resourceAPI.skipMessages(tenant, namespace, topic, subscription, numMessages);
+    async skipMessages(
+        tenant: string,
+        namespace: string,
+        topic: string,
+        subscription: string,
+        numMessages: number,
+        persistent: boolean = true,
+    ) {
+        return this.resourceAPI.skipMessages(tenant, namespace, topic, subscription, numMessages, persistent);
     }
 
-    async resetCursor(tenant: string, namespace: string, topic: string, subscription: string, timestamp: number) {
-        return this.resourceAPI.resetCursor(tenant, namespace, topic, subscription, timestamp);
+    async resetCursor(
+        tenant: string,
+        namespace: string,
+        topic: string,
+        subscription: string,
+        timestamp: number,
+        persistent: boolean = true,
+    ) {
+        return this.resourceAPI.resetCursor(tenant, namespace, topic, subscription, timestamp, persistent);
     }
 
-    async resetCursorToEarliest(tenant: string, namespace: string, topic: string, subscription: string) {
-        return this.resourceAPI.resetCursorToEarliest(tenant, namespace, topic, subscription);
+    async resetCursorToEarliest(
+        tenant: string,
+        namespace: string,
+        topic: string,
+        subscription: string,
+        persistent: boolean = true,
+    ) {
+        return this.resourceAPI.resetCursorToEarliest(tenant, namespace, topic, subscription, persistent);
     }
 
-    async resetCursorToLatest(tenant: string, namespace: string, topic: string, subscription: string) {
-        return this.resourceAPI.resetCursorToLatest(tenant, namespace, topic, subscription);
+    async resetCursorToLatest(
+        tenant: string,
+        namespace: string,
+        topic: string,
+        subscription: string,
+        persistent: boolean = true,
+    ) {
+        return this.resourceAPI.resetCursorToLatest(tenant, namespace, topic, subscription, persistent);
     }
 
     // ========== 消息操作 ==========
 
-    async peekMessages(tenant: string, namespace: string, topic: string, subscription: string, count: number = 10) {
-        return this.resourceAPI.peekMessages(tenant, namespace, topic, subscription, count);
-    }
-
-    async sendMessage(
+    async getBacklog(
         tenant: string,
         namespace: string,
         topic: string,
-        message: string,
-        properties?: Record<string, string>,
+        subscription: string,
+        persistent: boolean = true,
     ) {
-        return this.resourceAPI.sendMessage(tenant, namespace, topic, message, properties);
-    }
-
-    async getBacklog(tenant: string, namespace: string, topic: string, subscription: string) {
-        return this.resourceAPI.getBacklog(tenant, namespace, topic, subscription);
+        return this.resourceAPI.getBacklog(tenant, namespace, topic, subscription, persistent);
     }
 
     // ========== 连接测试 ==========
@@ -226,10 +275,6 @@ export class PulsarAdminClient {
 
     async getMetrics(query: string, range?: {start: number; end: number}) {
         return this.metricsAPI.getMetrics(query, range);
-    }
-
-    async getTopicSubscriptions(tenant: string, namespace: string, topic: string) {
-        return this.metricsAPI.getTopicSubscriptions(tenant, namespace, topic);
     }
 
     // ========== 生命周期 ==========

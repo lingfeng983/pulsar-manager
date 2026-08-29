@@ -1,5 +1,4 @@
 import {
-    ipcMain,
     uuidv4,
     getAllSSHTunnels,
     insertSSHTunnel,
@@ -10,6 +9,7 @@ import {
     SSHConfigSchema,
     ensureDbInitialized,
     formatError,
+    registerRawHandler,
 } from './_shared';
 import {createLogger} from '../utils/logger';
 
@@ -18,7 +18,7 @@ const log = createLogger('IPC');
 export function registerSystemHandlers() {
     // ========== SSH 隧道 ==========
 
-    ipcMain.handle('ssh:list', async () => {
+    registerRawHandler('ssh:list', async () => {
         try {
             ensureDbInitialized();
             const tunnels = getAllSSHTunnels();
@@ -44,7 +44,7 @@ export function registerSystemHandlers() {
         }
     });
 
-    ipcMain.handle('ssh:connect', async (_, config) => {
+    registerRawHandler('ssh:connect', async config => {
         try {
             ensureDbInitialized();
             const validated = SSHConfigSchema.parse(config);
@@ -81,9 +81,12 @@ export function registerSystemHandlers() {
         }
     });
 
-    ipcMain.handle('ssh:disconnect', async (_, tunnelId) => {
+    registerRawHandler('ssh:disconnect', async tunnelId => {
         try {
             ensureDbInitialized();
+            if (typeof tunnelId !== 'string' || !tunnelId) {
+                return {success: false, error: 'Invalid tunnel id'};
+            }
             updateSSHTunnel(tunnelId, {status: 'disconnected'});
             return {success: true};
         } catch (error) {
@@ -94,9 +97,12 @@ export function registerSystemHandlers() {
 
     // ========== 主题 ==========
 
-    ipcMain.handle('theme:set', async (_, theme) => {
+    registerRawHandler('theme:set', async theme => {
         try {
             ensureDbInitialized();
+            if (typeof theme !== 'string') {
+                return {success: false, error: 'Invalid theme'};
+            }
             setSetting('theme', theme);
             return {success: true};
         } catch (error) {
@@ -105,7 +111,7 @@ export function registerSystemHandlers() {
         }
     });
 
-    ipcMain.handle('theme:get', async () => {
+    registerRawHandler('theme:get', async () => {
         try {
             ensureDbInitialized();
             const theme = getSetting('theme') || 'light';
@@ -118,9 +124,12 @@ export function registerSystemHandlers() {
 
     // ========== 设置 ==========
 
-    ipcMain.handle('settings:get', async (_, key) => {
+    registerRawHandler('settings:get', async key => {
         try {
             ensureDbInitialized();
+            if (typeof key !== 'string' || !key) {
+                return {success: false, error: 'Invalid settings key'};
+            }
             const value = getSetting(key);
             return {success: true, data: value};
         } catch (error) {
@@ -129,10 +138,13 @@ export function registerSystemHandlers() {
         }
     });
 
-    ipcMain.handle('settings:set', async (_, key, value) => {
+    registerRawHandler('settings:set', async (key, value) => {
         try {
             ensureDbInitialized();
-            setSetting(key, value);
+            if (typeof key !== 'string' || !key) {
+                return {success: false, error: 'Invalid settings key'};
+            }
+            setSetting(key, value as string);
             return {success: true};
         } catch (error) {
             log.error('settings:set failed', formatError(error));
@@ -142,11 +154,12 @@ export function registerSystemHandlers() {
 
     // ========== 操作日志 ==========
 
-    ipcMain.handle('logs:getRecent', async (_, limit) => {
+    registerRawHandler('logs:getRecent', async limit => {
         try {
             ensureDbInitialized();
             const {getRecentOperationLogs} = await import('../database/sqlite.js');
-            const logs = getRecentOperationLogs(limit || 50);
+            const safeLimit = typeof limit === 'number' && limit > 0 ? Math.floor(limit) : 50;
+            const logs = getRecentOperationLogs(safeLimit);
             return {success: true, data: logs};
         } catch (error) {
             log.error('logs:getRecent failed', formatError(error));
@@ -156,7 +169,7 @@ export function registerSystemHandlers() {
 
     // ========== 系统操作 ==========
 
-    ipcMain.handle('system:checkUpdate', async () => {
+    registerRawHandler('system:checkUpdate', async () => {
         try {
             const currentVersion = process.env.npm_package_version || '1.0.0';
 

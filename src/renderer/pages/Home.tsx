@@ -13,6 +13,7 @@ import {useClusterStore} from '../store/cluster';
 import ClusterConfigModal from './ClusterConfig';
 import HomeTopology from '../components/HomeTopology';
 import type {ClusterConfig} from '../types';
+import {useCommand} from '../hooks/useKeybindings';
 
 interface GlobalStats {
     totalBrokers: number;
@@ -131,6 +132,8 @@ const HomePage: React.FC = () => {
         setModalOpen(true);
     };
 
+    useCommand('addCluster', handleAddCluster);
+
     const handleEditCluster = (cluster: ClusterConfig) => {
         setEditingCluster(cluster);
         setModalOpen(true);
@@ -216,7 +219,15 @@ const HomePage: React.FC = () => {
     ];
 
     return (
-        <div style={{padding: 'var(--spacing-lg)', overflow: 'auto', height: '100%'}}>
+        <div
+            style={{
+                padding: 'var(--spacing-lg)',
+                overflow: 'auto',
+                height: '100%',
+                display: 'flex',
+                flexDirection: 'column',
+            }}
+        >
             {/* 页面标题和视图切换 */}
             <div
                 style={{

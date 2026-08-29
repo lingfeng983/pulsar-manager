@@ -172,7 +172,8 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
                         <Form.Item
                             name="authParams"
                             label="认证参数"
-                            rules={[{required: true, message: '请输入认证参数'}]}
+                            extra={editingCluster?.hasAuthParams ? '留空表示沿用已保存的认证参数' : undefined}
+                            rules={[{required: !editingCluster?.hasAuthParams, message: '请输入认证参数'}]}
                         >
                             <Input.TextArea placeholder='{"token": "your-jwt-token"}' rows={3} />
                         </Form.Item>
@@ -217,7 +218,11 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
                         <Form.Item
                             name="tlsTrustCerts"
                             label="TLS 受信任证书"
-                            extra="粘贴 CA 证书内容或选择证书文件路径"
+                            extra={
+                                editingCluster?.hasTlsTrustCerts
+                                    ? '留空表示沿用已保存的证书'
+                                    : '粘贴 CA 证书内容或选择证书文件路径'
+                            }
                         >
                             <Input.TextArea placeholder="/path/to/ca.cert" rows={3} />
                         </Form.Item>

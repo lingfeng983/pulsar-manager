@@ -1,18 +1,76 @@
 import {AxiosInstance} from 'axios';
 import {Semaphore, withRetry, withSemaphore, seg} from './http-client';
-import {AGGREGATION_LIMITS} from '../config/constants';
+import {AGGREGATION_LIMITS, REQUEST_CONFIG} from '../config/constants';
 import type {BrokerStats, TopicStats} from './http-client';
-import type {TopologyLimits} from '../../shared/types';
+import type {ClusterTopology, Topic, TopologyLimits} from '../../shared/types';
 import type {ResourceAPI} from './resource-api';
 
 // ========== Metrics & Topology API ==========
 
-// 将调用方传入的上限收敛到 [1, fallback] 区间；未传或非法时用全局上限。
-function clampLimit(value: number | undefined, fallback: number): number {
+// 将调用方传入的上限收敛到 [1, globalMax] 区间。
+// 第二个参数既是"未传/非法时的默认值"，也是"调用方不得突破的硬上限"——
+// 调用方只能把范围收得更窄，不能放得更宽。
+function clampLimit(value: number | undefined, globalMax: number): number {
     if (!value || value <= 0) {
-        return fallback;
+        return globalMax;
     }
-    return Math.min(value, fallback);
+    return Math.min(Math.floor(value), globalMax);
+}
+
+// ownerBroker 与 /brokers 列出的标识可能一个带端口一个不带；对不上就不连线，
+// 不做"看起来差不多算它归属"的猜测。
+function brokerMatches(listed: string, owner: string): boolean {
+    if (listed === owner) {
+        return true;
+    }
+    const cut = (v: string) => {
+        const idx = v.lastIndexOf(':');
+        return idx > 0 ? v.slice(0, idx) : v;
+    };
+    return cut(listed) === cut(owner);
+}
+
+/**
+ * 由各 topic 的 ownerBrokers 反向聚合出 brokers[].topics。
+ * 归属来源不可得时绝不编造映射：单 broker 集群下所有 topic 必然落在它上面，
+ * 这是事实而非猜测，标成 singleBroker 并回填 ownerBrokers；
+ * 多 broker 且无归属信息则标成 none，让渲染层明确降级。
+ */
+function assignTopicOwnership(topology: ClusterTopology): void {
+    const hasOwner = topology.topics.some(topic => topic.ownerBrokers.length > 0);
+
+    if (!hasOwner) {
+        if (topology.brokers.length !== 1) {
+            topology.ownershipSource = 'none';
+            return;
+        }
+        const only = topology.brokers[0].name;
+        topology.topics.forEach(topic => {
+            topic.ownerBrokers = [only];
+        });
+        topology.ownershipSource = 'singleBroker';
+    } else {
+        topology.ownershipSource = 'brokerStats';
+    }
+
+    for (const topic of topology.topics) {
+        const resolved: string[] = [];
+        for (const owner of topic.ownerBrokers) {
+            const broker = topology.brokers.find(b => brokerMatches(b.name, owner));
+            if (!broker) {
+                continue;
+            }
+            // 统一成 /brokers 列出的写法，渲染层按名字匹配节点即可对上，
+            // 不必再处理 `host` 与 `host:port` 的差异
+            if (!resolved.includes(broker.name)) {
+                resolved.push(broker.name);
+            }
+            if (!broker.topics.includes(topic.name)) {
+                broker.topics.push(topic.name);
+            }
+        }
+        topic.ownerBrokers = resolved;
+    }
 }
 
 export class MetricsAPI {
@@ -30,9 +88,10 @@ export class MetricsAPI {
         return withSemaphore(this.semaphore, fn);
     }
 
-    // 聚合任务限流：不得在其中再获取 this.semaphore 的许可
+    // 聚合任务限流：不得在其中再获取 this.semaphore 的许可。
+    // 聚合本身可能跑几十秒，排队时用叶子请求的 30s 上限会误报超时，改用更宽的上限。
     private async enqueueAggregate<T>(fn: () => Promise<T>): Promise<T> {
-        return withSemaphore(this.aggregateSemaphore, fn);
+        return withSemaphore(this.aggregateSemaphore, fn, REQUEST_CONFIG.ACQUIRE_TIMEOUT_AGGREGATE);
     }
 
     // ========== Broker 相关 ==========
@@ -144,7 +203,12 @@ export class MetricsAPI {
 
                                 const topicStatsPromises = topics.map(async topic => {
                                     try {
-                                        return await this.resourceAPI.getTopicStats(tenant.name, namespace, topic.name);
+                                        return await this.resourceAPI.getTopicStats(
+                                            tenant.name,
+                                            namespace,
+                                            topic.name,
+                                            topic.persistent,
+                                        );
                                     } catch {
                                         return null;
                                     }
@@ -195,8 +259,10 @@ export class MetricsAPI {
                             });
                         }
 
-                        if (topicStats.numPartitions > 0) {
-                            stats.totalPartitions += topicStats.numPartitions;
+                        // 归一化后的 TopicStats 直接带分区 URI 列表，长度即分区数
+                        const partitions = topicStats.partitions?.length || 0;
+                        if (partitions > 0) {
+                            stats.totalPartitions += partitions;
                         }
                     }
                 }
@@ -243,7 +309,12 @@ export class MetricsAPI {
 
                 for (const topic of topics) {
                     try {
-                        const topicStats = await this.resourceAPI.getTopicStats(tenant, namespace, topic.name);
+                        const topicStats = await this.resourceAPI.getTopicStats(
+                            tenant,
+                            namespace,
+                            topic.name,
+                            topic.persistent,
+                        );
 
                         stats.subscriptionCount += Object.keys(topicStats.subscriptions || {}).length;
                         stats.producerCount += topicStats.producers?.length || 0;
@@ -275,33 +346,20 @@ export class MetricsAPI {
     // 获取完整的拓扑结构
     // limits 允许调用方（如首页概览）把规模上限下推到聚合过程，避免只为展示少量节点而遍历整个集群。
     // 传入值只能收紧、不能放宽全局上限。
-    async getClusterTopology(limits?: TopologyLimits): Promise<{
-        brokers: Array<{name: string; topics: string[]; stats?: any}>;
-        topics: Array<{
-            name: string;
-            tenant: string;
-            namespace: string;
-            partitions: number;
-            subscriptions: string[];
-            producers: number;
-            consumers: number;
-            msgRateIn: number;
-            msgRateOut: number;
-            backlogSize: number;
-        }>;
-    }> {
+    async getClusterTopology(limits?: TopologyLimits): Promise<ClusterTopology> {
         const maxTenants = clampLimit(limits?.maxTenants, AGGREGATION_LIMITS.MAX_TENANTS);
         const maxNamespaces = clampLimit(limits?.maxNamespacesPerTenant, AGGREGATION_LIMITS.MAX_NAMESPACES_PER_TENANT);
         const maxTopicsPerNamespace = clampLimit(
             limits?.maxTopicsPerNamespace,
             AGGREGATION_LIMITS.MAX_TOPICS_PER_NAMESPACE,
         );
-        const maxTopics = limits?.maxTopics && limits.maxTopics > 0 ? limits.maxTopics : undefined;
+        const maxTopics = clampLimit(limits?.maxTopics, AGGREGATION_LIMITS.MAX_TOPICS);
 
         return this.enqueueAggregate(async () => {
-            const result = {
-                brokers: [] as any[],
-                topics: [] as any[],
+            const result: ClusterTopology = {
+                brokers: [],
+                topics: [],
+                ownershipSource: 'none',
             };
 
             try {
@@ -324,62 +382,73 @@ export class MetricsAPI {
                                     maxTopicsPerNamespace,
                                 );
 
-                                const topicStatsPromises = topics.map(async topic => {
-                                    try {
-                                        const topicStats = await this.resourceAPI.getTopicStats(
-                                            tenant.name,
-                                            namespace,
-                                            topic.name,
-                                        );
-                                        const subscriptions = Object.keys(topicStats.subscriptions || {});
+                                const topicEntriesPromises = topics.map(async topic =>
+                                    this.buildTopologyTopic(tenant.name, namespace, topic),
+                                );
 
-                                        return {
-                                            name: topic.name,
-                                            tenant: tenant.name,
-                                            namespace,
-                                            partitions: topicStats.numPartitions || 0,
-                                            subscriptions,
-                                            producers: topicStats.producers?.length || 0,
-                                            consumers: topicStats.consumers?.length || 0,
-                                            msgRateIn: topicStats.msgRateIn || 0,
-                                            msgRateOut: topicStats.msgRateOut || 0,
-                                            backlogSize: topicStats.backlogSize || 0,
-                                        };
-                                    } catch {
-                                        return null;
-                                    }
-                                });
-
-                                return await Promise.all(topicStatsPromises);
+                                return await Promise.all(topicEntriesPromises);
                             } catch {
-                                return [] as any[];
+                                return [] as ClusterTopology['topics'][number][];
                             }
                         });
 
                         const namespaceTopics = await Promise.all(namespaceTopicPromises);
-                        return namespaceTopics.flat().filter(Boolean);
+                        return namespaceTopics.flat();
                     } catch {
-                        return [] as any[];
+                        return [] as ClusterTopology['topics'][number][];
                     }
                 });
 
                 const allTopics = await Promise.all(tenantTopicPromises);
-                const flattenedTopics = maxTopics ? allTopics.flat().slice(0, maxTopics) : allTopics.flat();
+                result.topics = allTopics.flat().slice(0, maxTopics);
 
-                result.topics = flattenedTopics;
-
-                flattenedTopics.forEach(topic => {
-                    const topicPath = `${topic.tenant}/${topic.namespace}/${topic.name}`;
-                    result.brokers.forEach(broker => {
-                        broker.topics.push(topicPath);
-                    });
-                });
+                assignTopicOwnership(result);
             } catch (error) {
                 console.error('[PulsarAdmin] getClusterTopology error:', error);
             }
 
             return result;
         });
+    }
+
+    // 单个 topic 的拓扑节点：stats 读失败也要保留节点，只丢流量与归属，
+    // 否则列表里存在的 topic 在图上会凭空消失，看起来像集群少了一批 topic。
+    private async buildTopologyTopic(
+        tenant: string,
+        namespace: string,
+        topic: Topic,
+    ): Promise<ClusterTopology['topics'][number]> {
+        const base = {
+            name: topic.name,
+            tenant,
+            namespace,
+            persistent: topic.persistent,
+            partitionNames: topic.partitions,
+            ownerBrokers: [] as string[],
+            subscriptions: [] as string[],
+            producers: 0,
+            consumers: 0,
+            msgRateIn: 0,
+            msgRateOut: 0,
+            backlogSize: 0,
+        };
+
+        try {
+            const stats = await this.resourceAPI.getTopicStats(tenant, namespace, topic.name, topic.persistent);
+            return {
+                ...base,
+                partitionNames: stats.partitions?.length ? stats.partitions : topic.partitions,
+                ownerBrokers: stats.ownerBrokers || [],
+                subscriptions: Object.keys(stats.subscriptions || {}),
+                producers: stats.producers?.length || 0,
+                consumers: stats.consumers?.length || 0,
+                msgRateIn: stats.msgRateIn || 0,
+                msgRateOut: stats.msgRateOut || 0,
+                backlogSize: stats.backlogSize || 0,
+            };
+        } catch {
+            return base;
+        }
     }
 
     // 查询 metrics 指标
@@ -402,55 +471,6 @@ export class MetricsAPI {
                 return response.data;
             } catch (error) {
                 console.error('[PulsarAdmin] getMetrics error:', error);
-                return [];
-            }
-        });
-    }
-
-    // 获取 Topic 的订阅者分布
-    async getTopicSubscriptions(
-        tenant: string,
-        namespace: string,
-        topic: string,
-    ): Promise<
-        {
-            name: string;
-            type: string;
-            msgBacklog: number;
-            consumers: number;
-        }[]
-    > {
-        return this.enqueue(async () => {
-            try {
-                const subscriptions = await this.http.get(
-                    `/admin/v2/persistent/${seg(tenant)}/${seg(namespace)}/${seg(topic)}/subscriptions`,
-                );
-
-                const result = [];
-                for (const subName of (subscriptions.data as string[]) || []) {
-                    try {
-                        const stats = await this.http.get(
-                            `/admin/v2/persistent/${seg(tenant)}/${seg(namespace)}/${seg(topic)}/subscription/${seg(subName)}/stats`,
-                        );
-                        result.push({
-                            name: subName,
-                            type: stats.data?.type || 'unknown',
-                            msgBacklog: stats.data?.msgBacklog || 0,
-                            consumers: stats.data?.consumers?.length || 0,
-                        });
-                    } catch {
-                        result.push({
-                            name: subName,
-                            type: 'unknown',
-                            msgBacklog: 0,
-                            consumers: 0,
-                        });
-                    }
-                }
-
-                return result;
-            } catch (error) {
-                console.error('[PulsarAdmin] getTopicSubscriptions error:', error);
                 return [];
             }
         });

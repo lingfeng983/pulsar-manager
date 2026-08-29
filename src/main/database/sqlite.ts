@@ -300,14 +300,15 @@ export function setSetting(key: string, value: string): void {
 // 操作日志相关操作
 export interface OperationLogRecord {
     id?: number;
-    cluster_id?: string;
+    // 集群删除后的日志没有归属集群，写入 null
+    cluster_id?: string | null;
     action: string;
     resource_type: string;
     resource_id?: string;
     resource_name?: string;
-    details?: string;
+    details?: string | null;
     result: string;
-    error_message?: string;
+    error_message?: string | null;
     created_at: string;
 }
 
@@ -350,7 +351,8 @@ export function cleanupOperationLogs(maxLogs: number = 10000): void {
         const deleteCount = count.count - maxLogs;
         database
             .prepare(
-                'DELETE FROM operation_logs WHERE id IN (SELECT id FROM operation_logs ORDER BY created_at ASC LIMIT ?)',
+                `DELETE FROM operation_logs
+                 WHERE id IN (SELECT id FROM operation_logs ORDER BY created_at ASC LIMIT ?)`,
             )
             .run(deleteCount);
         console.log(`[Database] Cleaned up ${deleteCount} old operation logs`);

@@ -6,7 +6,9 @@ import TopicDetail from '../../pages/TopicDetail';
 import TenantDetail from '../../pages/TenantDetail';
 import NamespaceDetail from '../../pages/NamespaceDetail';
 import MetricsDashboard from '../../pages/MetricsDashboard';
+import ShortcutConfig from '../../pages/ShortcutConfig';
 import ClusterTopology from '../../components/metrics/ClusterTopology';
+import {useCommand} from '../../hooks/useKeybindings';
 
 const TabWorkspace: React.FC = () => {
     const {tabs, activeTabId, setActiveTab, removeTab} = useTabStore();
@@ -49,12 +51,39 @@ const TabWorkspace: React.FC = () => {
         });
     };
 
+    // 关闭除 targetKey 之外的全部标签页（首页始终保留）
+    const closeOtherTabsThan = (targetKey: string) => {
+        const tabsToClose = tabs.filter(t => t.id !== targetKey && t.id !== 'home');
+        tabsToClose.forEach(t => removeTab(t.id));
+    };
+
     // 关闭其他标签页
     const handleCloseOtherTabs = () => {
-        const tabsToClose = tabs.filter(t => t.id !== tabContextMenu.tabKey && t.id !== 'home');
-        tabsToClose.forEach(t => removeTab(t.id));
+        closeOtherTabsThan(tabContextMenu.tabKey);
         setTabContextMenu({...tabContextMenu, visible: false});
     };
+
+    // 循环切换到相邻标签页
+    const activateAdjacentTab = (offset: number) => {
+        if (tabs.length < 2) {
+            return;
+        }
+        const index = tabs.findIndex(t => t.id === activeTabId);
+        const next = (index + offset + tabs.length) % tabs.length;
+        setActiveTab(tabs[next].id);
+    };
+
+    useCommand('closeTab', () => {
+        if (activeTabId !== 'home') {
+            removeTab(activeTabId);
+        }
+    });
+
+    useCommand('nextTab', () => activateAdjacentTab(1));
+
+    useCommand('prevTab', () => activateAdjacentTab(-1));
+
+    useCommand('closeOtherTabs', () => closeOtherTabsThan(activeTabId));
 
     // 关闭右侧标签页
     const handleCloseTabsToRight = () => {
@@ -83,7 +112,7 @@ const TabWorkspace: React.FC = () => {
         if (tab.id === 'metrics') {
             return <MetricsDashboard />;
         }
-        if (tab.id === 'topology') {
+        if (tab.type === 'topology') {
             return <ClusterTopology clusterId={tab.data?.clusterId} />;
         }
         if (tab.type === 'topic') {
@@ -105,6 +134,9 @@ const TabWorkspace: React.FC = () => {
         if (tab.type === 'namespace') {
             const {clusterId, tenant, namespace} = tab.data || {};
             return <NamespaceDetail clusterId={clusterId} tenant={tenant} namespace={namespace} />;
+        }
+        if (tab.type === 'shortcuts') {
+            return <ShortcutConfig />;
         }
         return <div>TODO: {tab.title}</div>;
     };
@@ -135,6 +167,9 @@ const TabWorkspace: React.FC = () => {
                 }))}
                 style={{
                     flex: 1,
+                    // flex 项默认 min-height:auto，会被内容撑大；图表容器的高度又来自量出来的像素，
+                    // 两者互相喂养就会棘轮式变大且收不回去。这里必须显式归零。
+                    minHeight: 0,
                     margin: 0,
                     padding: 0,
                 }}

@@ -1,5 +1,20 @@
 import React, {useEffect, useRef, useState, useCallback, useMemo} from 'react';
-import {Card, Button, Space, Select, Spin, Empty, message, Statistic, Row, Col} from 'antd';
+import {
+    Card,
+    Button,
+    Space,
+    Select,
+    Spin,
+    Empty,
+    message,
+    Statistic,
+    Row,
+    Col,
+    Input,
+    Switch,
+    Alert,
+    Tooltip,
+} from 'antd';
 import {
     ReloadOutlined,
     ZoomInOutlined,
@@ -13,229 +28,57 @@ import {
 import ReactECharts from 'echarts-for-react';
 import type {EChartsOption} from 'echarts';
 import {useClusterStore} from '../../store/cluster';
-import type {ClusterConfig} from '../../types';
+import {useTabStore} from '../../store/tabs';
+import type {ClusterConfig, ClusterTopology as ClusterTopologyPayload} from '../../types';
+import {shortName} from '../../utils/format';
 import {useFullscreen} from '../../hooks/useFullscreen';
 import {useEchartsResize, zoomGraph, resetGraphView} from '../../hooks/useEcharts';
-import {TOPOLOGY_COLORS} from '../../utils/topologyColors';
+import {useElementSize} from '../../hooks/useElementSize';
+import {useCommand} from '../../hooks/useKeybindings';
+import {useTopologyPalette} from '../../utils/topologyColors';
+import {
+    ALL_NODE_TYPES,
+    NODE_TYPE_LABELS,
+    buildTopologyOption,
+    filterTopologyGraph,
+    type TopologyGraphEdge,
+    type TopologyGraphNode,
+    type TopologyLayout,
+    type TopologyNodeType,
+} from '../topology/graphOption';
 
 interface ClusterTopologyProps {
     clusterId?: string;
 }
 
-interface ClusterTopology {
-    brokers: Array<{
-        name: string;
-        topics: string[];
-        stats?: any;
-    }>;
-    topics: Array<{
-        name: string;
-        tenant: string;
-        namespace: string;
-        partitions: number;
-        subscriptions: string[];
-        producers: number;
-        consumers: number;
-        msgRateIn: number;
-        msgRateOut: number;
-        backlogSize: number;
-    }>;
-}
+const LAYOUT_OPTIONS: {label: string; value: TopologyLayout}[] = [
+    {label: '力导向', value: 'force'},
+    {label: '环形', value: 'circular'},
+];
 
-interface TopologyNode {
-    id: string;
-    name: string;
-    type: 'broker' | 'topic' | 'partition' | 'subscription';
-    cluster?: string;
-    tenant?: string;
-    namespace?: string;
-}
+// 分区节点数量可以远超 topic 数量，不设上限时浏览器会直接卡死。
+const MAX_PARTITION_NODES = 200;
 
-interface TopologyEdge {
-    source: string;
-    target: string;
-    value?: number;
-}
-
-// 创建拓扑图配置
-const createTopologyOption = (nodes: TopologyNode[], edges: TopologyEdge[]): EChartsOption => {
-    // 节点分类
-    const categories = [
-        {name: 'Broker', itemStyle: {color: TOPOLOGY_COLORS.primary}},
-        {name: 'Topic', itemStyle: {color: TOPOLOGY_COLORS.success}},
-        {name: 'Partition', itemStyle: {color: TOPOLOGY_COLORS.warning}},
-        {name: 'Subscription', itemStyle: {color: TOPOLOGY_COLORS.danger}},
-    ];
-
-    // 动态计算节点大小和斥力（根据节点数量）
-    const nodeCount = nodes.length;
-    const baseSize = Math.max(15, Math.min(40, 50 - nodeCount / 10));
-    const repulsion = Math.max(100, Math.min(500, 300 + nodeCount * 5));
-
-    // 转换节点数据
-    const graphNodes = nodes.map(node => {
-        let symbolSize = baseSize;
-        let category = 0;
-
-        switch (node.type) {
-            case 'broker':
-                symbolSize = baseSize * 1.8;
-                category = 0;
-                break;
-            case 'topic':
-                symbolSize = baseSize * 1.4;
-                category = 1;
-                break;
-            case 'partition':
-                symbolSize = baseSize * 1.1;
-                category = 2;
-                break;
-            case 'subscription':
-                symbolSize = baseSize;
-                category = 3;
-                break;
-        }
-
-        return {
-            id: node.id,
-            name: node.name,
-            category,
-            symbolSize,
-            value: node.name,
-            itemStyle: {
-                borderColor: categories[category].itemStyle.color,
-                borderWidth: 3,
-                shadowBlur: 15,
-                shadowColor: 'rgba(0, 0, 0, 0.3)',
-                color: categories[category].itemStyle.color,
-            },
-            emphasis: {
-                itemStyle: {
-                    borderWidth: 4,
-                    shadowBlur: 20,
-                    shadowColor: categories[category].itemStyle.color,
-                    scale: true,
-                },
-                label: {
-                    fontSize: 14,
-                    fontWeight: 600,
-                },
-            },
-        };
-    });
-
-    // 转换边数据
-    const graphLinks = edges.map(edge => ({
-        source: edge.source,
-        target: edge.target,
-        value: edge.value,
-        lineStyle: {
-            color: TOPOLOGY_COLORS.edge,
-            width: edge.value ? Math.max(1, edge.value / 200) : 1,
-            curveness: 0.2,
-            opacity: 0.6,
-        },
-        emphasis: {
-            lineStyle: {
-                width: 3,
-                color: categories[0].itemStyle.color,
-                opacity: 1,
-            },
-        },
-    }));
-
-    return {
-        tooltip: {
-            trigger: 'item',
-            backgroundColor: 'rgba(255, 255, 255, 0.95)',
-            borderColor: '#e8e8e8',
-            borderWidth: 1,
-            padding: [12, 16],
-            textStyle: {
-                color: '#333',
-                fontSize: 13,
-            },
-            formatter: (params: any) => {
-                if (params.dataType === 'node') {
-                    const node = nodes.find(n => n.id === params.data.id);
-                    if (node) {
-                        return `
-              <div style="font-weight: 600; font-size: 14px; margin-bottom: 8px">${node.name}</div>
-              <div style="color: ${TOPOLOGY_COLORS.edge}">类型: ${node.type === 'broker' ? 'Broker' : node.type === 'topic' ? 'Topic' : node.type === 'partition' ? 'Partition' : 'Subscription'}</div>
-              ${node.tenant ? `<div>租户: ${node.tenant}</div>` : ''}
-              ${node.namespace ? `<div>命名空间: ${node.namespace}</div>` : ''}
-            `;
-                    }
-                }
-                return `${params.data.source} → ${params.data.target}`;
-            },
-        },
-        legend: {
-            data: categories.map(c => c.name),
-            top: 10,
-            left: 'center',
-            itemWidth: 16,
-            itemHeight: 16,
-            textStyle: {
-                fontSize: 13,
-            },
-        },
-        animation: true,
-        animationDuration: 1500,
-        animationDurationUpdate: 1000,
-        animationEasingUpdate: 'quinticInOut',
-        series: [
-            {
-                type: 'graph',
-                layout: 'force',
-                roam: true,
-                draggable: true,
-                label: {
-                    show: true,
-                    position: 'bottom',
-                    formatter: '{b}',
-                    fontSize: 12,
-                    color: TOPOLOGY_COLORS.label,
-                    fontWeight: 500,
-                },
-                edgeSymbol: ['circle', 'arrow'],
-                edgeSymbolSize: [4, 12],
-                data: graphNodes,
-                links: graphLinks,
-                categories,
-                force: {
-                    repulsion: repulsion,
-                    gravity: 0.1,
-                    edgeLength: [80, 250],
-                    layoutAnimation: true,
-                },
-                lineStyle: {
-                    opacity: 0.6,
-                },
-                emphasis: {
-                    focus: 'adjacency',
-                    lineStyle: {
-                        width: 4,
-                    },
-                },
-            },
-        ],
-    };
-};
+const lastSegment = (path: string): string => path.split('/').pop() || path;
 
 const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClusterId}) => {
     const [loading, setLoading] = useState(false);
-    const [nodes, setNodes] = useState<TopologyNode[]>([]);
-    const [edges, setEdges] = useState<TopologyEdge[]>([]);
+    const [rawNodes, setRawNodes] = useState<TopologyGraphNode[]>([]);
+    const [rawEdges, setRawEdges] = useState<TopologyGraphEdge[]>([]);
+    const [ownershipSource, setOwnershipSource] = useState<ClusterTopologyPayload['ownershipSource'] | null>(null);
+    const [truncatedPartitions, setTruncatedPartitions] = useState(false);
     const [selectedClusterId, setSelectedClusterId] = useState<string | undefined>(initialClusterId);
-    const [stats, setStats] = useState({
-        brokers: 0,
-        topics: 0,
-        subscriptions: 0,
-    });
+    const [layout, setLayout] = useState<TopologyLayout>('force');
+    const [visibleTypes, setVisibleTypes] = useState<TopologyNodeType[]>([...ALL_NODE_TYPES]);
+    const [query, setQuery] = useState('');
+    const [showPartitions, setShowPartitions] = useState(false);
+    const [stats, setStats] = useState({brokers: 0, topics: 0, subscriptions: 0, partitions: 0});
     const chartRef = useRef<ReactECharts>(null);
-    const chartKey = useRef(0);
     const getChart = useCallback(() => chartRef.current?.getEchartsInstance(), []);
+    const palette = useTopologyPalette();
+    const {addTab} = useTabStore();
+    // zrender 会把量到的高度写成行内像素并钉住容器，所以尺寸由外层容器量出来反喂给图表。
+    const {ref: chartAreaRef, width: chartWidth, height: chartHeight} = useElementSize<HTMLDivElement>();
 
     // 进出全屏后容器尺寸变化，需要等浏览器完成布局再 resize
     const handleFullscreenChange = useCallback(() => {
@@ -254,78 +97,90 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
     // 如果传入了特定集群，则使用该集群，否则支持选择
     const selectedCluster = selectedClusterId || clusters.find(c => c.status === 'connected')?.id || clusters[0]?.id;
 
-    // 初始化
     useEffect(() => {
         fetchClusters();
     }, [fetchClusters]);
 
     // 图表实例初始化后的处理
     const onChartInit = useCallback((chart: any) => {
-        // 确保图表实例正确初始化
         if (chart) {
-            // 延迟一点让图表完成初始布局
-            setTimeout(() => {
-                chart.resize();
-            }, 100);
+            setTimeout(() => chart.resize(), 100);
         }
     }, []);
 
-    // 转换拓扑数据
+    /**
+     * 转换拓扑数据。broker→topic 的连线完全按 payload 走：主进程已用 stats 里的
+     * ownerBroker 反向聚合过，这里不再自行分配，否则又变回假的全连接图。
+     */
     const transformTopologyData = useCallback(
-        (data: any): {nodes: TopologyNode[]; edges: TopologyEdge[]} => {
-            const newNodes: TopologyNode[] = [];
-            const newEdges: TopologyEdge[] = [];
+        (
+            data: ClusterTopologyPayload,
+            withPartitions: boolean,
+        ): {nodes: TopologyGraphNode[]; edges: TopologyGraphEdge[]} => {
+            const nodes: TopologyGraphNode[] = [];
+            const edges: TopologyGraphEdge[] = [];
 
-            // 添加 Broker 节点
-            data.brokers?.forEach((broker: any) => {
-                newNodes.push({
-                    id: broker.name,
-                    name: broker.name,
-                    type: 'broker',
-                    cluster: selectedCluster,
-                });
-
-                // Broker -> Topic 边
-                broker.topics?.forEach((topicName: string) => {
-                    newEdges.push({
-                        source: broker.name,
-                        target: topicName,
-                        value: 100,
-                    });
+            data.brokers?.forEach(broker => {
+                nodes.push({id: broker.name, name: broker.name, type: 'broker', clusterId: selectedCluster});
+                broker.topics?.forEach(topicName => {
+                    edges.push({source: broker.name, target: topicName, value: 100});
                 });
             });
 
-            // 添加 Topic 节点和订阅
-            data.topics?.forEach((topic: any) => {
-                const topicId = `${topic.tenant}/${topic.namespace}/${topic.name}`;
-                newNodes.push({
+            let partitionCount = 0;
+            data.topics?.forEach(topic => {
+                const topicId = topic.name;
+                nodes.push({
                     id: topicId,
-                    name: topic.name,
+                    name: shortName(topic.name),
                     type: 'topic',
+                    clusterId: selectedCluster,
                     tenant: topic.tenant,
                     namespace: topic.namespace,
+                    topicPath: topic.name,
+                    persistent: topic.persistent,
+                    count: topic.msgRateIn || 0,
                 });
 
-                // Topic -> Subscription 边
-                topic.subscriptions?.forEach((sub: string) => {
-                    const subId = `${topicId}/${sub}`;
-                    newNodes.push({
-                        id: subId,
+                topic.subscriptions?.forEach(sub => {
+                    nodes.push({
+                        id: `${topicId}/${sub}`,
                         name: sub,
                         type: 'subscription',
+                        clusterId: selectedCluster,
                         tenant: topic.tenant,
                         namespace: topic.namespace,
+                        topicPath: topic.name,
+                        persistent: topic.persistent,
                     });
-
-                    newEdges.push({
-                        source: topicId,
-                        target: subId,
-                        value: topic.msgRateIn || 0,
-                    });
+                    edges.push({source: topicId, target: `${topicId}/${sub}`, value: topic.msgRateIn || 0});
                 });
+
+                if (!withPartitions || topic.partitionNames.length === 0) {
+                    return;
+                }
+                for (const partitionUri of topic.partitionNames) {
+                    if (partitionCount >= MAX_PARTITION_NODES) {
+                        setTruncatedPartitions(true);
+                        break;
+                    }
+                    partitionCount += 1;
+                    nodes.push({
+                        id: partitionUri,
+                        name: shortName(partitionUri),
+                        type: 'partition',
+                        clusterId: selectedCluster,
+                        tenant: topic.tenant,
+                        namespace: topic.namespace,
+                        topicPath: topic.name,
+                        persistent: topic.persistent,
+                        parentTopic: topic.name,
+                    });
+                    edges.push({source: topicId, target: partitionUri, value: 50});
+                }
             });
 
-            return {nodes: newNodes, edges: newEdges};
+            return {nodes, edges};
         },
         [selectedCluster],
     );
@@ -339,17 +194,17 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
             const response = await window.electronAPI.topology.getClusterTopology(selectedCluster);
 
             if (response.success && response.data) {
-                const {nodes: newNodes, edges: newEdges} = transformTopologyData(response.data);
-                setNodes(newNodes);
-                setEdges(newEdges);
-
-                // 计算统计数据
-                const brokerCount = newNodes.filter(n => n.type === 'broker').length;
-                const topicCount = newNodes.filter(n => n.type === 'topic').length;
-                const subCount = newNodes.filter(n => n.type === 'subscription').length;
-                setStats({brokers: brokerCount, topics: topicCount, subscriptions: subCount});
-
-                chartKey.current += 1;
+                const {nodes, edges} = transformTopologyData(response.data, showPartitions);
+                setRawNodes(nodes);
+                setRawEdges(edges);
+                setOwnershipSource(response.data.ownershipSource);
+                setTruncatedPartitions(false);
+                setStats({
+                    brokers: nodes.filter(n => n.type === 'broker').length,
+                    topics: nodes.filter(n => n.type === 'topic').length,
+                    subscriptions: nodes.filter(n => n.type === 'subscription').length,
+                    partitions: nodes.filter(n => n.type === 'partition').length,
+                });
 
                 // 图表加载后重新调整大小
                 setTimeout(() => {
@@ -357,16 +212,19 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
                 }, 100);
             } else {
                 message.warning(response.error || '获取拓扑数据失败');
-                setStats({brokers: 0, topics: 0, subscriptions: 0});
+                setRawNodes([]);
+                setRawEdges([]);
+                setOwnershipSource(null);
+                setStats({brokers: 0, topics: 0, subscriptions: 0, partitions: 0});
             }
         } catch (error) {
             console.error('Failed to load topology:', error);
             message.error('加载拓扑数据失败');
-            setStats({brokers: 0, topics: 0, subscriptions: 0});
+            setStats({brokers: 0, topics: 0, subscriptions: 0, partitions: 0});
         } finally {
             setLoading(false);
         }
-    }, [selectedCluster, transformTopologyData]);
+    }, [selectedCluster, showPartitions, transformTopologyData]);
 
     // 初始加载
     useEffect(() => {
@@ -375,8 +233,47 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
         }
     }, [selectedCluster, loadTopology]);
 
-    // 图表配置（使用 useMemo 缓存）
-    const chartOption = useMemo(() => createTopologyOption(nodes, edges), [nodes, edges]);
+    // 筛选在渲染层做：节点已经在内存里，重新拉一次 IPC 只会更慢。
+    const {nodes: visibleNodes, edges: visibleEdges} = useMemo(
+        () => filterTopologyGraph(rawNodes, rawEdges, {types: new Set(visibleTypes), query: query.trim()}),
+        [rawNodes, rawEdges, visibleTypes, query],
+    );
+
+    const chartOption: EChartsOption = useMemo(
+        () => buildTopologyOption({nodes: visibleNodes, edges: visibleEdges, palette, layout}),
+        [visibleNodes, visibleEdges, palette, layout],
+    );
+
+    // 节点点击：topic / partition 直接开详情页，之前只 console.log 等于没有交互。
+    const handleChartClick = useCallback(
+        (params: any) => {
+            if (params.dataType !== 'node' || !params.data?.id) {
+                return;
+            }
+            const node = rawNodes.find(candidate => candidate.id === params.data.id);
+            if (!node || (node.type !== 'topic' && node.type !== 'partition')) {
+                return;
+            }
+            const topicFullName = node.parentTopic || node.topicPath;
+            if (!topicFullName || !node.clusterId) {
+                return;
+            }
+            const topic = lastSegment(topicFullName);
+            addTab({
+                id: `topic-${node.clusterId}-${node.tenant}-${node.namespace}-${topic}`,
+                title: topic,
+                type: 'topic',
+                data: {
+                    clusterId: node.clusterId,
+                    tenant: node.tenant,
+                    namespace: node.namespace,
+                    topic,
+                    persistent: node.persistent ?? true,
+                },
+            });
+        },
+        [addTab, rawNodes],
+    );
 
     // 图表操作 - 放大
     const handleZoomIn = useCallback(() => {
@@ -400,6 +297,17 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
         message.success('视图已重置');
     }, [getChart]);
 
+    useCommand('topologyZoomIn', handleZoomIn);
+    useCommand('topologyZoomOut', handleZoomOut);
+    useCommand('topologyReset', handleResetView);
+
+    const ownershipAlert =
+        ownershipSource === 'singleBroker'
+            ? '集群只有一个 Broker，所有 Topic 都连到它。这是单点事实，不代表真实的归属分布。'
+            : ownershipSource === 'none'
+              ? '本 broker 未提供 topic 归属信息（stats 里没有 ownerBroker），因此不画 Broker→Topic 连线，避免出现假的"全连接"关系。'
+              : undefined;
+
     return (
         <div
             ref={chartContainerRef}
@@ -409,7 +317,7 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
                 display: 'flex',
                 flexDirection: 'column',
                 overflow: 'hidden',
-                backgroundColor: isFullscreen ? '#000' : undefined,
+                backgroundColor: isFullscreen ? palette.surface : undefined,
             }}
         >
             {/* 页面标题和工具栏 */}
@@ -427,9 +335,9 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
                     {initialClusterId
                         ? `${clusters.find(c => c.id === initialClusterId)?.name || '集群'}拓扑`
                         : '集群拓扑'}
-                    {nodes.length > 0 && (
-                        <span style={{fontSize: 12, color: TOPOLOGY_COLORS.edge, marginLeft: 12}}>
-                            节点: {nodes.length} | 连接: {edges.length}
+                    {visibleNodes.length > 0 && (
+                        <span style={{fontSize: 12, color: palette.label, marginLeft: 12}}>
+                            节点: {visibleNodes.length}/{rawNodes.length} | 连接: {visibleEdges.length}
                         </span>
                     )}
                 </h2>
@@ -437,11 +345,11 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
                     {/* 如果没有传入特定集群，显示集群选择器 */}
                     {!initialClusterId && clusters.length > 0 && (
                         <Select
-                            value={selectedClusterId}
+                            value={selectedCluster}
                             onChange={value => {
                                 setSelectedClusterId(value);
                             }}
-                            style={{width: 180}}
+                            style={{width: 160}}
                             placeholder="选择集群"
                             options={clusters.map((c: ClusterConfig) => ({
                                 label: `${c.name} ${c.status === 'connected' ? '(在线)' : '(离线)'}`,
@@ -449,22 +357,49 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
                             }))}
                         />
                     )}
-                    <Button icon={<ZoomInOutlined />} onClick={handleZoomIn} title="放大视图">
-                        放大
-                    </Button>
-                    <Button icon={<ZoomOutOutlined />} onClick={handleZoomOut} title="缩小视图">
-                        缩小
-                    </Button>
-                    <Button icon={<ReloadOutlined />} onClick={handleResetView} title="重置视图">
-                        重置
-                    </Button>
+                    <Select
+                        mode="multiple"
+                        value={visibleTypes}
+                        onChange={value => setVisibleTypes(value)}
+                        style={{minWidth: 200}}
+                        placeholder="节点类型"
+                        maxTagCount="responsive"
+                        options={ALL_NODE_TYPES.filter(type => type !== 'cluster').map(type => ({
+                            label: NODE_TYPE_LABELS[type],
+                            value: type,
+                        }))}
+                    />
+                    <Input.Search
+                        allowClear
+                        placeholder="按名称/租户筛选"
+                        style={{width: 180}}
+                        onSearch={value => setQuery(value)}
+                        onChange={event => {
+                            if (!event.target.value) {
+                                setQuery('');
+                            }
+                        }}
+                    />
+                    <Select<TopologyLayout>
+                        value={layout}
+                        onChange={value => setLayout(value)}
+                        style={{width: 170}}
+                        options={LAYOUT_OPTIONS}
+                    />
+                    <Tooltip title={`分区节点上限 ${MAX_PARTITION_NODES}`}>
+                        <Space size={4}>
+                            <Switch size="small" checked={showPartitions} onChange={setShowPartitions} />
+                            <span style={{fontSize: 12, color: palette.label}}>显示分区</span>
+                        </Space>
+                    </Tooltip>
+                    <Button icon={<ZoomInOutlined />} onClick={handleZoomIn} title="放大视图" />
+                    <Button icon={<ZoomOutOutlined />} onClick={handleZoomOut} title="缩小视图" />
+                    <Button icon={<ReloadOutlined />} onClick={handleResetView} title="重置视图" />
                     <Button
                         icon={isFullscreen ? <CompressOutlined /> : <FullscreenOutlined />}
                         onClick={toggleFullscreen}
                         title={isFullscreen ? '退出全屏' : '全屏'}
-                    >
-                        {isFullscreen ? '退出全屏' : '全屏'}
-                    </Button>
+                    />
                     <Button
                         icon={<ReloadOutlined spin={loading} />}
                         onClick={loadTopology}
@@ -478,85 +413,123 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
 
             {/* 统计概览 */}
             <Row gutter={16} style={{marginBottom: 'var(--spacing-md)'}}>
-                <Col span={8}>
+                <Col span={6}>
                     <Card>
                         <Statistic
                             title="Brokers"
                             value={stats.brokers}
                             prefix={<DatabaseOutlined />}
-                            valueStyle={{color: TOPOLOGY_COLORS.primary}}
+                            valueStyle={{color: palette.success}}
                         />
                     </Card>
                 </Col>
-                <Col span={8}>
+                <Col span={6}>
                     <Card>
                         <Statistic
                             title="Topics"
                             value={stats.topics}
                             prefix={<MessageOutlined />}
-                            valueStyle={{color: TOPOLOGY_COLORS.success}}
+                            valueStyle={{color: palette.warning}}
                         />
                     </Card>
                 </Col>
-                <Col span={8}>
+                <Col span={6}>
                     <Card>
                         <Statistic
                             title="Subscriptions"
                             value={stats.subscriptions}
                             prefix={<BranchesOutlined />}
-                            valueStyle={{color: TOPOLOGY_COLORS.warning}}
+                            valueStyle={{color: palette.danger}}
+                        />
+                    </Card>
+                </Col>
+                <Col span={6}>
+                    <Card>
+                        <Statistic
+                            title="Partitions"
+                            value={stats.partitions}
+                            prefix={<BranchesOutlined />}
+                            valueStyle={{color: palette.edge}}
                         />
                     </Card>
                 </Col>
             </Row>
 
+            {ownershipAlert && (
+                <Alert
+                    type="warning"
+                    showIcon
+                    closable
+                    message="Topic 归属信息受限"
+                    description={ownershipAlert}
+                    style={{marginBottom: 12}}
+                />
+            )}
+            {truncatedPartitions && (
+                <Alert
+                    type="info"
+                    showIcon
+                    closable
+                    message={`分区节点过多，仅展示前 ${MAX_PARTITION_NODES} 个。可用筛选缩小范围。`}
+                    style={{marginBottom: 12}}
+                />
+            )}
+
             {/* 拓扑图 */}
             <Card
-                bodyStyle={{padding: 0, flex: 1, minHeight: 400, display: 'flex', flexDirection: 'column'}}
+                styles={{
+                    body: {padding: 0, flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column'},
+                }}
                 style={{
                     flex: 1,
+                    minHeight: 0,
+                    display: 'flex',
+                    flexDirection: 'column',
                     height: isFullscreen ? '100vh' : undefined,
                     margin: isFullscreen ? 0 : undefined,
                 }}
             >
                 <Spin
-                    spinning={loading && nodes.length === 0}
+                    spinning={loading && rawNodes.length === 0}
                     tip="正在加载拓扑数据..."
-                    style={{flex: 1, display: 'flex'}}
+                    wrapperClassName="chart-spin"
                 >
-                    {nodes.length > 0 ? (
-                        <ReactECharts
-                            ref={chartRef}
-                            key={chartKey.current}
-                            option={chartOption}
-                            style={{height: '100%', width: '100%'}}
-                            onChartReady={onChartInit}
-                            opts={{
-                                renderer: 'canvas',
-                            }}
-                            onEvents={{
-                                click: (params: any) => {
-                                    console.log('Node clicked:', params);
-                                },
-                            }}
-                        />
-                    ) : (
-                        <div
-                            style={{
-                                display: 'flex',
-                                flexDirection: 'column',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                flex: 1,
-                                gap: 16,
-                            }}
-                        >
-                            <Empty description="暂无拓扑数据" />
-                            <Button type="primary" onClick={loadTopology}>
-                                加载拓扑
-                            </Button>
-                        </div>
-                    )}
+                    <div ref={chartAreaRef} style={{flex: 1, minHeight: 320, position: 'relative'}}>
+                        {rawNodes.length === 0 ? (
+                            <div
+                                style={{
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    height: '100%',
+                                    gap: 16,
+                                }}
+                            >
+                                <Empty description="暂无拓扑数据" />
+                                <Button type="primary" onClick={loadTopology}>
+                                    加载拓扑
+                                </Button>
+                            </div>
+                        ) : visibleNodes.length === 0 ? (
+                            <Empty description="当前筛选条件下没有节点" style={{marginTop: 80}} />
+                        ) : (
+                            <ReactECharts
+                                ref={chartRef}
+                                option={chartOption}
+                                notMerge={false}
+                                style={{
+                                    width: chartWidth || '100%',
+                                    height: chartHeight || 320,
+                                }}
+                                onChartReady={onChartInit}
+                                opts={{
+                                    renderer: 'canvas',
+                                }}
+                                onEvents={{click: handleChartClick}}
+                            />
+                        )}
+                    </div>
                 </Spin>
             </Card>
         </div>

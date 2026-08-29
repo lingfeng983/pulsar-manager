@@ -16,6 +16,8 @@ import {
     Input,
     Select,
     DatePicker,
+    InputNumber,
+    Tooltip,
     message,
 } from 'antd';
 import dayjs from 'dayjs';
@@ -29,9 +31,12 @@ import {
     DeleteOutlined,
     PlusOutlined,
 } from '@ant-design/icons';
-import type {TopicStats} from '../types';
+import type {TopicConfigPatch, TopicStats} from '../types';
 import {useTabStore} from '../store/tabs';
+import {formatBytes, formatMessageRate, formatThroughput} from '../utils/format';
+import {invalidateTopics, invalidateTopicStats} from '../hooks/resourceCache';
 import MessageBrowser from './MessageBrowser';
+import {useCommand} from '../hooks/useKeybindings';
 
 interface TopicDetailProps {
     clusterId: string;
@@ -64,9 +69,21 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
     const {removeTab} = useTabStore();
     const tabId = `topic-${clusterId}-${tenant}-${namespace}-${topic}`;
 
+    useCommand('browseMessages', () => setActiveTab('messages'));
+    // Topic 完整 URI，供配置页展示
+    const topicUri = `${persistent ? 'persistent' : 'non-persistent'}://${tenant}/${namespace}/${topic}`;
+    // 实测 Admin API 对 non-persistent topic 的订阅管理直接返回 400
+    // （`Create subscription on non-persistent topic can only be done through client`），
+    // 只能由客户端自己建，所以在界面上先禁用入口而不是让人去撞这条报错。
+    const adminSubscriptionUnsupported = !persistent;
+    const adminSubscriptionHint = 'non-persistent topic 的订阅只能由客户端创建，Admin API 不支持';
+
     const requestIdRef = useRef(0);
 
-    // 获取Topic统计信息
+    // 获取Topic统计信息。
+    // 这里故意绕开 resourceCache 的 loadTopicStats：本页每 15s 轮询一次，而
+    // topicStats 缓存 TTL 是 30s，走缓存会有一半的轮询拿到上一轮的旧数据。
+    // 详情页要的是实时值，所以直接打 IPC；写操作后再显式失效共享缓存。
     const fetchTopicStats = useCallback(async () => {
         const currentRequestId = ++requestIdRef.current;
         setLoading(true);
@@ -118,10 +135,12 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                 namespace,
                 topic,
                 subscriptionName,
+                persistent,
             );
             if (response.success) {
                 message.success('订阅删除成功');
                 setDeleteModalOpen(false);
+                invalidateTopicStats(clusterId, tenant, namespace, topic);
                 await fetchTopicStats();
             } else {
                 message.error(response.error || '删除失败');
@@ -143,12 +162,14 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                 namespace,
                 topic,
                 values.name,
-                values.type || 'exclusive',
+                values.initialPosition || 'Latest',
+                persistent,
             );
             if (response.success) {
                 message.success('订阅创建成功');
                 setCreateModalOpen(false);
                 createForm.resetFields();
+                invalidateTopicStats(clusterId, tenant, namespace, topic);
                 await fetchTopicStats();
             } else {
                 message.error(response.error || '创建失败');
@@ -179,10 +200,12 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                 resettingSubscription,
                 resetPosition,
                 resetPosition === 'timestamp' ? (resetTimestamp as number) : undefined,
+                persistent,
             );
             if (response.success) {
                 message.success('游标重置成功');
                 setResetCursorModalOpen(false);
+                invalidateTopicStats(clusterId, tenant, namespace, topic);
                 await fetchTopicStats();
             } else {
                 message.error(response.error || '重置失败');
@@ -213,10 +236,12 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                 topic,
                 skippingSubscription,
                 skipCount,
+                persistent,
             );
             if (response.success) {
                 message.success(`已跳过 ${skipCount} 条消息`);
                 setSkipMessagesModalOpen(false);
+                invalidateTopicStats(clusterId, tenant, namespace, topic);
                 await fetchTopicStats();
             } else {
                 message.error(response.error || '跳过失败');
@@ -240,12 +265,13 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                 persistent,
             );
             if (response.success && response.data) {
+                const config = response.data;
                 editConfigForm.setFieldsValue({
-                    maxMessageSize: response.data.maxMessageSize || '',
-                    retentionTime: response.data.retentionTime || '',
-                    retentionSize: response.data.retentionSize || '',
-                    backlogQuotaLimit: response.data.backlogQuotaLimit || '',
-                    backlogQuotaRetentionPolicy: response.data.backlogQuotaRetentionPolicy || '',
+                    // 留空 = 不修改。broker 没给出 topic 级覆盖值时不填 0，
+                    // 否则保存会把"继承命名空间"误写成"显式设为 0"。
+                    retentionTimeInMinutes: config.retentionTimeInMinutes ?? null,
+                    retentionSizeInMB: config.retentionSizeInMB ?? null,
+                    numPartitions: config.partitions.length > 0 ? config.partitions.length : null,
                 });
                 setEditConfigModalOpen(true);
             } else {
@@ -262,22 +288,21 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
     const handleSaveConfig = async () => {
         try {
             const values = await editConfigForm.validateFields();
-            const config: Record<string, any> = {};
+            const patch: TopicConfigPatch = {};
 
-            if (values.maxMessageSize) {
-                config.maxMessageSize = parseInt(values.maxMessageSize);
+            if (typeof values.retentionTimeInMinutes === 'number') {
+                patch.retentionTimeInMinutes = values.retentionTimeInMinutes;
             }
-            if (values.retentionTime) {
-                config.retentionTime = parseInt(values.retentionTime);
+            if (typeof values.retentionSizeInMB === 'number') {
+                patch.retentionSizeInMB = values.retentionSizeInMB;
             }
-            if (values.retentionSize) {
-                config.retentionSize = parseInt(values.retentionSize);
+            if (typeof values.numPartitions === 'number') {
+                patch.numPartitions = values.numPartitions;
             }
-            if (values.backlogQuotaLimit) {
-                config.backlogQuotaLimit = parseInt(values.backlogQuotaLimit);
-            }
-            if (values.backlogQuotaRetentionPolicy) {
-                config.backlogQuotaRetentionPolicy = values.backlogQuotaRetentionPolicy;
+
+            if (Object.keys(patch).length === 0) {
+                message.warning('没有需要修改的配置项');
+                return;
             }
 
             const response = await window.electronAPI.resources.updateTopicConfig(
@@ -285,19 +310,24 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                 tenant,
                 namespace,
                 topic,
-                config,
+                patch,
                 persistent,
             );
             if (response.success) {
                 message.success('配置更新成功');
                 setEditConfigModalOpen(false);
                 editConfigForm.resetFields();
+                // 分区数变化会改变 topic 列表本身，只失效 stats 不够
+                invalidateTopics(clusterId, tenant, namespace);
+                invalidateTopicStats(clusterId, tenant, namespace, topic);
                 await fetchTopicStats();
             } else {
                 message.error(response.error || '更新失败');
             }
-        } catch {
-            message.error('更新失败');
+        } catch (error: any) {
+            // 校验失败时 antd 会抛 errorInfo，不应笼统报"更新失败"
+            if (error?.errorFields) return;
+            message.error(error?.message || '更新失败');
         }
     };
 
@@ -325,9 +355,13 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                         tenant,
                         namespace,
                         topic,
+                        persistent,
                     );
                     if (response.success) {
                         message.success('Topic 删除成功');
+                        // Topic 已不存在，列表缓存必须失效，否则资源树仍显示它
+                        invalidateTopics(clusterId, tenant, namespace);
+                        invalidateTopicStats(clusterId, tenant, namespace, topic);
                         // 关闭当前 tab
                         removeTab(tabId);
                     } else {
@@ -405,16 +439,16 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
             render: (value: boolean) => <Tag color={value ? 'success' : 'error'}>{value ? '在线' : '离线'}</Tag>,
         },
         {
-            title: '输出速率',
-            dataIndex: 'msgRateOut',
-            key: 'msgRateOut',
-            render: (value: number) => `${value.toFixed(2)} msg/s`,
+            title: '输入速率',
+            dataIndex: 'msgRateIn',
+            key: 'msgRateIn',
+            render: (value: number) => formatMessageRate(value),
         },
         {
             title: '吞吐量',
-            dataIndex: 'msgThroughputOut',
-            key: 'msgThroughputOut',
-            render: (value: number) => `${(value / 1024).toFixed(2)} KB/s`,
+            dataIndex: 'msgThroughputIn',
+            key: 'msgThroughputIn',
+            render: (value: number) => formatThroughput(value),
         },
         {
             title: '客户端版本',
@@ -431,6 +465,11 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
             key: 'consumerName',
         },
         {
+            title: '所属订阅',
+            dataIndex: 'subscription',
+            key: 'subscription',
+        },
+        {
             title: '状态',
             dataIndex: 'connected',
             key: 'connected',
@@ -440,13 +479,17 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
             title: '输出速率',
             dataIndex: 'msgRateOut',
             key: 'msgRateOut',
-            render: (value: number) => `${value.toFixed(2)} msg/s`,
+            render: (value: number) => formatMessageRate(value),
         },
         {
-            title: '积压消息',
-            dataIndex: 'msgBacklog',
-            key: 'msgBacklog',
-            render: (value: number) => <Tag color={value > 0 ? 'warning' : 'success'}>{value.toLocaleString()}</Tag>,
+            // 积压属于订阅维度，单个消费者能看到的只有未确认消息数
+            title: '未确认消息',
+            dataIndex: 'unackedMessages',
+            key: 'unackedMessages',
+            render: (value: number) => {
+                const unacked = value || 0;
+                return <Tag color={unacked > 0 ? 'warning' : 'success'}>{unacked.toLocaleString()}</Tag>;
+            },
         },
         {
             title: '客户端版本',
@@ -548,10 +591,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                                                                 总存储大小
                                                             </span>
                                                             <p style={{fontSize: 24, fontWeight: 600}}>
-                                                                {((stats.totalStorageSize || 0) / 1024 / 1024).toFixed(
-                                                                    2,
-                                                                )}{' '}
-                                                                MB
+                                                                {formatBytes(stats.storageSize)}
                                                             </p>
                                                         </div>
                                                     </Col>
@@ -561,7 +601,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                                                                 积压大小
                                                             </span>
                                                             <p style={{fontSize: 24, fontWeight: 600}}>
-                                                                {((stats.backlogSize || 0) / 1024 / 1024).toFixed(2)} MB
+                                                                {formatBytes(stats.backlogSize)}
                                                             </p>
                                                         </div>
                                                     </Col>
@@ -571,7 +611,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                                                                 消息输入速率
                                                             </span>
                                                             <p style={{fontSize: 24, fontWeight: 600}}>
-                                                                {(stats.msgRateIn || 0).toFixed(2)} msg/s
+                                                                {formatMessageRate(stats.msgRateIn)}
                                                             </p>
                                                         </div>
                                                     </Col>
@@ -586,7 +626,9 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                                                     <Table
                                                         dataSource={stats.producers}
                                                         columns={producerColumns}
-                                                        rowKey="producerName"
+                                                        rowKey={record =>
+                                                            `${record.producerName}-${record.address ?? ''}`
+                                                        }
                                                         pagination={false}
                                                         size="small"
                                                     />
@@ -608,7 +650,9 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                                                     <Table
                                                         dataSource={stats.consumers}
                                                         columns={consumerColumns}
-                                                        rowKey="consumerName"
+                                                        rowKey={record =>
+                                                            `${record.subscription}-${record.consumerName}`
+                                                        }
                                                         pagination={false}
                                                         size="small"
                                                     />
@@ -639,13 +683,16 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                                 <Card
                                     title={`订阅列表 (${subscriptionData.length})`}
                                     extra={
-                                        <Button
-                                            type="primary"
-                                            icon={<PlusOutlined />}
-                                            onClick={() => setCreateModalOpen(true)}
-                                        >
-                                            创建订阅
-                                        </Button>
+                                        <Tooltip title={adminSubscriptionUnsupported ? adminSubscriptionHint : ''}>
+                                            <Button
+                                                type="primary"
+                                                icon={<PlusOutlined />}
+                                                disabled={adminSubscriptionUnsupported}
+                                                onClick={() => setCreateModalOpen(true)}
+                                            >
+                                                创建订阅
+                                            </Button>
+                                        </Tooltip>
                                     }
                                 >
                                     {subscriptionData.length > 0 ? (
@@ -680,6 +727,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                                     tenant={tenant}
                                     namespace={namespace}
                                     topic={topic}
+                                    persistent={persistent}
                                 />
                             ),
                         },
@@ -692,13 +740,11 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                                     <div style={{padding: '20px'}}>
                                         <div style={{marginBottom: 'var(--spacing-md)'}}>
                                             <span style={{fontWeight: 500}}>Topic 名称:</span>
-                                            <code
-                                                style={{marginLeft: 8}}
-                                            >{`${persistent ? 'persistent' : 'non-persistent'}://${tenant}/${namespace}/${topic}`}</code>
+                                            <code style={{marginLeft: 8}}>{topicUri}</code>
                                         </div>
                                         <div style={{marginBottom: 'var(--spacing-md)'}}>
                                             <span style={{fontWeight: 500}}>分区数:</span>
-                                            <span style={{marginLeft: 8}}>{stats?.numPartitions || 0}</span>
+                                            <span style={{marginLeft: 8}}>{stats?.partitions?.length || 0}</span>
                                         </div>
                                         <div style={{marginBottom: 'var(--spacing-md)'}}>
                                             <span style={{fontWeight: 500}}>是否持久化:</span>
@@ -787,12 +833,15 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                     <Form.Item name="name" label="订阅名称" rules={[{required: true, message: '请输入订阅名称'}]}>
                         <Input placeholder="输入订阅名称" />
                     </Form.Item>
-                    <Form.Item name="type" label="订阅类型">
-                        <Select defaultValue="exclusive" style={{width: '100%'}}>
-                            <Select.Option value="exclusive">Exclusive（独占）</Select.Option>
-                            <Select.Option value="shared">Shared（共享）</Select.Option>
-                            <Select.Option value="failover">Failover（故障转移）</Select.Option>
-                            <Select.Option value="key_shared">Key_Shared（键共享）</Select.Option>
+                    <Form.Item
+                        name="initialPosition"
+                        label="起始消费位置"
+                        initialValue="Latest"
+                        extra="订阅类型由第一个连上来的消费者决定，创建时无法指定"
+                    >
+                        <Select style={{width: '100%'}}>
+                            <Select.Option value="Latest">最新位置（只消费新消息）</Select.Option>
+                            <Select.Option value="Earliest">最早位置（从保留的消息开头消费）</Select.Option>
                         </Select>
                     </Form.Item>
                 </Form>
@@ -845,7 +894,8 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                         </Form.Item>
                     )}
                     <p style={{color: 'var(--color-text-secondary)', fontSize: 12, marginTop: 8}}>
-                        重置游标后，订阅将从指定位置开始消费消息。
+                        最早位置与指定时间戳会重置游标；本 broker 没有"跳到最新"的游标接口，
+                        该选项实现为跳过当前全部积压消息（skip_all），已被跳过的消息不会再次投递。
                     </p>
                 </Form>
             </Modal>
@@ -879,7 +929,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                             type="number"
                             placeholder="输入要跳过的消息数量"
                             value={skipCount}
-                            onChange={e => setSkipCount(e.target.value ? parseInt(e.target.value) : 0)}
+                            onChange={e => setSkipCount(e.target.value ? parseInt(e.target.value, 10) : 0)}
                             min={1}
                         />
                     </Form.Item>
@@ -915,42 +965,44 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
             >
                 <Form form={editConfigForm} layout="vertical">
                     <Form.Item
-                        name="maxMessageSize"
-                        label="最大消息大小 (字节)"
-                        rules={[{type: 'number', min: 0, message: '请输入有效的数字'}]}
+                        name="retentionTimeInMinutes"
+                        label="保留时间（分钟）"
+                        extra="0 表示永不按时间删除；留空表示不修改"
                     >
-                        <Input type="number" placeholder="留空表示使用命名空间默认值" />
+                        <InputNumber min={0} max={525600} style={{width: '100%'}} placeholder="不修改" />
+                    </Form.Item>
+                    <Form.Item name="retentionSizeInMB" label="保留大小（MB）" extra="0 表示不限制容量；留空表示不修改">
+                        <InputNumber min={0} max={1048576} style={{width: '100%'}} placeholder="不修改" />
                     </Form.Item>
                     <Form.Item
-                        name="retentionTime"
-                        label="保留时间 (毫秒)"
-                        rules={[{type: 'number', min: 0, message: '请输入有效的数字'}]}
+                        name="numPartitions"
+                        label="分区数"
+                        extra="仅分区 topic 可调整；给非分区 topic 设置大于 0 的分区数会把它变成分区 topic"
                     >
-                        <Input type="number" placeholder="留空表示使用命名空间默认值" />
+                        <InputNumber min={0} max={1000} precision={0} style={{width: '100%'}} placeholder="不修改" />
                     </Form.Item>
-                    <Form.Item
-                        name="retentionSize"
-                        label="保留大小 (字节)"
-                        rules={[{type: 'number', min: 0, message: '请输入有效的数字'}]}
+
+                    {/* 生效值只读展示：这些策略本 broker 没有 topic 级写入口 */}
+                    <div
+                        style={{
+                            padding: 'var(--spacing-sm) var(--spacing-md)',
+                            background: 'var(--color-bg-secondary)',
+                            borderRadius: 6,
+                            fontSize: 12,
+                            lineHeight: 1.9,
+                        }}
                     >
-                        <Input type="number" placeholder="留空表示使用命名空间默认值" />
-                    </Form.Item>
-                    <Form.Item
-                        name="backlogQuotaLimit"
-                        label="积压配额限制 (字节)"
-                        rules={[{type: 'number', min: 0, message: '请输入有效的数字'}]}
-                    >
-                        <Input type="number" placeholder="留空表示使用命名空间默认值" />
-                    </Form.Item>
-                    <Form.Item name="backlogQuotaRetentionPolicy" label="积压配额保留策略">
-                        <Select placeholder="留空表示使用命名空间默认值">
-                            <Select.Option value="producer_request_hold">暂停生产者请求</Select.Option>
-                            <Select.Option value="producer_exception">抛出异常</Select.Option>
-                            <Select.Option value="consumer_backlog_eviction">驱逐积压消息</Select.Option>
-                        </Select>
-                    </Form.Item>
+                        <div>
+                            生效积压配额：{formatBytes(stats?.backlogQuotaLimitSize ?? 0)} /
+                            {` ${(stats?.backlogQuotaLimitTime ?? 0) / 60000} 分钟`}
+                        </div>
+                        <div>去重状态：{stats?.deduplicationStatus || '未知'}</div>
+                        <div>归属 Broker：{stats?.ownerBrokers?.length ? stats.ownerBrokers.join('、') : '未知'}</div>
+                    </div>
+
                     <p style={{color: 'var(--color-text-secondary)', fontSize: 12, marginTop: 8}}>
-                        仅填写需要修改的字段，未填写的字段将保持不变。
+                        最大消息大小、积压配额、TTL、生产/消费者上限等策略在本 broker 上只有命名空间级别的写入口， 在
+                        topic 级别修改不会生效，因此这里不提供输入框。
                     </p>
                 </Form>
             </Modal>

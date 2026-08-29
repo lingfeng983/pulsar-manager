@@ -90,14 +90,26 @@
 }
 
 html, body, #root {
-  width: 100%;
   height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+body {
   font-family: var(--font-family);
   font-size: 14px;
   line-height: 1.4;
   color: var(--color-text-primary);
   background-color: var(--color-bg-base);
-  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 代码和等宽字体 */
+code, pre, .mono {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.2;
 }
 
 /* 滚动条样式 */
@@ -112,7 +124,7 @@ html, body, #root {
 
 ::-webkit-scrollbar-thumb {
   background: var(--color-text-tertiary);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
 }
 
 ::-webkit-scrollbar-thumb:hover {
@@ -138,4 +150,29 @@ html, body, #root {
 
 .bg-secondary {
   background-color: var(--color-bg-secondary);
+}
+
+/* 快捷键配置：存在冲突绑定的行 */
+.shortcut-row-conflict > td {
+  background-color: color-mix(in srgb, var(--color-danger) 8%, transparent);
+}
+
+/* 图表高度链：antd Spin 嵌套使用时把 style 落在圆点上，外层容器拿不到样式，
+   flex:1 传不下去，ECharts 只能按默认 100px 初始化。这里用类名把链补上。
+   全程只用 flex，不用百分比高度——flex-grown 出来的高度对百分比来说仍算"不确定"。 */
+.chart-spin.ant-spin-nested-loading,
+.chart-spin.ant-spin-nested-loading > .ant-spin-container {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+/* content-holder 是 display:block，antd 没给 .ant-tabs-content 定高，
+   于是它按内容塌陷，标签页白白丢掉一截视口高度（图表只能退回 min-height）。
+   body/#root 都是 overflow:hidden，页面滚动本就由各页根容器负责，
+   所以这里把确定高度传下来，而不是再套一层滚动容器。 */
+.ant-tabs-content-holder > .ant-tabs-content,
+.ant-tabs-content > .ant-tabs-tabpane {
+  height: 100%;
 }

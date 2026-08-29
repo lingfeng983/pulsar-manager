@@ -1,6 +1,7 @@
 import {app, BrowserWindow, shell, session, dialog} from 'electron';
 import path from 'path';
 import {registerIPCHandlers, cleanupDatabase} from './ipc/handlers';
+import {nativeClientManager} from './services/pulsar-native-client';
 
 process.on('uncaughtException', error => {
     console.error('[Main] Uncaught Exception:', error);
@@ -14,17 +15,16 @@ app.commandLine.appendSwitch('disable-features', 'AutofillServerCommunication');
 app.commandLine.appendSwitch('autofill-server-url', '');
 
 // 内容安全策略：仅允许本地资源与本地 Vite dev server，禁止加载远程脚本。
-// dev 环境需放开 ws/http localhost 以支持 HMR。
+// dev 环境走 http，Vite HMR 需要 inline/eval；生产是打包后的静态资源，
+// 不含内联脚本也不用 eval，因此收紧到仅 'self'。
+const isDev = process.env.NODE_ENV === 'development';
 const CSP_DIRECTIVES = [
     "default-src 'self'",
-    // Vite dev 需要 inline/eval；生产构建后可进一步收紧
-    "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+    isDev ? "script-src 'self' 'unsafe-inline' 'unsafe-eval'" : "script-src 'self'",
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data:",
     "font-src 'self' data:",
-    process.env.NODE_ENV === 'development'
-        ? "connect-src 'self' ws: http://localhost:* http://127.0.0.1:*"
-        : "connect-src 'self'",
+    isDev ? "connect-src 'self' ws: http://localhost:* http://127.0.0.1:*" : "connect-src 'self'",
 ].join('; ');
 
 let mainWindow: BrowserWindow | null = null;
@@ -48,7 +48,7 @@ function createWindow() {
     });
 
     // 开发环境加载 Vite 服务器
-    if (process.env.NODE_ENV === 'development') {
+    if (isDev) {
         const vitePort = process.env.VITE_PORT || 5173;
         mainWindow.loadURL(`http://localhost:${vitePort}`);
         mainWindow.webContents.openDevTools();
@@ -148,6 +148,9 @@ app.on('window-all-closed', () => {
 
 // 应用退出时清理资源
 app.on('will-quit', () => {
+    // 原生客户端的会话要主动关，否则 broker 侧会留下未关闭的消费者/生产者
+    // （订阅看起来"卡住"往往就是这个原因）。will-quit 无法等待异步关闭，只能尽力而为。
+    void nativeClientManager.clear();
     cleanupDatabase();
 });
 

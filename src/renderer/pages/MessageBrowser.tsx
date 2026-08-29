@@ -5,152 +5,394 @@ import {
     Button,
     Input,
     Select,
+    AutoComplete,
     Space,
     message,
-    Spin,
     Alert,
     Modal,
     Tooltip,
     Tag,
     Empty,
     Dropdown,
+    Segmented,
+    Switch,
+    InputNumber,
+    DatePicker,
 } from 'antd';
 import {
     UpOutlined,
     DownOutlined,
     ZoomInOutlined,
-    ReloadOutlined,
     PauseCircleOutlined,
     PlayCircleOutlined,
     DownloadOutlined,
     SendOutlined,
+    ReloadOutlined,
 } from '@ant-design/icons';
-import type {Message} from '../types';
+import type {Message, MessageBatch, SessionEndEvent} from '../types';
+import {formatBytes} from '../utils/format';
 import dayjs from 'dayjs';
 import {downloadBlob} from '../utils/download';
+import {useCommand} from '../hooks/useKeybindings';
 
 const {TextArea} = Input;
+
+type StreamMode = 'consume' | 'read';
+type PanelMode = 'send' | StreamMode;
 
 interface MessageBrowserProps {
     clusterId: string;
     tenant: string;
     namespace: string;
     topic: string;
+    persistent?: boolean;
 }
 
-const MessageBrowser: React.FC<MessageBrowserProps> = ({clusterId, tenant, namespace, topic}) => {
-    const mountedRef = useRef(true);
-    const messagesRequestRef = useRef(0);
+interface ActiveSession {
+    sessionId: string;
+    mode: StreamMode;
+}
 
-    useEffect(() => {
-        mountedRef.current = true;
-        return () => {
-            mountedRef.current = false;
-        };
-    }, []);
+const MAX_DISPLAY_COUNT = 500;
+const TRUNCATE_LENGTH = 50;
 
+const MessageBrowser: React.FC<MessageBrowserProps> = ({clusterId, tenant, namespace, topic, persistent = true}) => {
+    const [mode, setMode] = useState<PanelMode>('send');
     const [messages, setMessages] = useState<Message[]>([]);
-    const [loading, setLoading] = useState(false);
+    const [sessionId, setSessionId] = useState<string | null>(null);
+    const [starting, setStarting] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    const [subscription, setSubscription] = useState('');
+
     const [subscriptions, setSubscriptions] = useState<string[]>([]);
-    const [count, setCount] = useState(10);
-    const [isStreaming, setIsStreaming] = useState(false);
+    const [subscription, setSubscription] = useState('');
+
+    const [sendText, setSendText] = useState('');
+    const [sendProperties, setSendProperties] = useState('');
+    const [sendLoading, setSendLoading] = useState(false);
+    const [lastMessageId, setLastMessageId] = useState<string | null>(null);
+
+    const [subscriptionType, setSubscriptionType] = useState<'Exclusive' | 'Shared' | 'Failover' | 'Key_Shared'>(
+        'Shared',
+    );
+    const [initialPosition, setInitialPosition] = useState<'Latest' | 'Earliest'>('Earliest');
+    const [autoAck, setAutoAck] = useState(true);
+    const [consumeMax, setConsumeMax] = useState(0);
+
+    const [readFrom, setReadFrom] = useState<'earliest' | 'latest' | 'timestamp'>('earliest');
+    const [readTimestamp, setReadTimestamp] = useState<dayjs.Dayjs | null>(null);
+    const [readMax, setReadMax] = useState(20);
+
+    const [backlog, setBacklog] = useState<{messageCount: number; sizeInBytes: number} | null>(null);
+    const [backlogLoading, setBacklogLoading] = useState(false);
     const [expandedMessages, setExpandedMessages] = useState<string[]>([]);
     const [showFullMessage, setShowFullMessage] = useState<Message | null>(null);
-    const [sendMessage, setSendMessage] = useState('');
-    const [sendLoading, setSendLoading] = useState(false);
     const [exportLoading, setExportLoading] = useState(false);
-    const [hasLoaded, setHasLoaded] = useState(false);
 
-    const TRUNCATE_LENGTH = 50;
-    const MAX_DISPLAY_COUNT = 500;
+    // 会话 id 同时放 ref：推送回调与卸载清理都要读最新值，
+    // 放 state 会让 effect 依赖来回变化，反而漏停或重复停。
+    const sessionRef = useRef<ActiveSession | null>(null);
 
-    // 获取订阅列表
-    const fetchSubscriptions = useCallback(async () => {
-        try {
-            const response = await window.electronAPI.resources.getSubscriptions(clusterId, tenant, namespace, topic);
-            if (response.success && response.data) {
-                setSubscriptions(response.data);
-                if (response.data.length > 0 && !subscription) {
-                    setSubscription(response.data[0]);
-                }
-            }
-        } catch (error) {
-            console.error('Failed to fetch subscriptions:', error);
-        }
-    }, [clusterId, tenant, namespace, topic, subscription]);
-
-    // 获取消息
-    const fetchMessages = useCallback(async () => {
-        if (!subscription) {
+    const stopActiveSession = useCallback(async (notify: boolean) => {
+        const session = sessionRef.current;
+        if (!session) {
             return;
         }
-
-        // 3 秒轮询下单次 peek 可能超过一个周期，请求会叠加。用自增请求号确保
-        // 只有最后一次发起的请求能写回 state，避免乱序响应让列表回退。
-        const requestId = ++messagesRequestRef.current;
-        const isCurrent = () => mountedRef.current && messagesRequestRef.current === requestId;
-
-        setLoading(true);
-        setError(null);
+        // 先摘掉引用：在途的批次会因为 id 对不上被丢弃，重复点击也不会重复停止
+        sessionRef.current = null;
+        setSessionId(null);
+        const stop =
+            session.mode === 'consume' ? window.electronAPI.messages.stopConsume : window.electronAPI.messages.stopRead;
         try {
-            const response = await window.electronAPI.messages.browse({
+            const response = await stop(session.sessionId);
+            if (notify && !response.success) {
+                message.warning(response.error || '停止会话失败');
+            }
+        } catch (stopError) {
+            if (notify) {
+                message.error('停止会话失败');
+            }
+            console.error('Failed to stop session:', stopError);
+        }
+    }, []);
+
+    // 切换模式或换 topic 都会让旧会话失去意义：先停，且不打扰用户
+    useEffect(() => {
+        void stopActiveSession(false);
+        setMessages([]);
+        setError(null);
+    }, [mode, clusterId, tenant, namespace, topic, persistent, stopActiveSession]);
+
+    // 组件卸载（关标签页）时主进程侧的 consumer/reader 必须一起关掉，
+    // 否则它会一直占着订阅，下次开始消费会被"该订阅已有会话"拒绝。
+    useEffect(
+        () => () => {
+            void stopActiveSession(false);
+        },
+        [stopActiveSession],
+    );
+
+    const appendBatch = useCallback((batch: MessageBatch) => {
+        setMessages(prev => [...batch.messages, ...prev].slice(0, MAX_DISPLAY_COUNT));
+    }, []);
+
+    useEffect(() => {
+        const isMine = (id: string) => sessionRef.current?.sessionId === id;
+
+        const offConsume = window.electronAPI.messages.onConsumeBatch(batch => {
+            if (isMine(batch.sessionId)) {
+                appendBatch(batch);
+            }
+        });
+        const offRead = window.electronAPI.messages.onReadBatch(batch => {
+            if (isMine(batch.sessionId)) {
+                appendBatch(batch);
+            }
+        });
+        // 收满上限或循环出错时会话会自己结束，不接这个事件界面就会一直显示"运行中"
+        const offEnd = window.electronAPI.messages.onSessionEnd((event: SessionEndEvent) => {
+            if (!isMine(event.sessionId)) {
+                return;
+            }
+            sessionRef.current = null;
+            setSessionId(null);
+            if (event.reason === 'error') {
+                setError(event.detail || '会话异常终止');
+            } else if (event.reason === 'completed') {
+                message.info('已达到消息数量上限，会话结束');
+            }
+        });
+
+        return () => {
+            offConsume();
+            offRead();
+            offEnd();
+        };
+    }, [appendBatch]);
+
+    const fetchSubscriptions = useCallback(async () => {
+        try {
+            const response = await window.electronAPI.resources.getSubscriptions(
                 clusterId,
                 tenant,
                 namespace,
                 topic,
-                subscription,
-                count: Math.min(count, MAX_DISPLAY_COUNT),
-            });
-            if (!isCurrent()) {
-                return;
-            }
+                persistent,
+            );
             if (response.success && response.data) {
-                setMessages(response.data.slice(0, MAX_DISPLAY_COUNT));
-                setHasLoaded(true);
-            } else {
-                setError(response.error || 'Failed to fetch messages');
+                setSubscriptions(response.data);
+                setSubscription(current => current || response.data?.[0] || '');
             }
-        } catch (error) {
-            if (isCurrent()) {
-                setError(String(error));
-            }
-        } finally {
-            if (isCurrent()) {
-                setLoading(false);
-            }
+        } catch (fetchError) {
+            console.error('Failed to fetch subscriptions:', fetchError);
         }
-    }, [clusterId, tenant, namespace, topic, subscription, count]);
+    }, [clusterId, tenant, namespace, topic, persistent]);
 
-    // 发送消息
+    useEffect(() => {
+        void fetchSubscriptions();
+    }, [fetchSubscriptions]);
+
+    const refreshBacklog = useCallback(async () => {
+        if (!subscription) {
+            setBacklog(null);
+            return;
+        }
+        setBacklogLoading(true);
+        try {
+            const response = await window.electronAPI.messages.getBacklog({
+                clusterId,
+                tenant,
+                namespace,
+                topic,
+                persistent,
+                subscription,
+            });
+            if (response.success && response.data) {
+                setBacklog(response.data);
+            } else {
+                setBacklog(null);
+                setError(response.error || '获取积压失败');
+            }
+        } catch (backlogError) {
+            setBacklog(null);
+            setError(backlogError instanceof Error ? backlogError.message : String(backlogError));
+        } finally {
+            setBacklogLoading(false);
+        }
+    }, [clusterId, tenant, namespace, topic, persistent, subscription]);
+
+    const parseProperties = (): Record<string, string> | undefined => {
+        const raw = sendProperties.trim();
+        if (!raw) {
+            return undefined;
+        }
+        const parsed = JSON.parse(raw) as Record<string, string>;
+        return parsed;
+    };
+
     const handleSendMessage = async () => {
-        if (!sendMessage.trim()) return;
+        if (!sendText.trim()) {
+            return;
+        }
+
+        let properties: Record<string, string> | undefined;
+        try {
+            properties = parseProperties();
+        } catch {
+            message.error('属性必须是合法的 JSON 对象，例如 {"k":"v"}');
+            return;
+        }
 
         setSendLoading(true);
+        setError(null);
         try {
             const response = await window.electronAPI.messages.send({
                 clusterId,
                 tenant,
                 namespace,
                 topic,
-                message: sendMessage,
+                persistent,
+                message: sendText,
+                properties,
             });
-            if (response.success) {
-                message.success('消息发送成功');
-                setSendMessage('');
+            if (response.success && response.data) {
+                setLastMessageId(response.data.messageId);
+                message.success(`发送成功：${response.data.messageId}`);
+                void refreshBacklog();
             } else {
-                message.error(response.error || '发送失败');
+                setError(response.error || '发送失败');
             }
-        } catch {
-            message.error('发送失败');
+        } catch (sendError) {
+            setError(sendError instanceof Error ? sendError.message : String(sendError));
         } finally {
             setSendLoading(false);
         }
     };
 
-    // 导出消息
-    const handleExportMessages = async (format: 'json' | 'csv' = 'json') => {
+    const startSession = useCallback(
+        async (
+            streamMode: StreamMode,
+            invoke: () => Promise<{success: boolean; data?: {sessionId: string}; error?: string}>,
+        ) => {
+            if (sessionRef.current) {
+                message.warning('已有会话在运行，请先停止');
+                return;
+            }
+            setStarting(true);
+            setError(null);
+            try {
+                const response = await invoke();
+                if (!response.success || !response.data) {
+                    setError(response.error || '启动会话失败');
+                    return;
+                }
+                sessionRef.current = {sessionId: response.data.sessionId, mode: streamMode};
+                setSessionId(response.data.sessionId);
+                setMessages([]);
+            } catch (startError) {
+                setError(startError instanceof Error ? startError.message : String(startError));
+            } finally {
+                setStarting(false);
+            }
+        },
+        [],
+    );
+
+    const handleStartConsume = () =>
+        startSession('consume', () =>
+            window.electronAPI.messages.startConsume({
+                clusterId,
+                tenant,
+                namespace,
+                topic,
+                persistent,
+                subscription,
+                subscriptionType,
+                initialPosition,
+                autoAck,
+                maxMessages: consumeMax,
+            }),
+        );
+
+    const handleStartRead = () => {
+        if (readFrom === 'timestamp' && !readTimestamp) {
+            message.warning('请选择起始时间');
+            return;
+        }
+        return startSession('read', () =>
+            window.electronAPI.messages.startRead({
+                clusterId,
+                tenant,
+                namespace,
+                topic,
+                persistent,
+                from: readFrom,
+                timestamp: readTimestamp ? readTimestamp.valueOf() : undefined,
+                maxMessages: readMax,
+            }),
+        );
+    };
+
+    const handleToggleSession = () => {
+        if (sessionId) {
+            void stopActiveSession(true);
+            void refreshBacklog();
+        } else if (mode === 'consume') {
+            void handleStartConsume();
+        } else {
+            void handleStartRead();
+        }
+    };
+
+    useCommand('refreshMessages', () => {
+        void refreshBacklog();
+        void fetchSubscriptions();
+    });
+
+    useCommand('sendMessage', () => {
+        if (mode === 'send') {
+            void handleSendMessage();
+        }
+    });
+
+    const toggleExpand = useCallback((messageId: string) => {
+        setExpandedMessages(prev =>
+            prev.includes(messageId) ? prev.filter(id => id !== messageId) : [...prev, messageId],
+        );
+    }, []);
+
+    // 主进程传来的 data 是 base64（原生载荷可能是任意二进制）。
+    // 直接展示 base64 等于没展示内容，所以先解回文本；解出控制字符说明是二进制，保留 base64。
+    const asText = (base64: string): string | null => {
+        let decoded: string;
+        try {
+            const binary = atob(base64);
+            decoded = new TextDecoder().decode(Uint8Array.from(binary, ch => ch.charCodeAt(0)));
+        } catch {
+            return null;
+        }
+        for (let index = 0; index < decoded.length; index += 1) {
+            const code = decoded.charCodeAt(index);
+            const isControl = code < 32 && code !== 9 && code !== 10 && code !== 13;
+            if (isControl || code === 0xfffd) {
+                return null;
+            }
+        }
+        return decoded;
+    };
+
+    const formatMessageData = (data: string): string => {
+        const text = asText(data) ?? data;
+        try {
+            return JSON.stringify(JSON.parse(text), null, 2);
+        } catch {
+            return text;
+        }
+    };
+
+    const truncateMessage = (content: string, maxLength: number = TRUNCATE_LENGTH): string =>
+        content.length <= maxLength ? content : content.substring(0, maxLength) + '...';
+
+    const handleExportMessages = async (format: 'json' | 'csv') => {
         if (messages.length === 0) {
             message.warning('暂无消息可导出');
             return;
@@ -174,7 +416,6 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({clusterId, tenant, names
                 mimeType = 'application/json';
                 extension = 'json';
             } else {
-                // CSV 格式
                 const headers = ['messageId', 'publishTime', 'producerName', 'properties', 'data'];
                 const rows = messages.map(msg => [
                     msg.messageId,
@@ -189,84 +430,24 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({clusterId, tenant, names
             }
 
             downloadBlob(content, `messages_${topic}_${dayjs().format('YYYYMMDD_HHmmss')}.${extension}`, mimeType);
-
             message.success(`成功导出 ${messages.length} 条消息 (${extension.toUpperCase()})`);
-        } catch (error) {
-            console.error('Failed to export messages:', error);
+        } catch (exportError) {
+            console.error('Failed to export messages:', exportError);
             message.error('导出失败');
         } finally {
             setExportLoading(false);
         }
     };
 
-    // 切换消息展开状态
-    const toggleExpand = useCallback((messageId: string) => {
-        setExpandedMessages(prev => {
-            if (prev.includes(messageId)) {
-                return prev.filter(id => id !== messageId);
-            } else {
-                return [...prev, messageId];
-            }
-        });
-    }, []);
-
-    // 格式化消息数据
-    const formatMessageData = (data: string): string => {
-        try {
-            // 尝试解码 base64
-            const decoded = atob(data);
-            // 尝试解析为 JSON
-            const parsed = JSON.parse(decoded);
-            return JSON.stringify(parsed, null, 2);
-        } catch {
-            try {
-                // 直接尝试解析为 JSON
-                const parsed = JSON.parse(data);
-                return JSON.stringify(parsed, null, 2);
-            } catch {
-                // 返回原始数据
-                return data;
-            }
-        }
-    };
-
-    // 截断消息内容
-    const truncateMessage = (content: string, maxLength: number = TRUNCATE_LENGTH): string => {
-        if (content.length <= maxLength) return content;
-        return content.substring(0, maxLength) + '...';
-    };
-
-    // 初始化
-    useEffect(() => {
-        fetchSubscriptions();
-    }, [fetchSubscriptions]);
-
-    // 自动刷新
-    useEffect(() => {
-        if (!isStreaming) return;
-
-        const interval = setInterval(() => {
-            fetchMessages();
-        }, 3000);
-
-        return () => clearInterval(interval);
-    }, [isStreaming, fetchMessages]);
-
-    // 表格列定义
     const columns = [
         {
             title: 'Message ID',
             dataIndex: 'messageId',
             key: 'messageId',
-            width: 180,
+            width: 190,
             render: (text: string) => <code style={{fontSize: 11, color: 'var(--color-text-secondary)'}}>{text}</code>,
         },
-        {
-            title: 'Producer',
-            dataIndex: 'producerName',
-            key: 'producerName',
-            width: 120,
-        },
+        {title: 'Producer', dataIndex: 'producerName', key: 'producerName', width: 120},
         {
             title: 'Publish Time',
             dataIndex: 'publishTime',
@@ -282,10 +463,12 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({clusterId, tenant, names
             title: 'Properties',
             dataIndex: 'properties',
             key: 'properties',
-            width: 150,
+            width: 110,
             render: (props: Record<string, string>) => {
-                const keys = Object.keys(props);
-                if (keys.length === 0) return '-';
+                const keys = Object.keys(props || {});
+                if (keys.length === 0) {
+                    return '-';
+                }
                 return (
                     <Tooltip title={keys.map(k => `${k}: ${props[k]}`).join('\n')}>
                         <Tag color="blue">{keys.length} 个属性</Tag>
@@ -294,10 +477,16 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({clusterId, tenant, names
             },
         },
         {
+            title: '重投',
+            dataIndex: 'redeliveryCount',
+            key: 'redeliveryCount',
+            width: 60,
+            render: (count?: number) => (count ? <Tag color="orange">{count}</Tag> : '-'),
+        },
+        {
             title: 'Data',
             dataIndex: 'data',
             key: 'data',
-            flex: 1,
             render: (data: string, record: Message) => {
                 const formatted = formatMessageData(data);
                 const isExpanded = expandedMessages.includes(record.messageId);
@@ -307,7 +496,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({clusterId, tenant, names
                     <div>
                         <div
                             style={{
-                                maxHeight: isExpanded ? '200px' : 'auto',
+                                maxHeight: isExpanded ? 200 : 'auto',
                                 overflow: 'auto',
                                 fontFamily: 'monospace',
                                 fontSize: 12,
@@ -343,136 +532,259 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({clusterId, tenant, names
         },
     ];
 
+    const fieldLabel = {marginRight: 8, fontSize: 13, fontWeight: 500} as const;
+
+    const sendPanel = (
+        <Space direction="vertical" style={{width: '100%'}} size="middle">
+            <div>
+                <div style={{marginBottom: 6, fontSize: 13, fontWeight: 500}}>消息内容</div>
+                <TextArea
+                    value={sendText}
+                    onChange={e => setSendText(e.target.value)}
+                    placeholder="输入要发送的消息内容..."
+                    rows={4}
+                />
+            </div>
+            <div>
+                <div style={{marginBottom: 6, fontSize: 13, fontWeight: 500}}>
+                    属性（可选，JSON 对象）
+                    <Tooltip title="作为 message properties 一起发出，接收列表里会显示出来">
+                        <span style={{marginLeft: 6, color: 'var(--color-text-tertiary)'}}>?</span>
+                    </Tooltip>
+                </div>
+                <Input
+                    value={sendProperties}
+                    onChange={e => setSendProperties(e.target.value)}
+                    placeholder='{"env":"test","trace":"abc"}'
+                />
+            </div>
+            <Space>
+                <Button
+                    type="primary"
+                    icon={<SendOutlined />}
+                    onClick={handleSendMessage}
+                    loading={sendLoading}
+                    disabled={!sendText.trim()}
+                >
+                    发送到 {persistent ? 'persistent' : 'non-persistent'}://{tenant}/{namespace}/{topic}
+                </Button>
+                {lastMessageId && <Tag color="green">最后一条 ID: {lastMessageId}</Tag>}
+            </Space>
+        </Space>
+    );
+
+    const streamControls =
+        mode === 'consume' ? (
+            <Space wrap size="middle">
+                <div>
+                    <label style={fieldLabel}>订阅:</label>
+                    <AutoComplete
+                        value={subscription}
+                        onChange={value => setSubscription(value)}
+                        options={subscriptions.map(s => ({value: s, label: s}))}
+                        placeholder="已有订阅或输入新订阅名"
+                        style={{width: 220}}
+                        disabled={!!sessionId}
+                    />
+                </div>
+                <div>
+                    <label style={fieldLabel}>类型:</label>
+                    <Select
+                        value={subscriptionType}
+                        onChange={setSubscriptionType}
+                        style={{width: 120}}
+                        disabled={!!sessionId}
+                        options={[
+                            {value: 'Shared', label: 'Shared'},
+                            {value: 'Exclusive', label: 'Exclusive'},
+                            {value: 'Failover', label: 'Failover'},
+                            {value: 'Key_Shared', label: 'Key_Shared'},
+                        ]}
+                    />
+                </div>
+                <div>
+                    <label style={fieldLabel}>起始:</label>
+                    <Select
+                        value={initialPosition}
+                        onChange={setInitialPosition}
+                        style={{width: 110}}
+                        disabled={!!sessionId}
+                        options={[
+                            {value: 'Earliest', label: 'Earliest'},
+                            {value: 'Latest', label: 'Latest'},
+                        ]}
+                    />
+                </div>
+                <div>
+                    <label style={fieldLabel}>自动 ack:</label>
+                    <Switch checked={autoAck} onChange={setAutoAck} disabled={!!sessionId} />
+                </div>
+                <Tooltip title="0 表示不限量，一直收到手动停止为止">
+                    <div>
+                        <label style={fieldLabel}>限量:</label>
+                        <InputNumber
+                            min={0}
+                            max={10000}
+                            value={consumeMax}
+                            onChange={value => setConsumeMax(value ?? 0)}
+                            style={{width: 90}}
+                            disabled={!!sessionId}
+                        />
+                    </div>
+                </Tooltip>
+            </Space>
+        ) : (
+            <Space wrap size="middle">
+                <div>
+                    <label style={fieldLabel}>起始位置:</label>
+                    <Select
+                        value={readFrom}
+                        onChange={setReadFrom}
+                        style={{width: 130}}
+                        disabled={!!sessionId}
+                        options={[
+                            {value: 'earliest', label: '最早'},
+                            {value: 'latest', label: '最新之后'},
+                            {value: 'timestamp', label: '指定时间'},
+                        ]}
+                    />
+                </div>
+                {readFrom === 'timestamp' && (
+                    <DatePicker
+                        showTime
+                        value={readTimestamp}
+                        onChange={setReadTimestamp}
+                        placeholder="起始时间"
+                        disabled={!!sessionId}
+                    />
+                )}
+                <Tooltip title="Reader 只读不确认，不影响任何订阅的游标">
+                    <div>
+                        <label style={fieldLabel}>限量:</label>
+                        <InputNumber
+                            min={1}
+                            max={10000}
+                            value={readMax}
+                            onChange={value => setReadMax(value ?? 1)}
+                            style={{width: 90}}
+                            disabled={!!sessionId}
+                        />
+                    </div>
+                </Tooltip>
+            </Space>
+        );
+
+    const isRunning = !!sessionId;
+
     return (
         <div style={{padding: 'var(--spacing-lg)', height: '100%', display: 'flex', flexDirection: 'column'}}>
-            {/* 工具栏 */}
             <Card style={{marginBottom: 'var(--spacing-md)'}}>
-                <Space wrap size="middle">
-                    {/* 订阅选择 */}
-                    <div>
-                        <label style={{marginRight: 8, fontSize: 13, fontWeight: 500}}>订阅:</label>
-                        <Select
-                            value={subscription}
-                            onChange={setSubscription}
-                            style={{width: 200}}
-                            placeholder="选择订阅"
-                            options={subscriptions.map(s => ({value: s, label: s}))}
-                        />
-                    </div>
-
-                    {/* 消息数量 */}
-                    <div>
-                        <label style={{marginRight: 8, fontSize: 13, fontWeight: 500}}>数量:</label>
-                        <Select
-                            value={count}
-                            onChange={setCount}
-                            style={{width: 100}}
-                            options={[
-                                {value: 10, label: '10'},
-                                {value: 50, label: '50'},
-                                {value: 100, label: '100'},
-                                {value: 500, label: '500'},
-                            ]}
-                        />
-                    </div>
-
-                    {/* 操作按钮 */}
-                    <Button icon={<ReloadOutlined spin={loading} />} onClick={fetchMessages} loading={loading}>
-                        刷新
-                    </Button>
-
-                    <Button
-                        icon={isStreaming ? <PauseCircleOutlined /> : <PlayCircleOutlined />}
-                        onClick={() => setIsStreaming(!isStreaming)}
-                        type={isStreaming ? 'primary' : 'default'}
-                    >
-                        {isStreaming ? '停止监听' : '开始监听'}
-                    </Button>
-
-                    <Dropdown.Button
-                        icon={<DownOutlined />}
-                        onClick={() => handleExportMessages('json')}
-                        menu={{
-                            items: [
-                                {key: 'json', label: '导出 JSON'},
-                                {key: 'csv', label: '导出 CSV'},
-                            ],
-                            onClick: ({key}) => handleExportMessages(key as 'json' | 'csv'),
-                        }}
-                        loading={exportLoading}
-                        disabled={messages.length === 0}
-                    >
-                        <DownloadOutlined /> 导出
-                    </Dropdown.Button>
+                <Space wrap size="middle" style={{width: '100%', justifyContent: 'space-between'}}>
+                    <Segmented
+                        value={mode}
+                        onChange={value => setMode(value as PanelMode)}
+                        options={[
+                            {value: 'send', label: '发送测试'},
+                            {value: 'consume', label: '订阅消费'},
+                            {value: 'read', label: 'Reader 读取'},
+                        ]}
+                    />
+                    {mode !== 'send' && (
+                        <Space wrap size="middle">
+                            <Button
+                                type={isRunning ? 'default' : 'primary'}
+                                icon={isRunning ? <PauseCircleOutlined /> : <PlayCircleOutlined />}
+                                onClick={handleToggleSession}
+                                loading={starting}
+                                disabled={mode === 'consume' && !subscription}
+                            >
+                                {isRunning ? '停止' : '开始'}
+                            </Button>
+                            {mode === 'consume' && (
+                                <Space size={4}>
+                                    <Button
+                                        size="small"
+                                        type="text"
+                                        icon={<ReloadOutlined spin={backlogLoading} />}
+                                        onClick={refreshBacklog}
+                                    >
+                                        积压:{' '}
+                                        {backlog
+                                            ? `${backlog.messageCount} 条 / ${formatBytes(backlog.sizeInBytes)}`
+                                            : '-'}
+                                    </Button>
+                                </Space>
+                            )}
+                        </Space>
+                    )}
                 </Space>
+                {mode !== 'send' && (
+                    <div style={{marginTop: 'var(--spacing-md)'}}>
+                        {streamControls}
+                        {mode === 'consume' && !autoAck && (
+                            <div style={{marginTop: 8, fontSize: 12, color: 'var(--color-text-tertiary)'}}>
+                                已关闭自动 ack：未确认的消息会在客户端重连后重投，重投列会显示次数。
+                            </div>
+                        )}
+                    </div>
+                )}
             </Card>
 
-            {/* 错误提示 */}
             {error && (
                 <Alert
-                    message="获取消息失败"
+                    message="操作失败"
                     description={error}
                     type="error"
                     showIcon
                     closable
+                    onClose={() => setError(null)}
                     style={{marginBottom: 'var(--spacing-md)'}}
                 />
             )}
 
-            {/* 消息列表 */}
-            <Card
-                title={`消息列表 - ${messages.length} 条`}
-                style={{flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column'}}
-            >
-                <div style={{flex: 1, overflow: 'auto'}}>
-                    <Spin spinning={loading}>
+            {mode === 'send' ? (
+                <Card title="发送消息">{sendPanel}</Card>
+            ) : (
+                <Card
+                    title={`消息列表 - ${messages.length} 条${isRunning ? '（实时推送中）' : ''}`}
+                    style={{flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column'}}
+                    extra={
+                        <Dropdown.Button
+                            size="small"
+                            icon={<DownOutlined />}
+                            onClick={() => handleExportMessages('json')}
+                            menu={{
+                                items: [
+                                    {key: 'json', label: '导出 JSON'},
+                                    {key: 'csv', label: '导出 CSV'},
+                                ],
+                                onClick: ({key}) => handleExportMessages(key as 'json' | 'csv'),
+                            }}
+                            loading={exportLoading}
+                            disabled={messages.length === 0}
+                        >
+                            <DownloadOutlined /> 导出
+                        </Dropdown.Button>
+                    }
+                >
+                    <div style={{flex: 1, overflow: 'auto'}}>
                         {messages.length === 0 ? (
                             <div style={{textAlign: 'center', padding: '40px 0'}}>
-                                {hasLoaded ? (
-                                    <Empty description="该订阅下暂无消息" />
-                                ) : (
-                                    <Empty description="选择订阅后点击刷新加载消息" />
-                                )}
+                                <Empty description={isRunning ? '等待消息...' : '点击「开始」接收消息'} />
                             </div>
                         ) : (
                             <Table
                                 dataSource={messages}
                                 columns={columns}
-                                rowKey="messageId"
+                                rowKey={(record, index) => `${record.messageId}-${index}`}
                                 pagination={false}
-                                scroll={{y: 'calc(100vh - 400px)'}}
                                 size="small"
                             />
                         )}
-                    </Spin>
-                </div>
-            </Card>
-
-            {/* 发送消息区域 */}
-            <Card title="发送消息" style={{marginTop: 'var(--spacing-md)'}}>
-                <Space direction="vertical" style={{width: '100%'}}>
-                    <TextArea
-                        value={sendMessage}
-                        onChange={e => setSendMessage(e.target.value)}
-                        placeholder="输入消息内容..."
-                        rows={3}
-                        style={{width: '100%'}}
-                    />
-                    <div style={{textAlign: 'right'}}>
-                        <Button
-                            type="primary"
-                            icon={<SendOutlined />}
-                            onClick={handleSendMessage}
-                            loading={sendLoading}
-                            disabled={!sendMessage.trim()}
-                        >
-                            发送消息
-                        </Button>
                     </div>
-                </Space>
-            </Card>
+                </Card>
+            )}
 
-            {/* 全屏消息查看弹窗 */}
             <Modal
                 title="消息详情"
                 open={showFullMessage !== null}

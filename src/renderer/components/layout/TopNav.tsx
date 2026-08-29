@@ -18,6 +18,9 @@ import {useClusterStore} from '../../store/cluster';
 import {loadTenants, loadNamespaces, loadTopics} from '../../hooks/resourceCache';
 import {shortName} from '../../utils/format';
 import {downloadBlob} from '../../utils/download';
+import {useCommand} from '../../hooks/useKeybindings';
+import {useShortcutStore, resolveBinding} from '../../store/shortcuts';
+import {formatBinding} from '../../utils/keybinding';
 
 interface SearchResult {
     key: string;
@@ -28,6 +31,7 @@ interface SearchResult {
         tenant?: string;
         namespace?: string;
         topic?: string;
+        persistent?: boolean;
     };
 }
 
@@ -41,14 +45,18 @@ const TopNav: React.FC = () => {
     const [searchLoading, setSearchLoading] = useState(false);
     const searchRef = useRef<any>(null);
     const [appVersion, setAppVersion] = useState('1.0.0');
+    const platform = useShortcutStore(state => state.platform);
+    const shortcutConfig = useShortcutStore(state => state.config);
+    const shortcutBinding = resolveBinding(shortcutConfig, platform, 'openShortcutConfig');
 
-    // Ctrl/Cmd+K 快捷键聚焦搜索框 + Escape 清空搜索
+    // 聚焦搜索由可绑定的 focusSearch 命令提供，绑定取自用户配置。
+    useCommand('focusSearch', () => {
+        searchRef.current?.focus();
+    });
+
+    // Escape 清空搜索属于弹层收起约定，不作为用户可配置快捷键。
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
-            if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
-                e.preventDefault();
-                searchRef.current?.focus();
-            }
             if (e.key === 'Escape') {
                 setSearchValue('');
                 setSearchResults([]);
@@ -135,15 +143,18 @@ const TopNav: React.FC = () => {
                                         for (const topic of topics) {
                                             const topicName = shortName(topic.name);
                                             if (topicName.toLowerCase().includes(keyword.toLowerCase())) {
+                                                const parts = [cluster.name, tenant.name, nsName, topicName];
+                                                const label = parts.join(' / ');
                                                 results.push({
                                                     key: `topic-${cluster.id}-${tenant.name}-${nsName}-${topicName}`,
-                                                    label: `${cluster.name} / ${tenant.name} / ${nsName} / ${topicName}`,
+                                                    label,
                                                     type: 'topic',
                                                     data: {
                                                         clusterId: cluster.id,
                                                         tenant: tenant.name,
                                                         namespace: nsName,
                                                         topic: topicName,
+                                                        persistent: topic.persistent,
                                                     },
                                                 });
                                             }
@@ -216,13 +227,13 @@ const TopNav: React.FC = () => {
                 });
                 break;
             case 'topic': {
-                const {clusterId, tenant, namespace, topic} = result.data || {};
+                const {clusterId, tenant, namespace, topic, persistent} = result.data || {};
                 if (clusterId && tenant && namespace && topic) {
                     addTab({
                         id: `topic-${clusterId}-${tenant}-${namespace}-${topic}`,
                         title: topic,
                         type: 'topic',
-                        data: {clusterId, tenant, namespace, topic},
+                        data: {clusterId, tenant, namespace, topic, persistent},
                     });
                 }
                 break;
@@ -315,7 +326,7 @@ const TopNav: React.FC = () => {
                 message.info('功能即将推出，敬请期待');
                 break;
             case 'shortcuts':
-                message.info('功能即将推出，敬请期待');
+                addTab({id: 'shortcuts', title: '快捷键配置', type: 'shortcuts'});
                 break;
             case 'plugins':
                 message.info('功能即将推出，敬请期待');
@@ -371,10 +382,7 @@ const TopNav: React.FC = () => {
                 key: 'shortcuts',
                 label: (
                     <span>
-                        快捷键设置{' '}
-                        <Tag color="default" style={{fontSize: 10}}>
-                            Coming Soon
-                        </Tag>
+                        快捷键设置 <Tag style={{fontSize: 10}}>{formatBinding(shortcutBinding, platform)}</Tag>
                     </span>
                 ),
             },

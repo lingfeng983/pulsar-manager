@@ -29,7 +29,8 @@ function persistKey(keyHex: string): void {
     fs.mkdirSync(path.dirname(protectedPath), {recursive: true});
 
     if (safeStorage.isEncryptionAvailable()) {
-        fs.writeFileSync(protectedPath, safeStorage.encryptString(keyHex));
+        // 即便内容已被 OS 密钥库加密，也把文件权限收紧到仅属主可读写
+        fs.writeFileSync(protectedPath, safeStorage.encryptString(keyHex), {mode: 0o600});
         // 迁移完成后删除明文密钥，否则等于没有加固
         const legacyPath = keyFilePath(LEGACY_KEY_FILE);
         if (fs.existsSync(legacyPath)) {
@@ -39,9 +40,17 @@ function persistKey(keyHex: string): void {
         return;
     }
 
-    // 平台不支持 safeStorage（部分 Linux 环境无 keyring）时退回明文文件，
-    // 并明确告警，不静默降级
-    log.warn('safeStorage is unavailable; encryption key falls back to a plaintext file');
+    // 平台不支持 safeStorage（部分 Linux 环境无 keyring）时默认 fail closed：
+    // 把凭据密钥落成明文等于没有加密，因此除非用户显式设置
+    // ALLOW_PLAINTEXT_KEY=1 承担风险，否则直接报错而不是静默降级。
+    if (process.env.ALLOW_PLAINTEXT_KEY !== '1') {
+        log.error('safeStorage is unavailable; refusing to store the encryption key in plaintext');
+        throw new Error(
+            'OS secure storage is unavailable. Set ALLOW_PLAINTEXT_KEY=1 to allow a plaintext key file (insecure).',
+        );
+    }
+
+    log.warn('safeStorage unavailable; ALLOW_PLAINTEXT_KEY=1 set, falling back to a plaintext key file');
     fs.writeFileSync(keyFilePath(LEGACY_KEY_FILE), keyHex, {mode: 0o600});
 }
 
