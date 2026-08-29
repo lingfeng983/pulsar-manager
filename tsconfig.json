@@ -21,6 +21,5 @@
     }
   },
   "include": ["src/renderer/**/*", "src/preload.ts", "src/shared/**/*"],
-
   "references": [{ "path": "./tsconfig.node.json" }]
 }

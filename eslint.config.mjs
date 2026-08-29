@@ -31,16 +31,23 @@ export default tseslint.config(
             eqeqeq: ['error', 'smart'],
             'no-var': 'error',
             'prefer-const': 'error',
-            'no-trailing-spaces': 'error',
             'react-hooks/rules-of-hooks': 'error',
             'react-hooks/exhaustive-deps': 'warn',
             // 项目里大量与 Pulsar Admin API 交互的地方需要 any 兜底
             '@typescript-eslint/no-explicit-any': 'off',
-            '@typescript-eslint/no-unused-vars': [
-                'error',
-                {argsIgnorePattern: '^_', varsIgnorePattern: '^_'},
-            ],
+            '@typescript-eslint/no-unused-vars': ['error', {argsIgnorePattern: '^_', varsIgnorePattern: '^_'}],
         },
     },
     prettierConfig,
+    // prettierConfig 会关掉 max-len，但 prettier 本身无法拆开长模板字符串、
+    // 长 JSX 文本这类"不可断行"的内容——恰恰是之前 11 处超长行漏过的原因。
+    // 所以在它之后重新打开 max-len，并补上 prettier 管不到的 radix。
+    // 注意：这个块必须放在 prettierConfig 之后，否则会被重新关掉。
+    {
+        files: ['src/**/*.{ts,tsx}'],
+        rules: {
+            'max-len': ['error', {code: 120, ignoreUrls: true, ignoreRegExpLiterals: true}],
+            radix: 'error',
+        },
+    },
 );

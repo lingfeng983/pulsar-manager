@@ -4,3 +4,8 @@ release/
 *.tsbuildinfo
 .DS_Store
 *.log
+
+# 本地临时产物（命令输出、调试快照等），不应进仓库
+.comate/
+.comate_*
+

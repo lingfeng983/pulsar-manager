@@ -16,5 +16,4 @@
     "typeRoots": ["./node_modules/@types", "./src/types"]
   },
   "include": ["src/main/**/*", "src/preload.ts", "src/types/**/*", "src/shared/**/*"]
-
 }
