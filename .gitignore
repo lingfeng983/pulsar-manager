@@ -8,6 +8,7 @@ release/
 # 本地临时产物（命令输出、调试快照等），不应进仓库
 .comate/
 .comate_*
+.idea/
 
 # 打包产物备份有数百 MB，根目录的 png 是验证截图：都只对本机有意义
 release-backup-*/
