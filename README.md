@@ -78,6 +78,8 @@ pulsar-manager/
 │       ├── store/             # Zustand：集群、Tab、主题、命令、快捷键
 │       └── utils/             # 格式化、导出、拓扑配色、按键解析
 ├── docs/DATA_SOURCES.md       # 每个页面的数据来源说明
+├── release.sh                 # 一键出包 + 发布 Gitee 发行版
+├── scripts/release-publish.mjs# 调 Gitee API 建/更新发行版并上传附件
 ├── electron-builder.json      # 打包配置
 ├── vite.config.ts             # 前端构建 + 生产 CSP 注入
 └── tsconfig.node.json         # 主进程/preload 的 TS 配置（CommonJS）
@@ -108,7 +110,7 @@ npm run dev          # 并行启动 Vite(5173) 与 Electron
 npm run build:main   # tsc -p tsconfig.node.json → dist/src/main、dist/src/preload.js
 npm run build        # tsc -b + vite build → dist/renderer
 npm run electron:pack  # 免安装目录，产物在 release/win-unpacked
-npm run electron:dist  # NSIS 安装包
+npm run electron:dist  # NSIS 安装包 → release/Pulsar管理工具-安装包-<version>.exe
 ```
 
 原生 `.node` 通过 `asarUnpack` 解包到 `app.asar.unpacked`；`npmRebuild` 保持 `false`，因为 pulsar-client 走 N-API 预编译，跨 Node/Electron ABI 稳定。**开发态能跑不代表打包态能跑**，改过原生依赖后请在 `release/win-unpacked` 里启动验证一次。
@@ -121,6 +123,22 @@ npx eslint src       # 规范（max-len 120 在 prettier 之后重新开启）
 npm run format:check # 格式，不符时先 npm run format
 npm run build:main && npm run build
 ```
+
+### 发版
+
+一条命令跑完静态门、出包、打标签、发布到 Gitee 发行版：
+
+```bash
+./release.sh                          # 标签取 package.json 的 version（1.0.0 -> v1.0.0）
+./release.sh v1.1.0                   # 指定标签
+./release.sh v1.1.0 "标题" notes.md   # 指定标题与正文
+```
+
+- **凭证**：环境变量 `GITEE_TOKEN`，或仓库根目录的 `.gitee_token` 文件（在 <https://gitee.com/profile/personal_access_tokens> 创建，勾选 projects 权限）。该文件已在 `.gitignore` 里，严禁入库。
+- **前置条件**：工作区干净，且本地 HEAD 与 `origin/master` 一致——发行版必须对应一个已推送的提交。
+- **产物**：`release/Pulsar管理工具-安装包-<version>.exe` 作为附件挂到发行版，正文自动带上大小、SHA256、提交号与变更列表；完整构建日志在 `release/release.log`。
+- **可重复执行**：标签已存在且指向当前提交就复用（发行版转为更新，同名附件先删再传）；指向别的提交则直接报错，不会把新包挂到旧标签上。任何一步失败，修好后重跑即可，不会产生重复发行版或重复附件。
+- 中文标题与正文由 `release.sh` 写入 UTF-8 临时文件再交给 `scripts/release-publish.mjs`，**不走命令行参数**——Windows 控制台是 GBK，直接传参会把中文变成乱码。
 
 ## 架构约束
 
