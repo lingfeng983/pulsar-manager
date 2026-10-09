@@ -1,6 +1,6 @@
 {
   "name": "pulsar-manager",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Pulsar Desktop Management Tool",
   "main": "dist/src/main/index.js",
   "author": "Pulsar Manager Team",
