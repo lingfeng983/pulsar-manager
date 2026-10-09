@@ -1,195 +1,158 @@
 # Pulsar Manager Desktop
 
-Pulsar 桌面管理工具 - 企业级消息中间件运维客户端
+Apache Pulsar 集群的桌面运维客户端，基于 Electron + React + TypeScript。所有与 broker 的通信都在主进程完成，渲染进程只通过 preload 暴露的白名单接口拿数据。
+
+## 功能
+
+### 集群管理
+
+- 集群增删改查、连接测试（走 Admin API 健康检查，并尝试读取集群版本）
+- 凭据以 AES-256 加密后落库，加密密钥由 Electron `safeStorage`（OS 密钥库）保护；平台不支持时默认**拒绝降级**为明文，需显式设置 `ALLOW_PLAINTEXT_KEY=1` 才会写明文密钥文件
+- 单实例锁：重复启动会把焦点交回已有窗口，而不是再起一个进程
+
+### 资源浏览与管理
+
+- 资源树按 租户 → 命名空间 → Topic 三层懒加载，带模块级缓存与竞态保护（订阅在 Topic 详情页里管理）
+- **Topic**：详情（stats / 生产者 / 消费者 / 订阅）、创建（分区与非分区、持久与非持久）、删除、配置读取与修改
+  - 配置是**逐策略端点**并发读取的（retention、backlog-quota、ttl、max-producers、max-consumers、message-ttl、deduplication、permissions），单个端点缺失只降级该项，不会让整个表单空白
+  - 写入是 read-modify-write 后**只 PUT 变更过的键**
+- **租户 / 命名空间**：创建、更新、删除
+- **订阅**：创建、删除、重置游标、跳过消息
+- 上述资源类变更都会写入操作日志，可从顶部导航导出最近 100 条为 JSON
+
+### 消息收发
+
+三种模式互不混淆（不是一个列表里塞所有东西）：
+
+- **发送测试**：通过原生客户端向指定 topic 发一条消息，返回真实 messageId
+- **订阅消费**：以指定订阅消费，支持从 earliest / latest / 指定时间戳开始；自动 ack 可关闭（关闭后消息不被确认，用于观察 backlog 累积），但界面没有逐条手动 ack 的入口
+- **Reader 按位置读**：不占用订阅、不影响 backlog 的只读浏览
+
+消息由主进程按批推送（攒够 50 条或 300ms 一批），载荷为 base64；界面会尝试解回文本，判定为二进制时才保留 base64。支持导出 JSON / CSV。
+
+### 监控与拓扑
+
+- 首页总览与监控面板：集群聚合统计与 broker 列表（数据来自 Admin API 的真实 stats 聚合，不是造出来的示例值）
+- 集群拓扑图：力导向 / 环形两种布局切换，按节点类型与名称筛选，节点点击可直接打开对应详情页
+  - broker→topic 的归属关系只在**能拿到真实来源**时才画连线；拿不到时载荷里 `ownershipSource` 明确标注为不可用，界面也会提示，不编造全连接图
+  - 配色运行时从 CSS 变量读取，跟随亮色/暗色/护眼三套主题
+
+### 界面
+
+- 多 Tab 工作区，同一资源不会重复开 Tab
+- 快捷键自定义：`ShortcutConfig` 页面按分组列出所有可绑定命令，绑定持久化到本地设置；只有当前页面真的注册了处理器的命令才会响应按键，不会出现"按了没反应"的假绑定
+- 三套主题：亮色（默认）、暗色、护眼，全部走 CSS 变量，禁止硬编码颜色
 
 ## 技术栈
 
-- **桌面容器**: Electron 29.x LTS
-- **前端框架**: React 18.x + TypeScript 5.x
-- **UI 组件库**: Ant Design 5.x
-- **状态管理**: Zustand 4.x
-- **图表库**: ECharts 5.4.x
-- **数据库**: SQLite (better-sqlite3)
-- **HTTP 客户端**: Axios 1.6.x
-- **打包工具**: electron-builder 24.x
+| 层 | 选型 |
+| --- | --- |
+| 桌面容器 | Electron 29 |
+| 前端 | React 18 + TypeScript 5.6 + Vite 5 |
+| UI / 状态 | Ant Design 5、Zustand 4 |
+| 图表 | ECharts 5.4 |
+| 本地存储 | better-sqlite3 9 |
+| Pulsar 通信 | axios（Admin REST）+ pulsar-client 1.18（原生消息收发） |
+| 参数校验 | zod 3 |
+| 打包 | electron-builder 24（Windows NSIS / macOS dmg / Linux AppImage+deb） |
+| 代码质量 | ESLint 9 + Prettier 3 |
 
-## 项目结构
+## 目录结构
 
 ```
 pulsar-manager/
 ├── src/
-│   ├── main/                    # Electron 主进程
-│   │   ├── index.ts            # 主进程入口
-│   │   └── ipc/                # IPC 通信处理
-│   │       └── handlers.ts     # IPC handlers 注册
-│   ├── renderer/               # React 渲染进程
-│   │   ├── components/         # UI 组件
-│   │   │   └── layout/         # 布局组件
-│   │   │       ├── Layout.tsx      # 全局布局
-│   │   │       ├── TopNav.tsx      # 顶部导航栏
-│   │   │       ├── ResourceTree.tsx # 左侧资源树
-│   │   │       └── TabWorkspace.tsx # Tab 工作区
-│   │   ├── pages/              # 页面组件
-│   │   │   └── Home.tsx        # 首页总览
-│   │   ├── store/              # Zustand 状态管理
-│   │   │   ├── theme.ts        # 主题状态
-│   │   │   ├── cluster.ts      # 集群状态
-│   │   │   └── tabs.ts         # Tab 状态
-│   │   ├── types/              # TypeScript 类型定义
-│   │   │   └── index.ts        # 核心类型
-│   │   ├── App.tsx             # 应用根组件
-│   │   ├── main.tsx            # React 入口
-│   │   └── index.css           # 全局样式（含三套主题）
-│   └── preload.ts              # 预加载脚本
-├── package.json
-├── tsconfig.json               # TypeScript 配置
-├── tsconfig.node.json          # Node 进程 TS 配置
-├── vite.config.ts              # Vite 构建配置
-├── electron-builder.json       # 打包配置
-└── index.html                  # HTML 入口
+│   ├── main/                  # Electron 主进程：所有 broker I/O 都在这里
+│   │   ├── index.ts           # 入口、窗口、单实例锁、生命周期清理
+│   │   ├── config/            # 请求并发、重试、聚合上限等常量
+│   │   ├── database/          # SQLite schema 与数据访问
+│   │   ├── ipc/               # IPC handler（按域拆分）+ 主→渲染推送
+│   │   ├── services/          # Admin REST 客户端、指标聚合、原生客户端、加密
+│   │   └── utils/             # 日志
+│   ├── preload.ts             # 沙箱 preload：唯一暴露给渲染进程的接口面
+│   ├── shared/types.ts        # 跨进程共享的领域类型（单一事实来源）
+│   └── renderer/              # React 渲染进程
+│       ├── components/        # 布局、资源树、拓扑、各类表单弹窗
+│       ├── hooks/             # 资源缓存、ECharts、快捷键、全屏、尺寸监听
+│       ├── pages/             # 首页、集群配置、Topic/租户/命名空间详情、消息浏览器、监控、快捷键
+│       ├── store/             # Zustand：集群、Tab、主题、命令、快捷键
+│       └── utils/             # 格式化、导出、拓扑配色、按键解析
+├── docs/DATA_SOURCES.md       # 每个页面的数据来源说明
+├── electron-builder.json      # 打包配置
+├── vite.config.ts             # 前端构建 + 生产 CSP 注入
+└── tsconfig.node.json         # 主进程/preload 的 TS 配置（CommonJS）
 ```
+
+根目录另有一份[《详细设计说明书》](./Pulsar%20桌面管理工具详细设计说明书.md)和一份[《UI 详细设计规范》](./Pulsar%20桌面管理工具%20UI%20详细设计规范（最终完整版）.md)，是项目最初的设计输入，部分细节已被后续实现取代；`.trae/specs/`、`.qoder/specs/` 是历史任务规格，仅作留档。
 
 ## 快速开始
 
-### 安装依赖
+### 环境要求
+
+- Node.js 20 或更高（开发在 v24 上验证）
+- npm 源已在 `.npmrc` 中指向 npmmirror，Electron 二进制也走国内镜像
+- `pulsar-client` 是原生模块（node-addon-api），安装时会下载预编译产物（Windows 为 `napi-win32-unknown-x64`），需要能访问镜像或 Apache 归档；**不需要**本地 C++ 工具链
+
+### 安装与开发
 
 ```bash
 npm install
+npm run dev          # 并行启动 Vite(5173) 与 Electron
 ```
 
-### 开发模式
+也可以分开跑：`npm run dev:renderer`（只起前端）、`npm run dev:main`（编译主进程后启动 Electron）。
+
+### 构建与打包
 
 ```bash
-npm run dev
+npm run build:main   # tsc -p tsconfig.node.json → dist/src/main、dist/src/preload.js
+npm run build        # tsc -b + vite build → dist/renderer
+npm run electron:pack  # 免安装目录，产物在 release/win-unpacked
+npm run electron:dist  # NSIS 安装包
 ```
 
-这会同时启动：
-- Vite 开发服务器（前端，端口 5173）
-- Electron 应用（自动加载前端）
+原生 `.node` 通过 `asarUnpack` 解包到 `app.asar.unpacked`；`npmRebuild` 保持 `false`，因为 pulsar-client 走 N-API 预编译，跨 Node/Electron ABI 稳定。**开发态能跑不代表打包态能跑**，改过原生依赖后请在 `release/win-unpacked` 里启动验证一次。
 
-### 构建
+### 提交前的四道门
 
 ```bash
-# 构建主进程
-npm run build:main
-
-# 构建前端
-npm run build
-
-# 打包应用
-npm run electron:dist
+npx tsc -b --force   # 类型
+npx eslint src       # 规范（max-len 120 在 prettier 之后重新开启）
+npm run format:check # 格式，不符时先 npm run format
+npm run build:main && npm run build
 ```
 
-## 已实现功能
+## 架构约束
 
-### ✅ Phase 1: 项目初始化与基础架构
+这几条是踩过坑之后定下的，改代码前请先读：
 
-- [x] 项目初始化和依赖安装
-- [x] TypeScript、Vite、Electron 配置
-- [x] Electron 主进程和预加载脚本
-- [x] IPC 通信框架（含 Zod 参数校验）
-- [x] 全局四分区布局（顶部导航栏 + 左侧资源树 + Tab 工作区）
-- [x] 三套主题系统（亮色/暗色/护眼）
-- [x] 状态管理（Zustand）
-- [x] 首页集群总览（列表视图）
+1. **broker I/O 只能在主进程。** 生产构建的页面通过 `file://` 加载，CSP 是 `connect-src 'self'`（由 `vite.config.ts` 在构建时注入 meta）。把任何 broker 请求挪到渲染进程，会出现"开发正常、打包后静默失败"。
+2. **沙箱 preload 不能 require 相对模块。** `sandbox: true` 下 preload 只能 require 白名单模块（`electron` 等）。一旦编译产物里出现 `require("./shared/types")`，Electron 会**静默跳过整个 preload**，`window.electronAPI` 直接消失且不打任何日志。因此通道名在 preload 里写字面量，并用 `typeof import('./shared/types')` 的字面量类型钉住，改名即编译失败。
+3. **推送载荷只能是纯 JSON。** 主→渲染走 `msg:consume-batch` / `msg:read-batch` / `msg:session-end`，类实例传不过沙箱边界。
+4. **`Reader.readNext(timeout)` 在超时真的到期时会段错误**（pulsar-client 1.18.0 实测，进程 exit=139）。所以 Reader 循环用 `hasNext()` 门控 + 250ms 空轮询 + 不带超时的 `readNext()`；停止会话时等的是"在途读取落地 + 资源关闭"的整体，不是直接 close。
+5. **不要用 Admin REST 发消息或 peek 消息。** `POST /admin/v2/producers/{t}/{ns}/{topic}/send` 与 `.../subscription/{sub}/peek/{n}` 在真实 broker 上并不存在（返回 HTML 404）。消息收发只有原生客户端这一条路。
+6. **分区 topic 的删除走 `.../{topic}/partitions`**，`/partition/-1` 在部分版本上 404。
+7. **聚合有上限。** `AGGREGATION_LIMITS` 限制租户/命名空间/topic 数量，聚合内部扇出用 `mapWithConcurrency` 固定并发窗口（外层已持有信号量许可，内部再 acquire 会死锁）。
 
-### 🚧 待实现功能
+## 本地数据
 
-#### Phase 2: 核心基础设施
+- SQLite 位于 `app.getPath('userData')/pulsar-manager.db`，存集群配置、SSH 配置、操作日志、界面设置与快捷键绑定
+- 调试时可以另起一个实例：`npx electron . --user-data-dir=<临时目录>`（单实例锁按 userData 路径判定）
 
-- [ ] SQLite 数据库层和 AES-256 加密工具
-- [ ] Pulsar Admin API 客户端封装
-- [ ] SSH 隧道管理器
-- [ ] Prometheus 查询客户端
+## 已知限制
 
-#### Phase 3: 核心功能模块
+以下是**当前确实没做**的部分，界面不会假装它们可用：
 
-- [ ] 集群连接配置（三步式表单）
-- [ ] Topic 详情页面
-- [ ] 消息浏览器（智能截断与展开）
-- [ ] 监控与可视化面板
-- [ ] 集群拓扑视图（ECharts Graph）
-
-#### Phase 4: 增强功能
-
-- [ ] 快捷键自定义系统
-- [ ] Schema 管理
-- [ ] 权限管理
-- [ ] 压测引擎
-
-## 设计规范
-
-### 主题系统
-
-项目支持三套主题，通过 CSS 变量统一管理：
-
-**亮色主题（默认）**
-- 主色: `#1677FF`
-- 成功: `#00B42A`
-- 警告: `#FF7D00`
-- 危险: `#F53F3F`
-
-**暗色主题**
-- 主色: `#4096FF`
-- 成功: `#00C42A`
-- 警告: `#FF9500`
-- 危险: `#FF4D4F`
-
-**护眼主题**
-- 主色: `#5B8FF9`
-- 背景: `#F5F5DC`
-
-所有样式通过 CSS 变量定义，禁止硬编码颜色值。
-
-### 布局规范
-
-- 顶部导航栏高度: `48px`（固定）
-- 左侧资源树宽度: `240px`（可折叠至 `48px`）
-- Tab 栏高度: `36px`
-- 最小窗口尺寸: `1000px × 700px`
-
-### 间距系统
-
-基于 4px 栅格：
-- `--spacing-xs`: 4px
-- `--spacing-sm`: 8px
-- `--spacing-md`: 12px
-- `--spacing-lg`: 16px
-- `--spacing-xl`: 24px
-- `--spacing-xxl`: 32px
-
-## 已知问题
-
-### Electron 安装问题
-
-如果看到 "Electron failed to install correctly" 错误：
-
-```bash
-# Windows
-rmdir /s /q node_modules\electron
-npm install electron@29.4.6 --save-dev
-
-# Linux/Mac
-rm -rf node_modules/electron
-npm install electron@29.4.6 --save-dev
-```
-
-## 下一步
-
-根据设计文档，接下来需要实现：
-
-1. **SQLite 数据库集成** - 存储集群配置和操作日志
-2. **Pulsar Admin API 客户端** - 对接 Pulsar 集群
-3. **SSH 隧道管理器** - 内网穿透访问
-4. **完整的集群配置页面** - 添加/编辑/删除集群
-5. **资源树动态加载** - 从真实集群获取数据
-
-## 参考文档
-
-- [详细设计说明书](../Pulsar 桌面管理工具详细设计说明书.md)
-- [UI 详细设计规范](../Pulsar 桌面管理工具 UI 详细设计规范（最终完整版）.md)
-- [实施计划](C:\Users\yangjie\AppData\Roaming\QoderCN\SharedClientCache\cli\specs\continue.md)
+- **SSH 隧道端口转发未实现**：`ssh:connect` 只保存配置并明确返回失败，不会编造一个本地端口
+- **检查更新是占位**：恒返回"已是最新版本"
+- **自定义指标查询未接入界面**：`metrics:query` 指向 `/admin/v2/metrics/query`，而标准 Pulsar 的对应路由是 `/admin/v2/broker-stats/metrics`，这条通道目前不可用；`metrics:getNamespaceStats` 已实现但同样没有页面调用
+- **快速压测入口是占位**：顶部导航点击后只提示"功能即将推出"
+- **消费没有逐条手动 ack**：只有"自动 ack"开关，关掉之后消息就一直不确认
+- 未实现：Schema 管理、权限管理、压测引擎、告警、时序降采样、国际化、K8s 端口转发
+- broker→topic 归属在多 broker 集群下没有廉价来源（`/admin/v2/broker-stats/{broker}/topics` 在部分部署上不可用），只能逐 topic 走 `/lookup`；单 broker（standalone）场景下归属是确定的
 
 ## 许可证
 
-Apache-2.0
+Apache License 2.0，见 [LICENSE](./LICENSE)。
+
+Copyright 2026 Pulsar Manager Team
