@@ -13,6 +13,7 @@ import {
     FileTextOutlined,
 } from '@ant-design/icons';
 import {useThemeStore} from '../../store/theme';
+import UpdateModal from '../UpdateModal';
 import {useTabStore} from '../../store/tabs';
 import {useClusterStore} from '../../store/cluster';
 import {loadTenants, loadNamespaces, loadTopics} from '../../hooks/resourceCache';
@@ -73,17 +74,12 @@ const TopNav: React.FC = () => {
 
     // 动态获取应用版本号
     useEffect(() => {
-        // In Electron, we can get version from the main process
-        const systemAPI = window.electronAPI?.system as any;
-        if (systemAPI?.getVersion) {
-            systemAPI
-                .getVersion()
-                .then((res: any) => {
-                    if (res.success && res.data) setAppVersion(res.data);
-                })
-                .catch(() => {});
-        }
-        // If getVersion doesn't exist, fallback to '1.0.0' (already set in useState)
+        window.electronAPI.update
+            .getVersion()
+            .then(res => {
+                if (res.success && res.data) setAppVersion(res.data);
+            })
+            .catch(() => {});
     }, []);
 
     // 搜索资源
@@ -319,43 +315,8 @@ const TopNav: React.FC = () => {
         }
     };
 
-    // 检查更新
-    const handleCheckUpdate = async () => {
-        message.loading('正在检查更新...', 0);
-        try {
-            const response = await window.electronAPI.system.checkUpdate();
-            message.destroy();
-            if (response.success && response.data) {
-                const {currentVersion, latestVersion, hasUpdate} = response.data;
-                if (hasUpdate) {
-                    Modal.info({
-                        title: '发现新版本',
-                        content: (
-                            <div>
-                                <p>
-                                    当前版本: <strong>{currentVersion}</strong>
-                                </p>
-                                <p>
-                                    最新版本: <strong>{latestVersion}</strong>
-                                </p>
-                                <p style={{marginTop: 16, color: 'var(--color-success)'}}>
-                                    建议更新到最新版本以获得更好的体验
-                                </p>
-                            </div>
-                        ),
-                        okText: '关闭',
-                    });
-                } else {
-                    message.success('当前已是最新版本');
-                }
-            } else {
-                message.error(response.error || '检查更新失败');
-            }
-        } catch {
-            message.destroy();
-            message.error('检查更新失败');
-        }
-    };
+    // 检查更新：真实流程收敛到 UpdateModal（检查/令牌/下载/安装）
+    const [updateModalOpen, setUpdateModalOpen] = useState(false);
 
     // 设置菜单点击处理
     const handleSettingClick = ({key}: {key: string}) => {
@@ -373,7 +334,7 @@ const TopNav: React.FC = () => {
                 setAboutModalOpen(true);
                 break;
             case 'checkUpdate':
-                handleCheckUpdate();
+                setUpdateModalOpen(true);
                 break;
         }
     };
@@ -548,6 +509,9 @@ const TopNav: React.FC = () => {
                     </div>
                 </div>
             </Modal>
+
+            {/* 软件更新弹窗 */}
+            <UpdateModal open={updateModalOpen} onClose={() => setUpdateModalOpen(false)} />
         </div>
     );
 };

@@ -177,24 +177,4 @@ export function registerSystemHandlers() {
             return {success: false, error: formatError(error)};
         }
     });
-
-    // ========== 系统操作 ==========
-
-    registerRawHandler('system:checkUpdate', async () => {
-        try {
-            const currentVersion = process.env.npm_package_version || '1.0.0';
-
-            return {
-                success: true,
-                data: {
-                    currentVersion,
-                    latestVersion: currentVersion,
-                    hasUpdate: false,
-                },
-            };
-        } catch (error) {
-            log.error('system:checkUpdate failed', formatError(error));
-            return {success: false, error: formatError(error)};
-        }
-    });
 }

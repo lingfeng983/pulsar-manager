@@ -14,8 +14,8 @@ Apache Pulsar 集群的桌面运维客户端，基于 Electron + React + TypeScr
 
 - 资源树按 租户 → 命名空间 → Topic 三层懒加载，带模块级缓存与竞态保护（订阅在 Topic 详情页里管理）
 - **Topic**：详情（stats / 生产者 / 消费者 / 订阅）、创建（分区与非分区、持久与非持久）、删除、配置读取与修改
-  - 配置是**逐策略端点**并发读取的（retention、backlog-quota、ttl、max-producers、max-consumers、message-ttl、deduplication、permissions），单个端点缺失只降级该项，不会让整个表单空白
-  - 写入是 read-modify-write 后**只 PUT 变更过的键**
+    - 配置是**逐策略端点**并发读取的（retention、backlog-quota、ttl、max-producers、max-consumers、message-ttl、deduplication、permissions），单个端点缺失只降级该项，不会让整个表单空白
+    - 写入是 read-modify-write 后**只 PUT 变更过的键**
 - **租户 / 命名空间**：创建、更新、删除
 - **订阅**：创建、删除、重置游标、跳过消息
 - 上述资源类变更都会写入操作日志，可从顶部导航导出最近 100 条为 JSON
@@ -34,8 +34,8 @@ Apache Pulsar 集群的桌面运维客户端，基于 Electron + React + TypeScr
 
 - 首页总览与监控面板：集群聚合统计与 broker 列表（数据来自 Admin API 的真实 stats 聚合，不是造出来的示例值）
 - 集群拓扑图：力导向 / 环形两种布局切换，按节点类型与名称筛选，节点点击可直接打开对应详情页
-  - broker→topic 的归属关系只在**能拿到真实来源**时才画连线；拿不到时载荷里 `ownershipSource` 明确标注为不可用，界面也会提示，不编造全连接图
-  - 配色运行时从 CSS 变量读取，跟随亮色/暗色/护眼三套主题
+    - broker→topic 的归属关系只在**能拿到真实来源**时才画连线；拿不到时载荷里 `ownershipSource` 明确标注为不可用，界面也会提示，不编造全连接图
+    - 配色运行时从 CSS 变量读取，跟随亮色/暗色/护眼三套主题
 
 ### 界面
 
@@ -45,17 +45,17 @@ Apache Pulsar 集群的桌面运维客户端，基于 Electron + React + TypeScr
 
 ## 技术栈
 
-| 层 | 选型 |
-| --- | --- |
-| 桌面容器 | Electron 29 |
-| 前端 | React 18 + TypeScript 5.6 + Vite 5 |
-| UI / 状态 | Ant Design 5、Zustand 4 |
-| 图表 | ECharts 5.4 |
-| 本地存储 | better-sqlite3 9 |
-| Pulsar 通信 | axios（Admin REST）+ pulsar-client 1.18（原生消息收发） |
-| 参数校验 | zod 3 |
-| 打包 | electron-builder 24（Windows NSIS / macOS dmg / Linux AppImage+deb） |
-| 代码质量 | ESLint 9 + Prettier 3 |
+| 层          | 选型                                                                 |
+| ----------- | -------------------------------------------------------------------- |
+| 桌面容器    | Electron 29                                                          |
+| 前端        | React 18 + TypeScript 5.6 + Vite 5                                   |
+| UI / 状态   | Ant Design 5、Zustand 4                                              |
+| 图表        | ECharts 5.4                                                          |
+| 本地存储    | better-sqlite3 9                                                     |
+| Pulsar 通信 | axios（Admin REST）+ pulsar-client 1.18（原生消息收发）              |
+| 参数校验    | zod 3                                                                |
+| 打包        | electron-builder 24（Windows NSIS / macOS dmg / Linux AppImage+deb） |
+| 代码质量    | ESLint 9 + Prettier 3                                                |
 
 ## 目录结构
 
@@ -163,7 +163,7 @@ npm run build:main && npm run build
 以下是**当前确实没做**的部分，界面不会假装它们可用：
 
 - **SSH 隧道端口转发未实现**：`ssh:connect` 只保存配置并明确返回失败，不会编造一个本地端口；集群若开启隧道，连接时主进程直接拒绝并提示直连
-- **检查更新是占位**：恒返回"已是最新版本"
+- **在线更新依赖 Gitee 私有仓库 API**：设置→检查更新 会拉取最新发行版并对比版本号，下载其 exe 附件后静默安装重启；私有仓库必须先在更新弹窗里配置只读 access_token（本机加密存储）。仓库地址写死为 `lingfeng983/pulsar-manager`，换仓库需改 `src/main/services/update-service.ts`
 - **快速压测入口是占位**：顶部导航点击后只提示"功能即将推出"
 - **消费没有逐条手动 ack**：只有"自动 ack"开关，关掉之后消息就一直不确认
 - 未实现：Schema 管理、权限管理、压测引擎、告警、时序降采样、国际化、K8s 端口转发

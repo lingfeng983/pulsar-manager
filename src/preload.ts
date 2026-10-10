@@ -223,9 +223,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
         getRecent: (limit?: number) => ipcRenderer.invoke('logs:getRecent', limit),
     },
 
-    // 系统
-    system: {
-        checkUpdate: () => ipcRenderer.invoke('system:checkUpdate'),
+    // 在线更新
+    update: {
+        getVersion: () => Promise.resolve({success: true, data: process.versions.app}),
+        tokenStatus: () => ipcRenderer.invoke('update:tokenStatus'),
+        setToken: (token: string) => ipcRenderer.invoke('update:setToken', token),
+        check: () => ipcRenderer.invoke('update:check'),
+        download: (url: string, fileName: string) => ipcRenderer.invoke('update:download', url, fileName),
+        install: () => ipcRenderer.invoke('update:install'),
+        onProgress: (
+            callback: (progress: {received: number; total: number; done?: boolean; error?: string}) => void,
+        ) => {
+            const listener = (_event: unknown, progress: unknown) =>
+                callback(progress as {received: number; total: number; done?: boolean; error?: string});
+            ipcRenderer.on('update:progress', listener);
+            return () => ipcRenderer.removeListener('update:progress', listener);
+        },
     },
 });
 
@@ -397,10 +410,27 @@ declare global {
             logs: {
                 getRecent: (limit?: number) => Promise<APIResponse<OperationLog[]>>;
             };
-            system: {
-                checkUpdate: () => Promise<
-                    APIResponse<{currentVersion: string; latestVersion: string; hasUpdate: boolean}>
+            update: {
+                getVersion: () => Promise<APIResponse<string>>;
+                tokenStatus: () => Promise<APIResponse<{configured: boolean}>>;
+                setToken: (token: string) => Promise<APIResponse<void>>;
+                check: () => Promise<
+                    APIResponse<{
+                        currentVersion: string;
+                        latestVersion: string;
+                        hasUpdate: boolean;
+                        releaseName?: string;
+                        releaseNotes?: string;
+                        downloadUrl?: string;
+                        fileName?: string;
+                        size?: number;
+                    }>
                 >;
+                download: (url: string, fileName: string) => Promise<APIResponse<{file: string}>>;
+                install: () => Promise<APIResponse<void>>;
+                onProgress: (
+                    callback: (progress: {received: number; total: number; done?: boolean; error?: string}) => void,
+                ) => () => void;
             };
         };
     }
