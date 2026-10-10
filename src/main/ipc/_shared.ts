@@ -21,6 +21,7 @@ import {
 } from '../database/sqlite';
 import {encrypt, decrypt} from '../services/encryption';
 import {PulsarAdminClient, clientManager} from '../services/pulsar-admin';
+import {condenseErrorText} from '../services/http-client';
 import {createLogger} from '../utils/logger';
 
 const log = createLogger('IPC');
@@ -156,21 +157,31 @@ export const CreateSubscriptionSchema = SubscriptionPathSchema.extend({
 
 // 只有这三项存在 topic 级写入口；.strict() 让表单里那些改不动的策略
 // 在参数校验阶段就报错，而不是"提交成功但值没变"。
+// 三项都是可选的：编辑配置弹窗的语义是"留空表示不修改"，渲染层每次只提交
+// 用户真正填过的字段，若这里要求全量必填，只改一项的合法请求会被拒成
+// "Invalid input parameters"，现象是保存配置永远失败。
 export const TopicConfigPatchSchema = z
     .object({
+        // -1 是 broker 表示"该维度不限制"的合法值（0 只用于两项同时为 0 关闭保留），
+        // 下限放到 -1，否则用户按 broker 语义填 -1 会被参数校验拦下。
         retentionTimeInMinutes: z
             .number()
             .int()
-            .min(0)
-            .max(365 * 24 * 60),
+            .min(-1)
+            .max(365 * 24 * 60)
+            .optional(),
         retentionSizeInMB: z
             .number()
             .int()
-            .min(0)
-            .max(1024 * 1024),
-        numPartitions: z.number().int().min(0).max(1000),
+            .min(-1)
+            .max(1024 * 1024)
+            .optional(),
+        numPartitions: z.number().int().min(0).max(1000).optional(),
     })
-    .strict();
+    .strict()
+    .refine(patch => Object.values(patch).some(value => value !== undefined), {
+        message: 'At least one config field must be provided',
+    });
 
 export const NamespacePathSchema = z.object({
     clusterId: ClusterIdSchema,
@@ -300,14 +311,9 @@ export function normalizeCluster(cluster: any) {
 
 // 格式化错误信息（只返回错误消息，不包含堆栈，避免泄露敏感信息）
 export function formatError(error: unknown): string {
-    if (error instanceof Error) {
-        // 生产环境只返回错误消息
-        return error.message;
-    }
-    if (typeof error === 'string') {
-        return error;
-    }
-    return JSON.stringify(error);
+    const message = error instanceof Error ? error.message : typeof error === 'string' ? error : JSON.stringify(error);
+    // 渲染层把这段文本直接塞进 toast，broker 的 500 响应带完整 Java 堆栈时会撑爆提示。
+    return condenseErrorText(message) || message;
 }
 
 // 集群连接参数（含解密后的凭据）。admin HTTP 与原生客户端共用这一份，

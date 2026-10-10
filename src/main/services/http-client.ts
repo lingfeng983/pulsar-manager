@@ -217,13 +217,28 @@ export function seg(value: string): string {
 
 // ========== Error Utilities ==========
 
+// 界面上的错误提示只有一行位置，broker 的 500 错误体却带完整 Java 堆栈，
+// 动辄几十 KB，原样透传既撑坏 toast 也没人看得懂。
+const MAX_ERROR_MESSAGE = 300;
+
+/** Keep the human-readable head of a broker error body and drop the Java stack. */
+export function condenseErrorText(raw: string): string {
+    const head = raw.split(/\n\s*Stacktrace:|^\s*at\s|\n\s*at\s/)[0] ?? '';
+    const singleLine = head.replace(/\s+/g, ' ').trim();
+    if (singleLine.length <= MAX_ERROR_MESSAGE) {
+        return singleLine;
+    }
+    return `${singleLine.slice(0, MAX_ERROR_MESSAGE - 1)}…`;
+}
+
 export function getErrorMessage(error: AxiosError): string {
     if (error.response) {
         const {status, data} = error.response;
-        const message = (data as any)?.reason || (data as any)?.message || `HTTP ${status}`;
+        const raw = typeof data === 'string' ? data : (data as any)?.reason || (data as any)?.message || '';
+        const message = condenseErrorText(raw) || `HTTP ${status}`;
         return `${message} (${status})`;
     }
-    return error.message;
+    return condenseErrorText(error.message) || error.message;
 }
 
 export function normalizeError(error: AxiosError): Error {
@@ -232,7 +247,7 @@ export function normalizeError(error: AxiosError): Error {
     } else if (error.request) {
         return new Error('Network Error: Unable to connect to Pulsar cluster');
     }
-    return new Error(error.message);
+    return new Error(condenseErrorText(error.message) || error.message);
 }
 
 // ========== Concurrency Control ==========

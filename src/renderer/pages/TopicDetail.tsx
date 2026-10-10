@@ -46,6 +46,13 @@ interface TopicDetailProps {
     persistent?: boolean;
 }
 
+// broker 用 -1 表示"该维度不限制"，原样除以 60000 会显示成 -0.0000166 分钟。
+function formatBacklogQuota(bytes: number | undefined, millis: number | undefined): string {
+    const sizeText = bytes === undefined || bytes < 0 ? '不限制' : formatBytes(bytes);
+    const timeText = millis === undefined || millis < 0 ? '不限制' : `${Math.round(millis / 60000)} 分钟`;
+    return `${sizeText} / ${timeText}`;
+}
+
 const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, topic, persistent = true}) => {
     const [stats, setStats] = useState<TopicStats | null>(null);
     const [loading, setLoading] = useState(false);
@@ -53,14 +60,17 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
     const [activeTab, setActiveTab] = useState('overview');
     const [deleteModalOpen, setDeleteModalOpen] = useState(false);
     const [deletingSubscription, setDeletingSubscription] = useState<string | null>(null);
+    const [deletingInProgress, setDeletingInProgress] = useState(false);
     const [createModalOpen, setCreateModalOpen] = useState(false);
     const [createForm] = Form.useForm();
     const [resetCursorModalOpen, setResetCursorModalOpen] = useState(false);
     const [resettingSubscription, setResettingSubscription] = useState<string | null>(null);
+    const [resettingInProgress, setResettingInProgress] = useState(false);
     const [resetPosition, setResetPosition] = useState<'earliest' | 'latest' | 'timestamp'>('latest');
     const [resetTimestamp, setResetTimestamp] = useState<number | null>(null);
     const [skipMessagesModalOpen, setSkipMessagesModalOpen] = useState(false);
     const [skippingSubscription, setSkippingSubscription] = useState<string | null>(null);
+    const [skippingInProgress, setSkippingInProgress] = useState(false);
     const [skipCount, setSkipCount] = useState(0);
     const [editConfigModalOpen, setEditConfigModalOpen] = useState(false);
     const [editConfigForm] = Form.useForm();
@@ -139,20 +149,25 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
     }, [fetchTopicStats]);
 
     // 删除订阅
-    const handleDeleteSubscription = async (subscriptionName: string) => {
-        setDeletingSubscription(subscriptionName);
+    const handleDeleteSubscription = async () => {
+        if (!deletingSubscription) return;
+        // 提交态与"当前操作哪个订阅"分开存：订阅名同时是弹窗标题的数据源，
+        // 早先版本用 !!deletingSubscription 直接当 loading，弹窗一打开按钮就进入
+        // loading 态，而 antd 的 loading 按钮不派发点击，导致永远点不动确认删除。
+        setDeletingInProgress(true);
         try {
             const response = await window.electronAPI.resources.deleteSubscription(
                 clusterId,
                 tenant,
                 namespace,
                 topic,
-                subscriptionName,
+                deletingSubscription,
                 persistent,
             );
             if (response.success) {
                 message.success('订阅删除成功');
                 setDeleteModalOpen(false);
+                setDeletingSubscription(null);
                 invalidateTopicStats(clusterId, tenant, namespace, topic);
                 await fetchTopicStats();
             } else {
@@ -161,7 +176,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
         } catch {
             message.error('删除失败');
         } finally {
-            setDeletingSubscription(null);
+            setDeletingInProgress(false);
         }
     };
 
@@ -204,6 +219,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
     const executeResetCursor = async () => {
         if (!resettingSubscription) return;
 
+        setResettingInProgress(true);
         try {
             const response = await window.electronAPI.resources.resetCursor(
                 clusterId,
@@ -218,6 +234,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
             if (response.success) {
                 message.success('游标重置成功');
                 setResetCursorModalOpen(false);
+                setResettingSubscription(null);
                 invalidateTopicStats(clusterId, tenant, namespace, topic);
                 await fetchTopicStats();
             } else {
@@ -226,7 +243,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
         } catch {
             message.error('重置失败');
         } finally {
-            setResettingSubscription(null);
+            setResettingInProgress(false);
         }
     };
 
@@ -241,6 +258,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
     const executeSkipMessages = async () => {
         if (!skippingSubscription || skipCount <= 0) return;
 
+        setSkippingInProgress(true);
         try {
             const response = await window.electronAPI.resources.skipMessages(
                 clusterId,
@@ -254,6 +272,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
             if (response.success) {
                 message.success(`已跳过 ${skipCount} 条消息`);
                 setSkipMessagesModalOpen(false);
+                setSkippingSubscription(null);
                 invalidateTopicStats(clusterId, tenant, namespace, topic);
                 await fetchTopicStats();
             } else {
@@ -262,7 +281,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
         } catch {
             message.error('跳过失败');
         } finally {
-            setSkippingSubscription(null);
+            setSkippingInProgress(false);
         }
     };
 
@@ -809,8 +828,8 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                         key="submit"
                         type="primary"
                         danger
-                        loading={!!deletingSubscription}
-                        onClick={() => deletingSubscription && handleDeleteSubscription(deletingSubscription)}
+                        loading={deletingInProgress}
+                        onClick={() => void handleDeleteSubscription()}
                     >
                         确认删除
                     </Button>,
@@ -881,7 +900,12 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                     >
                         取消
                     </Button>,
-                    <Button key="submit" type="primary" onClick={executeResetCursor}>
+                    <Button
+                        key="submit"
+                        type="primary"
+                        loading={resettingInProgress}
+                        onClick={() => void executeResetCursor()}
+                    >
                         确认重置
                     </Button>,
                 ]}
@@ -934,7 +958,13 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                     >
                         取消
                     </Button>,
-                    <Button key="submit" type="primary" onClick={executeSkipMessages} disabled={skipCount <= 0}>
+                    <Button
+                        key="submit"
+                        type="primary"
+                        loading={skippingInProgress}
+                        onClick={executeSkipMessages}
+                        disabled={skipCount <= 0}
+                    >
                         确认跳过
                     </Button>,
                 ]}
@@ -983,12 +1013,16 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                     <Form.Item
                         name="retentionTimeInMinutes"
                         label="保留时间（分钟）"
-                        extra="0 表示永不按时间删除；留空表示不修改"
+                        extra="留空表示不修改；-1 表示不按时间清理。填 0 只有在保留大小同为 0 时才有效（两项一起置 0 才是关闭保留）"
                     >
-                        <InputNumber min={0} max={525600} style={{width: '100%'}} placeholder="不修改" />
+                        <InputNumber min={-1} max={525600} style={{width: '100%'}} placeholder="不修改" />
                     </Form.Item>
-                    <Form.Item name="retentionSizeInMB" label="保留大小（MB）" extra="0 表示不限制容量；留空表示不修改">
-                        <InputNumber min={0} max={1048576} style={{width: '100%'}} placeholder="不修改" />
+                    <Form.Item
+                        name="retentionSizeInMB"
+                        label="保留大小（MB）"
+                        extra="留空表示不修改；-1 表示不限容量。填 0 只有在保留时间同为 0 时才有效"
+                    >
+                        <InputNumber min={-1} max={1048576} style={{width: '100%'}} placeholder="不修改" />
                     </Form.Item>
                     <Form.Item
                         name="numPartitions"
@@ -1009,8 +1043,8 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                         }}
                     >
                         <div>
-                            生效积压配额：{formatBytes(stats?.backlogQuotaLimitSize ?? 0)} /
-                            {` ${(stats?.backlogQuotaLimitTime ?? 0) / 60000} 分钟`}
+                            生效积压配额：
+                            {formatBacklogQuota(stats?.backlogQuotaLimitSize, stats?.backlogQuotaLimitTime)}
                         </div>
                         <div>去重状态：{stats?.deduplicationStatus || '未知'}</div>
                         <div>归属 Broker：{stats?.ownerBrokers?.length ? stats.ownerBrokers.join('、') : '未知'}</div>

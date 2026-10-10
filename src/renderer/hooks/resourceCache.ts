@@ -150,6 +150,42 @@ export function invalidateResourceCache(): void {
     namespacesCache.clear();
     topicsCache.clear();
     topicStatsCache.clear();
+    emitChange({kind: 'all'});
+}
+
+// ========== 失效事件订阅 ==========
+//
+// 缓存清掉只解决"下次读取拿新数据"，而资源树把子节点存在自己的 treeData 里，
+// 只在节点首次展开时填充，之后没人再读缓存。结果是别的页面（Topic 详情页删
+// Topic、命名空间页建 Topic）删完，树上的节点还杵在那儿，直到用户手动刷新。
+// 这里把失效动作广播出去，让资源树按层级重载对应分支。
+
+export type ResourceChangeTarget =
+    | {kind: 'all'}
+    | {kind: 'tenants'; clusterId: string}
+    | {kind: 'namespaces'; clusterId: string; tenant: string}
+    | {kind: 'topics'; clusterId: string; tenant: string; namespace: string};
+
+type ResourceChangeListener = (target: ResourceChangeTarget) => void;
+
+const changeListeners = new Set<ResourceChangeListener>();
+
+/** 订阅缓存失效事件，返回取消订阅函数。 */
+export function onResourceCacheInvalidated(listener: ResourceChangeListener): () => void {
+    changeListeners.add(listener);
+    return () => {
+        changeListeners.delete(listener);
+    };
+}
+
+function emitChange(target: ResourceChangeTarget): void {
+    changeListeners.forEach(listener => {
+        try {
+            listener(target);
+        } catch (error) {
+            console.error('Resource cache listener failed:', error);
+        }
+    });
 }
 
 // ========== 写操作后的定点失效 ==========
@@ -162,18 +198,21 @@ export function invalidateResourceCache(): void {
 export function invalidateTenants(clusterId: string): void {
     writeEpoch += 1;
     tenantsCache.delete(`tenants:${clusterId}`);
+    emitChange({kind: 'tenants', clusterId});
 }
 
 /** 命名空间增删后调用。 */
 export function invalidateNamespaces(clusterId: string, tenant: string): void {
     writeEpoch += 1;
     namespacesCache.delete(`namespaces:${clusterId}:${tenant}`);
+    emitChange({kind: 'namespaces', clusterId, tenant});
 }
 
 /** Topic 增删后调用。 */
 export function invalidateTopics(clusterId: string, tenant: string, namespace: string): void {
     writeEpoch += 1;
     topicsCache.delete(`topics:${clusterId}:${tenant}:${namespace}`);
+    emitChange({kind: 'topics', clusterId, tenant, namespace});
 }
 
 /** 订阅增删、游标重置、跳过消息等会改变统计的操作后调用。 */

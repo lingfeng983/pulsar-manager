@@ -26,6 +26,8 @@ import {
     invalidateNamespaces,
     invalidateTopics,
     invalidateTopicStats,
+    onResourceCacheInvalidated,
+    type ResourceChangeTarget,
 } from '../../hooks/resourceCache';
 import {shortName} from '../../utils/format';
 import {useCommand} from '../../hooks/useKeybindings';
@@ -50,6 +52,19 @@ const SIDEBAR_MAX_WIDTH = 640;
 const SIDEBAR_WIDTH_KEY = 'pulsar-manager.sidebar-width';
 
 const clampSidebarWidth = (w: number) => Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, w));
+
+/** 该节点是否已在当前树中（即其父分支展开过）。 */
+function containsNodeKey(nodes: DataNode[], key: React.Key): boolean {
+    for (const node of nodes) {
+        if (node.key === key) {
+            return true;
+        }
+        if (node.children && containsNodeKey(node.children, key)) {
+            return true;
+        }
+    }
+    return false;
+}
 
 const ResourceTree: React.FC = () => {
     const [collapsed, setCollapsed] = useState(false);
@@ -224,6 +239,31 @@ const ResourceTree: React.FC = () => {
         key: `ns-${clusterId}-${tenant}-${namespace}`,
         dataRef: {type: 'namespace', clusterId, tenant, namespace},
     });
+
+    // 订阅缓存失效事件：别的页面（Topic 详情页删 Topic、命名空间页建 Topic）改完
+    // 数据只清缓存，而本组件把子节点存在自己的 treeData 里，不重读就永远显示旧列表。
+    // 只有已在树里的分支才值得重载，未展开的节点交给下一次 handleLoadData。
+    useEffect(() => {
+        const nodeForTarget = (target: Exclude<ResourceChangeTarget, {kind: 'all'}>): ResourceTreeNode | null => {
+            if (target.kind === 'tenants') {
+                return clusterNode(target.clusterId);
+            }
+            if (target.kind === 'namespaces') {
+                return tenantNode(target.clusterId, target.tenant);
+            }
+            return namespaceNode(target.clusterId, target.tenant, target.namespace);
+        };
+
+        return onResourceCacheInvalidated(target => {
+            if (target.kind === 'all') {
+                return;
+            }
+            const node = nodeForTarget(target);
+            if (node && containsNodeKey(treeDataRef.current, node.key)) {
+                void reloadNodeChildren(node);
+            }
+        });
+    }, [reloadNodeChildren]);
 
     // 初始加载 / 集群列表变化时增量合并：整体替换会把已加载的租户/命名空间/
     // topic 子树全部丢掉，任何一次集群状态刷新都让展开的分支被打回空壳。

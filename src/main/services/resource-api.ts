@@ -560,11 +560,31 @@ export class ResourceAPI {
             if (keys.includes('retentionTimeInMinutes') || keys.includes('retentionSizeInMB')) {
                 // POST /retention 整体替换 RetentionPolicies：先读回现值再合并，
                 // 否则只改 retentionSize 会把 retentionTime 清零。
-                const current = (await orNotFound(() => this.http.get(`${base}/retention`), null))?.data as any;
+                // 实测 topic 级 GET /retention 在没显式设置过时返回空 body，此时取命名空间
+                // 的生效值；两者都读不到就用 -1，因为 broker 明确拒绝"一维为 0 另一维非 0"
+                // （0 只用来配合另一维也为 0 表示整体关闭保留）。
+                const [topicRetention, nsRetention] = await Promise.all([
+                    orNotFound(() => this.http.get(`${base}/retention`), null),
+                    orNotFound(
+                        () => this.http.get(`/admin/v2/namespaces/${seg(tenant)}/${seg(namespace)}/retention`),
+                        null,
+                    ),
+                ]);
+                const current =
+                    topicRetention?.data && typeof topicRetention.data === 'object'
+                        ? (topicRetention.data as any)
+                        : null;
+                const inherited =
+                    nsRetention?.data && typeof nsRetention.data === 'object' ? (nsRetention.data as any) : null;
+                const resolve = (field: keyof TopicConfigPatch, patchValue: number | undefined): number => {
+                    if (typeof patchValue === 'number') {
+                        return patchValue;
+                    }
+                    return numberOr(current?.[field], numberOr(inherited?.[field], -1));
+                };
                 await this.http.post(`${base}/retention`, {
-                    retentionTimeInMinutes:
-                        patch.retentionTimeInMinutes ?? numberOr(current?.retentionTimeInMinutes, 0),
-                    retentionSizeInMB: patch.retentionSizeInMB ?? numberOr(current?.retentionSizeInMB, 0),
+                    retentionTimeInMinutes: resolve('retentionTimeInMinutes', patch.retentionTimeInMinutes),
+                    retentionSizeInMB: resolve('retentionSizeInMB', patch.retentionSizeInMB),
                 });
             }
 
