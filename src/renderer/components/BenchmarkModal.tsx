@@ -20,6 +20,7 @@ import {
     message,
 } from 'antd';
 import {useClusterStore} from '../store/cluster';
+import {usePluginStore, type PresetOption} from '../store/plugins';
 import {loadNamespaces, loadTenants, loadTopics} from '../hooks/resourceCache';
 import type {LoadTestCompression, LoadTestParams, LoadTestPhase, LoadTestProgress, Topic} from '../types';
 import {shortName} from '../utils/format';
@@ -82,6 +83,9 @@ interface BenchmarkModalProps {
 const BenchmarkModal: React.FC<BenchmarkModalProps> = ({open, onClose}) => {
     const [form] = Form.useForm<FormValues>();
     const clusters = useClusterStore(state => state.clusters);
+    const presets = usePluginStore(state => state.presets);
+    const [presetKey, setPresetKey] = useState<string | undefined>(undefined);
+    const [appliedPreset, setAppliedPreset] = useState<PresetOption | null>(null);
     const fetchClusters = useClusterStore(state => state.fetchClusters);
 
     const [tenants, setTenants] = useState<string[]>([]);
@@ -241,6 +245,26 @@ const BenchmarkModal: React.FC<BenchmarkModalProps> = ({open, onClose}) => {
         void window.electronAPI.benchmark.stop(runId).catch(() => undefined);
     }, []);
 
+    // 套用后把实际写进表单的数字摊开显示，用户不必逐个字段核对
+    const presetHint = appliedPreset
+        ? [
+              `已套用「${appliedPreset.pluginName} · ${appliedPreset.preset.name}」`,
+              `${appliedPreset.preset.params.producers} 生产者`,
+              `${appliedPreset.preset.params.totalMessages} 条`,
+              `${appliedPreset.preset.params.messageSizeBytes} B`,
+              appliedPreset.preset.params.ratePerSecond > 0
+                  ? `${appliedPreset.preset.params.ratePerSecond} msg/s`
+                  : '全速',
+              `在途 ${appliedPreset.preset.params.maxInFlightPerProducer}`,
+              appliedPreset.preset.params.batchingEnabled ? '开批' : '关批',
+              COMPRESSION_OPTIONS.find(item => item.value === appliedPreset.preset.params.compression)?.label ??
+                  appliedPreset.preset.params.compression,
+              appliedPreset.preset.params.consumeBacklog ? '同时消费' : null,
+          ]
+              .filter(Boolean)
+              .join(' · ')
+        : '来自已启用的插件，选中后覆盖下方压测参数';
+
     const percent =
         progress && progress.totalMessages > 0
             ? Math.min(100, Math.round(((progress.sent + progress.failed) / progress.totalMessages) * 100))
@@ -283,6 +307,39 @@ const BenchmarkModal: React.FC<BenchmarkModalProps> = ({open, onClose}) => {
                     unsubscribeAfterRun: true,
                 }}
             >
+                {/* 插件贡献的压测预设：只填参数，目标集群与 topic 仍由用户选 */}
+                {presets.length > 0 && (
+                    <Row gutter={12}>
+                        <Col span={24}>
+                            <Form.Item label="预设" extra={presetHint} style={{marginBottom: 12}}>
+                                <Select
+                                    allowClear
+                                    placeholder="选择插件预设"
+                                    disabled={running}
+                                    value={presetKey}
+                                    onChange={key => {
+                                        setPresetKey(key);
+                                        if (!key) {
+                                            setAppliedPreset(null);
+                                            return;
+                                        }
+                                        const option = presets.find(
+                                            item => `${item.pluginId}#${item.preset.name}` === key,
+                                        );
+                                        if (option) {
+                                            form.setFieldsValue(option.preset.params);
+                                            setAppliedPreset(option);
+                                        }
+                                    }}
+                                    options={presets.map(item => ({
+                                        value: `${item.pluginId}#${item.preset.name}`,
+                                        label: `${item.pluginName} · ${item.preset.name}`,
+                                    }))}
+                                />
+                            </Form.Item>
+                        </Col>
+                    </Row>
+                )}
                 <Row gutter={12}>
                     <Col span={6}>
                         <Form.Item name="clusterId" label="集群" rules={[{required: true, message: '请选择集群'}]}>

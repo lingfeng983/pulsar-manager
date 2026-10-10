@@ -9,13 +9,17 @@ let db: Database.Database | null = null;
 // schema 版本以 user_version 跟踪。改 schema.sql 时：升 SCHEMA_VERSION，
 // 并把该版本的增量 DDL 写进 migrate()——CREATE TABLE IF NOT EXISTS 对已存在的
 // 旧库什么都不做，没有这套机制，加列只会对新装用户生效，旧库静默落后。
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 function migrate(database: Database.Database, from: number): void {
     // v2：refreshInterval 那行出厂值是 30000，而监控页的刷新间隔单位是秒，
     // 两者永远对不上；换成 refreshIntervalSeconds 后旧行就是纯垃圾，直接删。
     if (from < 2) {
         database.prepare("DELETE FROM user_settings WHERE key = 'refreshInterval'").run();
+    }
+    // v3：压测预设改由插件系统提供（userData/plugins），这张表从来没有读写方
+    if (from < 3) {
+        database.prepare('DROP TABLE IF EXISTS load_test_templates').run();
     }
 }
 

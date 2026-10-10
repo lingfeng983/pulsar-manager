@@ -398,6 +398,19 @@ CREATE TABLE operation_logs (
 
 设置全部存在本机 SQLite 的 `user_settings` 键值表里，渲染层用 `useSettingsStore` 缓存一份并订阅变更：`MessageBrowser` 读截断长度，`MetricsDashboard` 读自动刷新与刷新间隔（单位为秒）。导出的配置包以 `format: 'pulsar-manager-config'` + `version: 1` 为标记，导入方先做本地体检再发往主进程。
 
+### 4.9 插件市场
+
+| IPC 通道 | 方向 | 功能 |
+|---------|------|------|
+| `plugin:list` | renderer → main | 扫描 `userData/plugins`，与官方目录合并，返回条目、加载失败清单与插件目录路径 |
+| `plugin:installOfficial` | renderer → main | 把官方目录里的插件写入本机（与导入同一条落盘路径） |
+| `plugin:import` | renderer → main | 接收插件 JSON **文本**（渲染层读的文件），校验后落盘；主进程不接触文件路径 |
+| `plugin:uninstall` | renderer → main | 删除本机插件文件并清掉其启用状态 |
+| `plugin:setEnabled` | renderer → main | 启用/停用（停用只让贡献数据消失，文件保留） |
+| `plugin:revealDir` | renderer → main | 打开插件目录，回传路径与失败原因 |
+
+插件清单由 zod 整份校验：`id` 形状、`version` 形如 1.0/1.0.0、压测参数逐字段带范围、Topic 模板的 `namePrefix` 限定字符集，且必须至少贡献一条预设或一个模板。校验不过的文件不静默丢弃，`plugin:list` 会把文件名与原因一并返回。渲染层 `usePluginStore` 从启用条目里派生 `presets` / `templates` 两个列表，分别由 `BenchmarkModal` 与 `TopicFormModal` 消费。
+
 ---
 
 ## 五、数据流向图

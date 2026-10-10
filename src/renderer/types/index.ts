@@ -41,6 +41,13 @@ export type {
     ConfigImportResult,
     ConfigMeta,
     ExportedClusterConfig,
+    BenchmarkPreset,
+    BenchmarkPresetParams,
+    PluginEntry,
+    PluginListResult,
+    PluginLoadError,
+    PluginSource,
+    TopicTemplate,
 } from '../../shared/types';
 
 // 订阅

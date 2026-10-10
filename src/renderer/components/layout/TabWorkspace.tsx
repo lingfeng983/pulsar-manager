@@ -8,6 +8,7 @@ import NamespaceDetail from '../../pages/NamespaceDetail';
 import MetricsDashboard from '../../pages/MetricsDashboard';
 import ShortcutConfig from '../../pages/ShortcutConfig';
 import ConfigCenter from '../../pages/ConfigCenter';
+import PluginMarket from '../../pages/PluginMarket';
 import ClusterTopology from '../../components/metrics/ClusterTopology';
 import {useCommand} from '../../hooks/useKeybindings';
 
@@ -185,6 +186,9 @@ const TabWorkspace: React.FC = () => {
         }
         if (tab.type === 'config-center') {
             return <ConfigCenter />;
+        }
+        if (tab.type === 'plugins') {
+            return <PluginMarket />;
         }
         return <div>TODO: {tab.title}</div>;
     };

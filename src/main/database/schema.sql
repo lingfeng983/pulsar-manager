@@ -61,15 +61,8 @@ CREATE TABLE IF NOT EXISTS user_settings (
     updated_at TEXT NOT NULL
 );
 
--- 压测模板表
-CREATE TABLE IF NOT EXISTS load_test_templates (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    description TEXT,
-    config TEXT NOT NULL,  -- JSON 格式的压测配置
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
+-- 压测预设由插件系统（userData/plugins）提供，不再建表；旧库里的
+-- load_test_templates 由 v3 迁移删除。
 
 -- 快捷键配置表
 CREATE TABLE IF NOT EXISTS keyboard_shortcuts (

@@ -521,3 +521,66 @@ export interface ConfigMeta {
     appVersion: string;
     databasePath: string;
 }
+
+// ========== 插件（本地声明式扩展） ==========
+
+export type PluginSource = 'official' | 'local';
+
+// 压测预设里可填的那部分参数：目标（集群/租户/命名空间/topic）与订阅相关字段
+// 刻意排除在外——预设不该替用户决定往哪个 topic 上打流量。
+export interface BenchmarkPresetParams {
+    producers: number;
+    totalMessages: number;
+    messageSizeBytes: number;
+    ratePerSecond: number;
+    maxInFlightPerProducer: number;
+    batchingEnabled: boolean;
+    compression: LoadTestCompression;
+    consumeBacklog: boolean;
+}
+
+export interface BenchmarkPreset {
+    name: string;
+    description?: string;
+    params: BenchmarkPresetParams;
+}
+
+export interface TopicTemplate {
+    name: string;
+    description?: string;
+    persistent: boolean;
+    partitions: number;
+    namePrefix?: string;
+}
+
+export interface PluginContributions {
+    benchmarkPresets?: BenchmarkPreset[];
+    topicTemplates?: TopicTemplate[];
+}
+
+export interface PluginManifest {
+    id: string;
+    name: string;
+    version: string;
+    description?: string;
+    author?: string;
+    contributions: PluginContributions;
+}
+
+export interface PluginEntry extends PluginManifest {
+    source: PluginSource;
+    installed: boolean;
+    enabled: boolean;
+}
+
+// 校验失败也要出现在界面上：静默丢掉一个装错的插件文件，用户只会以为"装了没反应"。
+export interface PluginLoadError {
+    file: string;
+    reason: string;
+}
+
+export interface PluginListResult {
+    entries: PluginEntry[];
+    errors: PluginLoadError[];
+    pluginsDir: string;
+}

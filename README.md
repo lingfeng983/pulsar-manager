@@ -58,6 +58,14 @@ Apache Pulsar 集群的桌面运维客户端，基于 Electron + React + TypeScr
 - 本地数据库带 `user_version` 增量迁移，旧库升级按版本逐步改造，不要求删库重建
 - 「设置 → 检查更新」比对 Gitee 最新发行版版本号，下载 exe 附件后静默安装并重启
 
+### 插件市场
+
+- 「设置 → 插件市场」列出可安装的官方插件与本机导入的插件，按类型（压测预设 / Topic 模板）与安装状态筛选，卡片展开即可看到插件贡献的具体内容
+- 插件是**纯声明式 JSON**：只贡献数据，应用不加载也不执行插件携带的任何代码。一个坏插件最多让某条预设消失
+- 官方插件点安装即写入 `userData/plugins/<id>.json`，与第三方导入走同一条加载与校验路径；启用开关即时决定其贡献是否进入界面，卸载即删除本机文件
+- 校验失败的文件不会被静默丢掉：页面顶部逐条列出文件名与失败原因（例如 `producers: Number must be less than or equal to 64` 的中文对应描述）
+- 已启用插件的贡献直接落到两处真实入口：快速压测弹窗顶部的「预设」下拉（选中后覆盖压测参数并显示套用了哪些数字），新建 Topic 弹窗的「模板」下拉（覆盖持久化与分区数，Topic 名为空时套用模板前缀）
+
 ## 技术栈
 
 | 层          | 选型                                                                 |
@@ -172,7 +180,8 @@ npm run build:main && npm run build
 
 ## 本地数据
 
-- SQLite 位于 `app.getPath('userData')/pulsar-manager.db`，存集群配置、SSH 配置、操作日志、界面设置与快捷键绑定
+- SQLite 位于 `app.getPath('userData')/pulsar-manager.db`，存集群配置、SSH 配置、操作日志、界面设置与快捷键绑定；表结构以 `PRAGMA user_version` 跟踪并增量迁移
+- 已安装的插件是 `app.getPath('userData')/plugins/*.json`（或 `plugins/<目录>/plugin.json`），启用状态记在 `user_settings` 的 `disabledPlugins` 里
 - 调试时可以另起一个实例：`npx electron . --user-data-dir=<临时目录>`（单实例锁按 userData 路径判定）
 
 ## 已知限制
@@ -183,7 +192,8 @@ npm run build:main && npm run build
 - **在线更新依赖 Gitee 私有仓库 API**：设置→检查更新 会拉取最新发行版并对比版本号，下载其 exe 附件后静默安装重启；私有仓库必须先在更新弹窗里配置只读 access_token（本机加密存储）。仓库地址写死为 `lingfeng983/pulsar-manager`，换仓库需改 `src/main/services/update-service.ts`
 - **快速压测的延迟口径**：统计的是 `send()` 调用到 broker 确认的时间，包含客户端在途队列的排队；单生产者并发调大时 P50 会显著上升，这不是 broker 变慢
 - **消费没有逐条手动 ack**：只有"自动 ack"开关，关掉之后消息就一直不确认
-- 未实现：Schema 管理、权限管理、告警、时序降采样、国际化、K8s 端口转发；顶部导航「插件市场」仍是占位
+- **插件只贡献数据**：插件市场里的插件是本地 JSON 声明，只能提供压测预设与 Topic 创建模板，不能新增界面、不能访问 broker、不能执行代码；需要这类能力请直接把需求提为应用功能
+- 未实现：Schema 管理、权限管理、告警、时序降采样、国际化、K8s 端口转发
 - broker→topic 归属在多 broker 集群下没有廉价来源（`/admin/v2/broker-stats/{broker}/topics` 在部分部署上不可用），只能逐 topic 走 `/lookup`；单 broker（standalone）场景下归属是确定的
 
 ## 许可证

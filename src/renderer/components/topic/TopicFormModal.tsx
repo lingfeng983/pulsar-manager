@@ -1,5 +1,6 @@
 import React, {useCallback, useState} from 'react';
-import {Form, Input, InputNumber, Modal, Switch, message} from 'antd';
+import {Form, Input, InputNumber, Modal, Select, Switch, message} from 'antd';
+import {usePluginStore} from '../../store/plugins';
 
 interface TopicFormValues {
     name: string;
@@ -24,6 +25,8 @@ const TopicFormModal: React.FC<TopicFormModalProps> = ({open, clusterId, tenant,
     const [form] = Form.useForm<TopicFormValues>();
     const persistent = Form.useWatch('persistent', form) ?? true;
     const [submitting, setSubmitting] = useState(false);
+    const templates = usePluginStore(state => state.templates);
+    const [templateKey, setTemplateKey] = useState<string | undefined>(undefined);
 
     const handleOk = useCallback(async () => {
         let values: TopicFormValues;
@@ -55,6 +58,24 @@ const TopicFormModal: React.FC<TopicFormModalProps> = ({open, clusterId, tenant,
         }
     }, [form, clusterId, tenant, namespace, onSaved, onClose]);
 
+    const applyTemplate = (key?: string) => {
+        setTemplateKey(key);
+        if (!key) {
+            return;
+        }
+        const option = templates.find(item => `${item.pluginId}#${item.template.name}` === key);
+        if (!option) {
+            return;
+        }
+        const {template} = option;
+        const current = form.getFieldValue('name') as string | undefined;
+        form.setFieldsValue({
+            persistent: template.persistent,
+            partitions: template.persistent ? template.partitions : 0,
+            name: !current?.trim() && template.namePrefix ? template.namePrefix : current,
+        });
+    };
+
     return (
         <Modal
             title={`新建 Topic（${tenant}/${namespace}）`}
@@ -67,6 +88,24 @@ const TopicFormModal: React.FC<TopicFormModalProps> = ({open, clusterId, tenant,
             destroyOnHidden
         >
             <Form form={form} layout="vertical" initialValues={{persistent: true, partitions: 0}}>
+                {templates.length > 0 && (
+                    <Form.Item
+                        label="模板"
+                        extra="来自已启用的插件，套用后覆盖持久化与分区数"
+                        style={{marginBottom: 12}}
+                    >
+                        <Select
+                            allowClear
+                            placeholder="选择 Topic 模板"
+                            value={templateKey}
+                            onChange={applyTemplate}
+                            options={templates.map(item => ({
+                                value: `${item.pluginId}#${item.template.name}`,
+                                label: `${item.pluginName} · ${item.template.name}`,
+                            }))}
+                        />
+                    </Form.Item>
+                )}
                 <Form.Item
                     name="name"
                     label="Topic 名"

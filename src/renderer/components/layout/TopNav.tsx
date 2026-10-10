@@ -327,7 +327,7 @@ const TopNav: React.FC = () => {
                 addTab({id: 'shortcuts', title: '快捷键配置', type: 'shortcuts'});
                 break;
             case 'plugins':
-                message.info('功能即将推出，敬请期待');
+                addTab({id: 'plugins', title: '插件市场', type: 'plugins'});
                 break;
             case 'about':
                 setAboutModalOpen(true);
@@ -379,14 +379,7 @@ const TopNav: React.FC = () => {
             },
             {
                 key: 'plugins',
-                label: (
-                    <span>
-                        插件市场{' '}
-                        <Tag color="default" style={{fontSize: 10}}>
-                            Coming Soon
-                        </Tag>
-                    </span>
-                ),
+                label: <span>插件市场</span>,
             },
             {type: 'divider' as const},
             {key: 'about', label: '关于'},

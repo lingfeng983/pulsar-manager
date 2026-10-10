@@ -19,6 +19,8 @@ import type {
     MessageSendParams,
     NamespaceStats,
     OperationLog,
+    PluginEntry,
+    PluginListResult,
     ReadStartParams,
     SessionEndEvent,
     SSHConfig,
@@ -248,6 +250,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
         getRecent: (limit?: number) => ipcRenderer.invoke('logs:getRecent', limit),
     },
 
+    // 插件市场：本地声明式插件，只贡献压测预设与 Topic 模板
+    plugin: {
+        list: () => ipcRenderer.invoke('plugin:list'),
+        installOfficial: (id: string) => ipcRenderer.invoke('plugin:installOfficial', {id}),
+        import: (text: string) => ipcRenderer.invoke('plugin:import', {text}),
+        uninstall: (id: string) => ipcRenderer.invoke('plugin:uninstall', {id}),
+        setEnabled: (id: string, enabled: boolean) => ipcRenderer.invoke('plugin:setEnabled', {id, enabled}),
+        revealDir: () => ipcRenderer.invoke('plugin:revealDir'),
+    },
+
     // 在线更新
     update: {
         getVersion: () => Promise.resolve({success: true, data: process.versions.app}),
@@ -448,6 +460,14 @@ declare global {
             };
             logs: {
                 getRecent: (limit?: number) => Promise<APIResponse<OperationLog[]>>;
+            };
+            plugin: {
+                list: () => Promise<APIResponse<PluginListResult>>;
+                installOfficial: (id: string) => Promise<APIResponse<PluginEntry>>;
+                import: (text: string) => Promise<APIResponse<PluginEntry>>;
+                uninstall: (id: string) => Promise<APIResponse<{id: string}>>;
+                setEnabled: (id: string, enabled: boolean) => Promise<APIResponse<PluginEntry>>;
+                revealDir: () => Promise<APIResponse<{dir: string; failure: string | null}>>;
             };
             update: {
                 getVersion: () => Promise<APIResponse<string>>;
