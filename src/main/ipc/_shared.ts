@@ -293,6 +293,33 @@ export const SessionIdSchema = z.object({
         .regex(/^s\d+$/),
 });
 
+// 快速压测：全部字段都有默认值，渲染层只提交用户改动过的项。
+// 跨字段的资源上限（在途总量、清理订阅的前提）放在压测服务里检查——
+// schema 校验失败只会回"Invalid input parameters"，用户看不到到底哪超了。
+export const LoadTestStartSchema = TopicPathSchema.extend({
+    producers: z.number().int().min(1).max(32).default(4),
+    totalMessages: z.number().int().min(1).max(1_000_000).default(10_000),
+    // 上限对齐 broker 默认单条消息大小（1MB 级），更大的载荷属于另一种测试场景
+    messageSizeBytes: z
+        .number()
+        .int()
+        .min(1)
+        .max(1024 * 1024)
+        .default(1024),
+    // 0 表示不限速；限速按全局速率在所有生产者之间均分时间片
+    ratePerSecond: z.number().int().min(0).max(200_000).default(0),
+    maxInFlightPerProducer: z.number().int().min(1).max(2000).default(500),
+    batchingEnabled: z.boolean().default(true),
+    compression: z.enum(['None', 'Zlib', 'LZ4', 'ZSTD', 'SNAPPY']).default('None'),
+    consumeBacklog: z.boolean().default(false),
+    subscription: SubscriptionSchema.default('benchmark'),
+    unsubscribeAfterRun: z.boolean().default(false),
+});
+
+export const LoadTestStopSchema = z.object({
+    runId: z.string().uuid(),
+});
+
 // 初始化数据库
 let dbInitialized = false;
 

@@ -331,6 +331,74 @@ export const MESSAGE_STREAM_CHANNELS = {
     sessionEnd: 'msg:session-end',
 } as const;
 
+export const LOAD_TEST_CHANNEL = 'benchmark:progress' as const;
+
+// ========== 快速压测 ==========
+
+export type LoadTestCompression = 'None' | 'Zlib' | 'LZ4' | 'ZSTD' | 'SNAPPY';
+
+// 一轮压测的输入。totalMessages 是总量（各生产者共用一条消息流，谁空闲谁取下一条），
+// 不是每生产者的条数——按生产者平分总量时，分区快慢不一会被最慢的那条拖住。
+export interface LoadTestParams {
+    clusterId: string;
+    tenant: string;
+    namespace: string;
+    topic: string;
+    persistent: boolean;
+    producers: number;
+    totalMessages: number;
+    messageSizeBytes: number;
+    // 0 表示不限速，全速压
+    ratePerSecond: number;
+    maxInFlightPerProducer: number;
+    batchingEnabled: boolean;
+    compression: LoadTestCompression;
+    // 开启后同一轮里并发消费，用于看端到端与消费侧吞吐
+    consumeBacklog: boolean;
+    subscription: string;
+    // 消费会在 broker 上留下订阅与积压；勾选后运行结束退订，不留残留
+    unsubscribeAfterRun: boolean;
+}
+
+export type LoadTestPhase = 'running' | 'completed' | 'stopped' | 'error';
+
+// 发送确认延迟（客户端侧：发出到 broker 确认）。分位数来自蓄水池抽样，
+// 界面必须标注抽样条数，否则用户会把它当成全量统计。
+export interface LoadTestLatency {
+    count: number;
+    avgMs: number;
+    minMs: number;
+    p50Ms: number;
+    p95Ms: number;
+    p99Ms: number;
+    maxMs: number;
+}
+
+export interface LoadTestProgress {
+    runId: string;
+    phase: LoadTestPhase;
+    sent: number;
+    failed: number;
+    consumed: number;
+    totalMessages: number;
+    messageSizeBytes: number;
+    producerCount: number;
+    bytesSent: number;
+    elapsedMs: number;
+    msgPerSec: number;
+    mbPerSec: number;
+    latency: LoadTestLatency | null;
+    // 终态原因（'stopped'/'error' 时给出）；单条发送失败的最新一条错误另放这里，
+    // 因为几条失败不改变终态，但必须让用户看到失败原因
+    error?: string;
+    lastError?: string;
+}
+
+export interface LoadTestStartResult {
+    runId: string;
+    topic: string;
+}
+
 export interface BacklogInfo {
     messageCount: number;
     sizeInBytes: number;

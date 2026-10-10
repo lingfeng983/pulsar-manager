@@ -14,6 +14,7 @@ import {
 } from '@ant-design/icons';
 import {useThemeStore} from '../../store/theme';
 import UpdateModal from '../UpdateModal';
+import BenchmarkModal from '../BenchmarkModal';
 import {useTabStore} from '../../store/tabs';
 import {useClusterStore} from '../../store/cluster';
 import {loadTenants, loadNamespaces, loadTopics} from '../../hooks/resourceCache';
@@ -292,10 +293,8 @@ const TopNav: React.FC = () => {
         }
     };
 
-    // 快速压测
-    const handleBenchmark = () => {
-        message.info('功能即将推出，敬请期待');
-    };
+    // 快速压测：参数与实时进度都在弹窗里，压测本体跑在主进程，关闭弹窗不中断
+    const [benchmarkOpen, setBenchmarkOpen] = useState(false);
 
     // 导出日志
     const handleExportLogs = async () => {
@@ -462,8 +461,8 @@ const TopNav: React.FC = () => {
 
             <Space size="small">
                 {/* 快速压测 */}
-                <Tooltip title="Coming Soon">
-                    <Button icon={<ThunderboltOutlined />} size="small" onClick={handleBenchmark}>
+                <Tooltip title="向指定 Topic 并发写入，实时看吞吐与发送确认延迟">
+                    <Button icon={<ThunderboltOutlined />} size="small" onClick={() => setBenchmarkOpen(true)}>
                         快速压测
                     </Button>
                 </Tooltip>
@@ -512,6 +511,7 @@ const TopNav: React.FC = () => {
 
             {/* 软件更新弹窗 */}
             <UpdateModal open={updateModalOpen} onClose={() => setUpdateModalOpen(false)} />
+            <BenchmarkModal open={benchmarkOpen} onClose={() => setBenchmarkOpen(false)} />
         </div>
     );
 };

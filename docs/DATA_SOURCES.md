@@ -375,6 +375,15 @@ CREATE TABLE operation_logs (
 
 隧道配置本身随集群保存（`clusters.ssh_config_id` 指向 `ssh_tunnels` 行），没有独立的"添加隧道"通道；删除集群会连带删除其隧道配置，启动时也会剪掉无人引用的残留行。
 
+### 4.7 快速压测
+| IPC 通道 | 方向 | 功能 |
+|---------|------|------|
+| `benchmark:start` | renderer → main | 校验参数并启动一轮压测，立即返回 `{runId, topic}` |
+| `benchmark:stop` | renderer → main | 按 runId 停止，先排空在途发送再关闭资源 |
+| `benchmark:progress` | main → renderer | 单向推送进度（每 500ms 一次），终态为 completed / stopped / failed |
+
+压测数据不来自 Admin API，全部由主进程原生客户端现场产生：吞吐与带宽按已确认的发送数除以运行时长，延迟统计是 `send()` 调用到 broker 回调的耗时（含客户端在途队列排队），消费侧只计已收到条数。同一目标（集群 + topic + 订阅）并发只允许一轮，第二轮会被直接拒绝。
+
 ---
 
 ## 五、数据流向图

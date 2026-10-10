@@ -2,6 +2,7 @@ import {app, BrowserWindow, shell, session, dialog, Menu, Tray, nativeImage} fro
 import path from 'path';
 import {registerIPCHandlers, cleanupDatabase} from './ipc/handlers';
 import {nativeClientManager} from './services/pulsar-native-client';
+import {loadTestManager} from './services/load-test';
 import {sshTunnelManager} from './services/ssh-tunnel';
 
 process.on('uncaughtException', error => {
@@ -206,6 +207,9 @@ app.on('before-quit', () => {
 });
 
 app.on('will-quit', () => {
+    // 压测跑在缓存客户端上，必须先叫停：clear 关客户端时 producer/consumer 还活着
+    // 就是原生层的 use-after-free（实测段错误）。closeAll 的作废是同步生效的。
+    void loadTestManager.closeAll();
     // 原生客户端的会话要主动关，否则 broker 侧会留下未关闭的消费者/生产者
     // （订阅看起来"卡住"往往就是这个原因）。will-quit 无法等待异步关闭，只能尽力而为。
     void nativeClientManager.clear();

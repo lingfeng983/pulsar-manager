@@ -31,6 +31,11 @@ export type {
     TopologyLimits,
     ClusterTopology,
     OperationLog,
+    LoadTestParams,
+    LoadTestProgress,
+    LoadTestLatency,
+    LoadTestPhase,
+    LoadTestCompression,
 } from '../../shared/types';
 
 // 订阅

@@ -96,7 +96,7 @@ Pulsar 管理工具 ${TAG}，Windows x64 安装包。
 - 附件 \`Pulsar管理工具-安装包-${VERSION}.exe\`（约 $((SIZE / 1048576)) MB），双击安装
 - SHA256：\`${SHA}\`
 - 对应提交：\`$(git rev-parse --short HEAD)\`（master 分支）
-- 已知限制见 README：SSH 端口转发、快速压测是占位；应用内「设置→检查更新」可直接升级到本版本
+- 已知限制见 README：「TLS + SSH 隧道」因原生客户端无法指定 SNI 会被明确拒绝；应用内「设置→检查更新」可直接升级到本版本
 
 ## 变更（${RANGE_DESC}）
 

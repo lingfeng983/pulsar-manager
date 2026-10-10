@@ -9,6 +9,8 @@ import type {
     ClusterConfigDraft,
     ClusterTopology,
     ConsumeStartParams,
+    LoadTestParams,
+    LoadTestProgress,
     MessageBatch,
     MessageSendParams,
     NamespaceStats,
@@ -33,6 +35,7 @@ type StreamChannel = typeof import('./shared/types').MESSAGE_STREAM_CHANNELS;
 const CONSUME_BATCH_CHANNEL: StreamChannel['consumeBatch'] = 'msg:consume-batch';
 const READ_BATCH_CHANNEL: StreamChannel['readBatch'] = 'msg:read-batch';
 const SESSION_END_CHANNEL: StreamChannel['sessionEnd'] = 'msg:session-end';
+const LOAD_TEST_PROGRESS_CHANNEL: typeof import('./shared/types').LOAD_TEST_CHANNEL = 'benchmark:progress';
 
 // 主进程 → 渲染进程的下行订阅。返回反订阅闭包：组件卸载时必须能摘掉监听，
 // 否则切了标签页还在往旧组件推数据。载荷只允许纯 JSON（sandbox 下传不了类实例）。
@@ -183,6 +186,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
         onConsumeBatch: (callback: (batch: MessageBatch) => void) => subscribe(CONSUME_BATCH_CHANNEL, callback),
         onReadBatch: (callback: (batch: MessageBatch) => void) => subscribe(READ_BATCH_CHANNEL, callback),
         onSessionEnd: (callback: (event: SessionEndEvent) => void) => subscribe(SESSION_END_CHANNEL, callback),
+    },
+
+    // 快速压测：start 拿到 runId 就返回，进度经 benchmark:progress 单向推送
+    benchmark: {
+        start: (params: LoadTestParams) => ipcRenderer.invoke('benchmark:start', params),
+        stop: (runId: string) => ipcRenderer.invoke('benchmark:stop', {runId}),
+        onProgress: (callback: (progress: LoadTestProgress) => void) => subscribe(LOAD_TEST_PROGRESS_CHANNEL, callback),
     },
 
     // 监控
@@ -376,6 +386,11 @@ declare global {
                 onConsumeBatch: (callback: (batch: MessageBatch) => void) => () => void;
                 onReadBatch: (callback: (batch: MessageBatch) => void) => () => void;
                 onSessionEnd: (callback: (event: SessionEndEvent) => void) => () => void;
+            };
+            benchmark: {
+                start: (params: LoadTestParams) => Promise<APIResponse<{runId: string; topic: string}>>;
+                stop: (runId: string) => Promise<APIResponse<{stopped: boolean}>>;
+                onProgress: (callback: (progress: LoadTestProgress) => void) => () => void;
             };
             metrics: {
                 getAggregatedStats: (clusterId: string) => Promise<APIResponse<AggregatedStats>>;

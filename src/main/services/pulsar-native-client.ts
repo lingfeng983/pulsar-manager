@@ -6,6 +6,7 @@ import {AuthenticationBasic, AuthenticationToken, Client, LogLevel, MessageId} f
 import type {ClientConfig, Consumer, Message as NativeMessage, Producer, Reader, SubscriptionType} from 'pulsar-client';
 import type {AuthenticationTls} from 'pulsar-client';
 import {createLogger} from '../utils/logger';
+import {isTimeoutError, sleep, withHardTimeout} from '../utils/promise';
 import type {ConsumeStartParams, Message, MessageBatch, ReadStartParams, SessionEndEvent} from '../../shared/types';
 
 const log = createLogger('NativeClient');
@@ -158,28 +159,6 @@ interface Session {
     settled: Promise<void>;
 }
 
-function sleep(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function isTimeoutError(error: unknown): boolean {
-    const text = error instanceof Error ? error.message : String(error);
-    return /timeout/i.test(text);
-}
-
-// 等待一个原生侧的 Promise，但绝不无限等：卡住时也要能继续收尾
-function withHardTimeout(work: Promise<void>, failureLabel: string, timeoutMs = CLOSE_TIMEOUT_MS): Promise<void> {
-    // 先挂 catch 再竞速：竞速落败的那条分支若之后 reject，就是未处理拒绝
-    const settled = work.catch(error => log.warn(failureLabel, error instanceof Error ? error.message : error));
-    return new Promise<void>(resolve => {
-        const timer = setTimeout(resolve, timeoutMs);
-        void settled.then(() => {
-            clearTimeout(timer);
-            resolve();
-        });
-    });
-}
-
 // 原生客户端的连接参数指纹：隧道重连后本地端口变化，旧 Client 指向已经没人
 // 监听的端口，必须重建（admin 侧同理，见 PulsarAdminClientManager）。
 function nativeConfigFingerprint(config: NativeConnectionConfig): string {
@@ -202,6 +181,16 @@ function nativeConfigFingerprint(config: NativeConnectionConfig): string {
 interface CachedClient {
     client: Client;
     fingerprint: string;
+    holds: Set<ClientHold>;
+}
+
+// 长任务（压测）与缓存 Client 之间的握手：
+// onInvalidate 同步把任务标记为作废，让它的循环立刻退出；
+// stop 是真正的收尾（关 producer/consumer），removeCluster 会等它再关客户端。
+// stop 必须幂等——用户点停止和配置变更可能同时到达。
+export interface ClientHold {
+    onInvalidate: () => void;
+    stop: () => Promise<void>;
 }
 
 export class NativeClientManager {
@@ -219,11 +208,51 @@ export class NativeClientManager {
             return cached.client;
         }
         if (cached) {
+            // 指纹变化说明这份 Client 已作废（地址/凭据/隧道端口换过）。此刻还在
+            // 它上面跑的压测必须整体重来：继续往即将关闭的 Client 发送只会拿到原生层
+            // 的半途错误，测出来的吞吐也不再对应新配置。
+            for (const hold of cached.holds) {
+                hold.onInvalidate();
+            }
             await this.removeCluster(clusterId);
         }
         const client = new Client(toClientConfig(config));
-        this.clients.set(clusterId, {client, fingerprint});
+        this.clients.set(clusterId, {client, fingerprint, holds: new Set()});
         return client;
+    }
+
+    /**
+     * 取原生 Client，并声明"有长任务正跑在它上面"（压测用）。
+     *
+     * 需要这个握手的原因是：删集群或改配置会走到 removeCluster → client.close()，
+     * 而此时压测的 producer/consumer 还活着，原生层就是 use-after-free（实测段错误）。
+     * 登记的 hold 让 removeCluster 先作废并停掉这些任务，再关客户端。
+     *
+     * 返回 null 表示拿到的 Client 在这一瞬间已经被换掉，调用方应当报错重试，
+     * 不能继续用返回的旧对象。释放函数必须在任务收尾时调用。
+     */
+    async retain(
+        clusterId: string,
+        config: NativeConnectionConfig,
+        hold: ClientHold,
+    ): Promise<{client: Client; release: () => void} | null> {
+        const client = await this.getClient(clusterId, config);
+        const cached = this.clients.get(clusterId);
+        if (!cached || cached.client !== client) {
+            return null;
+        }
+        cached.holds.add(hold);
+        let released = false;
+        return {
+            client,
+            release: () => {
+                if (released) {
+                    return;
+                }
+                released = true;
+                this.clients.get(clusterId)?.holds.delete(hold);
+            },
+        };
     }
 
     private async stopSession(session: Session): Promise<void> {
@@ -241,7 +270,13 @@ export class NativeClientManager {
         const cached = this.clients.get(clusterId);
         this.clients.delete(clusterId);
         const targets = [...this.sessions.values()].filter(session => session.clusterId === clusterId);
-        await Promise.all(targets.map(session => this.stopSession(session)));
+        const holds = cached ? [...cached.holds] : [];
+        // 压测之类挂在客户端上的长任务先作废、再等它自己关资源，最后才关原生 Client
+        holds.forEach(hold => hold.onInvalidate());
+        await Promise.all([
+            ...targets.map(session => this.stopSession(session)),
+            ...holds.map(hold => withHardTimeout(hold.stop(), 'held run did not settle')),
+        ]);
         if (cached) {
             await withHardTimeout(
                 cached.client.close().then(() => undefined),

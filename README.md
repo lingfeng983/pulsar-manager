@@ -30,6 +30,13 @@ Apache Pulsar 集群的桌面运维客户端，基于 Electron + React + TypeScr
 
 消息由主进程按批推送（攒够 50 条或 300ms 一批），载荷为 base64；界面会尝试解回文本，判定为二进制时才保留 base64。支持导出 JSON / CSV。
 
+### 快速压测
+
+- 顶部导航「快速压测」向指定 Topic 并发写入，实时统计吞吐、带宽、已消费条数与发送确认延迟（平均 / P50 / P95 / P99 / 最大，蓄水池抽样 2 万条）
+- 参数可调：生产者数量、总条数、消息大小、全局限速（逐条时间片，实测精度 ±1%）、单生产者并发（在途窗口 = maxPendingMessages + blockIfQueueFull）、压缩（LZ4/Zlib/Zstd）、批量化、是否同时消费积压
+- 压测跑在主进程，关闭弹窗不中断，重新打开仍是同一轮的实时进度；停止按钮先排空在途再叫停，终态与耗时保留在弹窗里
+- 「同时消费」可勾选结束后清理订阅，走原生 `consumer.unsubscribe()`，且在关闭消费者之前执行
+
 ### 监控与拓扑
 
 - 首页总览与监控面板：集群聚合统计与 broker 列表（数据来自 Admin API 的真实 stats 聚合，不是造出来的示例值）
@@ -166,9 +173,9 @@ npm run build:main && npm run build
 
 - **SSH 隧道的边界**：启用后应用在本机起两条随机端口转发（Admin 与 Broker 各一条），集群地址自动改写到隧道上，TLS 仍按用户填写的原始主机名校验证书。两点限制：原生客户端（消息收发）无法指定 SNI，所以「TLS + SSH 隧道」会被明确拒绝，请改用 `pulsar://` 明文经隧道；topic lookup 之后 broker 回源的地址若本机不可达，原生收发仍需直连或代理
 - **在线更新依赖 Gitee 私有仓库 API**：设置→检查更新 会拉取最新发行版并对比版本号，下载其 exe 附件后静默安装重启；私有仓库必须先在更新弹窗里配置只读 access_token（本机加密存储）。仓库地址写死为 `lingfeng983/pulsar-manager`，换仓库需改 `src/main/services/update-service.ts`
-- **快速压测入口是占位**：顶部导航点击后只提示"功能即将推出"
+- **快速压测的延迟口径**：统计的是 `send()` 调用到 broker 确认的时间，包含客户端在途队列的排队；单生产者并发调大时 P50 会显著上升，这不是 broker 变慢
 - **消费没有逐条手动 ack**：只有"自动 ack"开关，关掉之后消息就一直不确认
-- 未实现：Schema 管理、权限管理、压测引擎、告警、时序降采样、国际化、K8s 端口转发
+- 未实现：Schema 管理、权限管理、告警、时序降采样、国际化、K8s 端口转发
 - broker→topic 归属在多 broker 集群下没有廉价来源（`/admin/v2/broker-stats/{broker}/topics` 在部分部署上不可用），只能逐 topic 走 `/lookup`；单 broker（standalone）场景下归属是确定的
 
 ## 许可证
