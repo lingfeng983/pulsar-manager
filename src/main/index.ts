@@ -1,4 +1,4 @@
-import {app, BrowserWindow, shell, session, dialog} from 'electron';
+import {app, BrowserWindow, shell, session, dialog, Menu, Tray, nativeImage} from 'electron';
 import path from 'path';
 import {registerIPCHandlers, cleanupDatabase} from './ipc/handlers';
 import {nativeClientManager} from './services/pulsar-native-client';
@@ -28,6 +28,41 @@ const CSP_DIRECTIVES = [
 ].join('; ');
 
 let mainWindow: BrowserWindow | null = null;
+let tray: Tray | null = null;
+let isQuitting = false;
+
+// 托盘图标：16x16 紫色闪电（内联 PNG，避免打包资源路径问题）
+const TRAY_ICON_DATA_URL =
+    'data:image/png;base64,' +
+    'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAALklEQVR4nGNgGPTA3+3pf4o0k20A' +
+    'VTSTZQCyZmyYdpqp7hWGAY0FqhkwMJrpDgASllaMwe0smAAAAABJRU5ErkJggg==';
+
+function showMainWindow() {
+    if (!mainWindow) {
+        createWindow();
+        return;
+    }
+    if (mainWindow.isMinimized()) {
+        mainWindow.restore();
+    }
+    if (!mainWindow.isVisible()) {
+        mainWindow.show();
+    }
+    mainWindow.focus();
+}
+
+function createTray() {
+    tray = new Tray(nativeImage.createFromDataURL(TRAY_ICON_DATA_URL));
+    tray.setToolTip('Pulsar Manager');
+    tray.setContextMenu(
+        Menu.buildFromTemplate([
+            {label: '显示主窗口', click: () => showMainWindow()},
+            {type: 'separator'},
+            {label: '退出', click: () => app.quit()},
+        ]),
+    );
+    tray.on('double-click', () => showMainWindow());
+}
 
 function createWindow() {
     mainWindow = new BrowserWindow({
@@ -64,6 +99,14 @@ function createWindow() {
 
     mainWindow.once('ready-to-show', () => {
         mainWindow?.show();
+    });
+
+    // 点击右上角关闭不再退出，而是最小化到托盘；真正退出走托盘菜单的"退出"
+    mainWindow.on('close', event => {
+        if (!isQuitting) {
+            event.preventDefault();
+            mainWindow?.hide();
+        }
     });
 
     mainWindow.on('closed', () => {
@@ -107,15 +150,14 @@ if (!gotTheLock) {
     app.quit();
 } else {
     app.on('second-instance', () => {
-        // Someone tried to run a second instance, focus our window instead
-        if (mainWindow) {
-            if (mainWindow.isMinimized()) mainWindow.restore();
-            mainWindow.focus();
-        }
+        showMainWindow();
     });
 
     // 应用就绪
     app.whenReady().then(() => {
+        // 隐藏顶部 File/Edit/View 原生菜单栏（桌面工具用不到，白白占一行）
+        Menu.setApplicationMenu(null);
+
         // 下发 CSP，避免渲染层被注入的脚本直接调用 IPC
         session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
             callback({
@@ -130,6 +172,7 @@ if (!gotTheLock) {
         registerIPCHandlers();
 
         createWindow();
+        createTray();
 
         app.on('activate', () => {
             if (BrowserWindow.getAllWindows().length === 0) {
@@ -147,6 +190,11 @@ app.on('window-all-closed', () => {
 });
 
 // 应用退出时清理资源
+app.on('before-quit', () => {
+    // 放行窗口 close 事件，否则 preventDefault 会让退出卡死
+    isQuitting = true;
+});
+
 app.on('will-quit', () => {
     // 原生客户端的会话要主动关，否则 broker 侧会留下未关闭的消费者/生产者
     // （订阅看起来"卡住"往往就是这个原因）。will-quit 无法等待异步关闭，只能尽力而为。

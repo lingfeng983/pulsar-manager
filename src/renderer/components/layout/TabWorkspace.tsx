@@ -1,5 +1,5 @@
 import React, {useState, useEffect, useRef} from 'react';
-import {Tabs, Tooltip} from 'antd';
+import {Tabs} from 'antd';
 import {useTabStore} from '../../store/tabs';
 import HomePage from '../../pages/Home';
 import TopicDetail from '../../pages/TopicDetail';
@@ -51,6 +51,16 @@ const TabWorkspace: React.FC = () => {
         });
     };
 
+    // 在整个工作区容器上兜住 contextmenu：右键命中页签任意位置（含 padding/关闭钮）都能弹菜单，
+    // 通过 data-node-key 反查是否为本工作区的页签。
+    const handleContainerContextMenu = (e: React.MouseEvent) => {
+        const tabEl = (e.target as HTMLElement).closest?.('.ant-tabs-tab');
+        if (!tabEl) return;
+        const key = tabEl.getAttribute('data-node-key');
+        if (!key || !tabs.some(t => t.id === key)) return;
+        handleTabContextMenu(e, key);
+    };
+
     // 关闭除 targetKey 之外的全部标签页（首页始终保留）
     const closeOtherTabsThan = (targetKey: string) => {
         const tabsToClose = tabs.filter(t => t.id !== targetKey && t.id !== 'home');
@@ -91,6 +101,21 @@ const TabWorkspace: React.FC = () => {
         const tabsToClose = tabs.slice(tabIndex + 1).filter(t => t.id !== 'home');
         tabsToClose.forEach(t => removeTab(t.id));
         setTabContextMenu({...tabContextMenu, visible: false});
+    };
+
+    // 关闭当前右键命中的标签页（首页不可关闭）
+    const handleCloseThisTab = () => {
+        const targetKey = tabContextMenu.tabKey;
+        if (targetKey !== 'home') {
+            removeTab(targetKey);
+        }
+        setTabContextMenu(prev => ({...prev, visible: false}));
+    };
+
+    // 关闭全部标签页（保留首页）
+    const handleCloseAllTabs = () => {
+        tabs.filter(t => t.id !== 'home').forEach(t => removeTab(t.id));
+        setTabContextMenu(prev => ({...prev, visible: false}));
     };
 
     // 点击外部区域关闭右键菜单
@@ -144,6 +169,7 @@ const TabWorkspace: React.FC = () => {
     return (
         <div
             ref={containerRef}
+            onContextMenu={handleContainerContextMenu}
             style={{
                 flex: 1,
                 display: 'flex',
@@ -161,7 +187,7 @@ const TabWorkspace: React.FC = () => {
                 onEdit={(targetKey, action) => handleEdit(targetKey, action)}
                 items={tabs.map(tab => ({
                     key: tab.id,
-                    label: tab.id === 'home' ? <Tooltip title="首页">{tab.title}</Tooltip> : tab.title,
+                    label: <span>{tab.title}</span>,
                     closable: tab.id !== 'home',
                     children: renderTabContent(tab),
                 }))}
@@ -203,34 +229,64 @@ const TabWorkspace: React.FC = () => {
                     }}
                     onClick={e => e.stopPropagation()}
                 >
-                    <div
-                        style={{
+                    {(() => {
+                        const targetKey = tabContextMenu.tabKey;
+                        const targetIndex = tabs.findIndex(t => t.id === targetKey);
+                        const closableTabs = tabs.filter(t => t.id !== 'home');
+                        const othersCount = tabs.filter(t => t.id !== targetKey && t.id !== 'home').length;
+                        const rightCount = tabs.slice(targetIndex + 1).filter(t => t.id !== 'home').length;
+
+                        const itemStyle = (enabled: boolean): React.CSSProperties => ({
                             padding: '5px 12px',
-                            cursor: 'pointer',
+                            cursor: enabled ? 'pointer' : 'not-allowed',
                             fontSize: 14,
                             lineHeight: '22px',
                             transition: 'background 0.2s',
-                        }}
-                        onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-fill-secondary, #f5f5f5)')}
-                        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                        onClick={handleCloseOtherTabs}
-                    >
-                        关闭其他标签页
-                    </div>
-                    <div
-                        style={{
-                            padding: '5px 12px',
-                            cursor: 'pointer',
-                            fontSize: 14,
-                            lineHeight: '22px',
-                            transition: 'background 0.2s',
-                        }}
-                        onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-fill-secondary, #f5f5f5)')}
-                        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                        onClick={handleCloseTabsToRight}
-                    >
-                        关闭右侧标签页
-                    </div>
+                            color: enabled ? 'var(--color-text-primary)' : 'var(--color-text-secondary)',
+                            opacity: enabled ? 1 : 0.5,
+                        });
+
+                        const renderItem = (
+                            label: string,
+                            enabled: boolean,
+                            onClick: () => void,
+                            danger = false,
+                        ) => {
+                            const style: React.CSSProperties = {...itemStyle(enabled)};
+                            if (danger && enabled) {
+                                style.color = 'var(--color-error, #ff4d4f)';
+                            }
+                            return (
+                                <div
+                                    key={label}
+                                    style={style}
+                                    onMouseEnter={e => {
+                                        if (enabled) {
+                                            e.currentTarget.style.background =
+                                                'var(--color-fill-secondary, #f5f5f5)';
+                                        }
+                                    }}
+                                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                                    onClick={() => {
+                                        if (enabled) {
+                                            onClick();
+                                        }
+                                    }}
+                                >
+                                    {label}
+                                </div>
+                            );
+                        };
+
+                        return (
+                            <>
+                                {renderItem('关闭当前', targetKey !== 'home', handleCloseThisTab, true)}
+                                {renderItem('关闭其他', othersCount > 0, handleCloseOtherTabs)}
+                                {renderItem('关闭右侧', rightCount > 0, handleCloseTabsToRight)}
+                                {renderItem('全部关闭', closableTabs.length > 0, handleCloseAllTabs, true)}
+                            </>
+                        );
+                    })()}
                 </div>
             )}
         </div>

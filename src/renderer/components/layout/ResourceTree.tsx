@@ -1,4 +1,4 @@
-import React, {useState, useEffect, useCallback, useMemo} from 'react';
+import React, {useState, useEffect, useCallback, useMemo, useRef} from 'react';
 import {Tree, Button, Space, Spin, message, Menu, Modal, Input} from 'antd';
 import type {DataNode} from 'antd/es/tree';
 import {
@@ -45,8 +45,21 @@ interface ResourceTreeNode extends DataNode {
     };
 }
 
+const SIDEBAR_MIN_WIDTH = 160;
+const SIDEBAR_MAX_WIDTH = 640;
+const SIDEBAR_WIDTH_KEY = 'pulsar-manager.sidebar-width';
+
+const clampSidebarWidth = (w: number) => Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, w));
+
 const ResourceTree: React.FC = () => {
     const [collapsed, setCollapsed] = useState(false);
+    const [sidebarWidth, setSidebarWidth] = useState(() => {
+        const saved = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY));
+        return saved >= SIDEBAR_MIN_WIDTH && saved <= SIDEBAR_MAX_WIDTH ? saved : 240;
+    });
+    const [resizing, setResizing] = useState(false);
+    const sidebarWidthRef = useRef(sidebarWidth);
+    sidebarWidthRef.current = sidebarWidth;
     const [loading, setLoading] = useState(false);
     const [treeData, setTreeData] = useState<DataNode[]>([]);
     const [expandedKeys, setExpandedKeys] = useState<React.Key[]>([]);
@@ -669,6 +682,30 @@ const ResourceTree: React.FC = () => {
         });
     }, [addTab]);
 
+    // 左右拖动调整侧边栏宽度
+    const handleResizeStart = useCallback((e: React.MouseEvent) => {
+        e.preventDefault();
+        const startX = e.clientX;
+        const startWidth = sidebarWidthRef.current;
+        setResizing(true);
+        document.body.style.userSelect = 'none';
+        document.body.style.cursor = 'col-resize';
+
+        const onMove = (moveEvent: MouseEvent) => {
+            setSidebarWidth(clampSidebarWidth(startWidth + moveEvent.clientX - startX));
+        };
+        const onUp = () => {
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+            document.body.style.userSelect = '';
+            document.body.style.cursor = '';
+            setResizing(false);
+            localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidthRef.current));
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+    }, []);
+
     // 空状态
     const renderEmpty = () => (
         <div
@@ -687,15 +724,35 @@ const ResourceTree: React.FC = () => {
     return (
         <div
             style={{
-                width: collapsed ? '48px' : 'var(--sidebar-width)',
+                width: collapsed ? '48px' : sidebarWidth,
                 backgroundColor: 'var(--color-bg-secondary)',
                 borderRight: '1px solid var(--color-border)',
                 display: 'flex',
                 flexDirection: 'column',
-                transition: 'width 0.2s ease',
+                transition: resizing ? 'none' : 'width 0.2s ease',
                 overflow: 'hidden',
+                position: 'relative',
+                flexShrink: 0,
             }}
         >
+            {/* 右边缘拖动把手：按住左右移动调整宽度 */}
+            {!collapsed && (
+                <div
+                    onMouseDown={handleResizeStart}
+                    title="拖动调整宽度"
+                    style={{
+                        position: 'absolute',
+                        top: 0,
+                        right: 0,
+                        bottom: 0,
+                        width: 6,
+                        cursor: 'col-resize',
+                        zIndex: 10,
+                        backgroundColor: resizing ? 'var(--color-primary)' : 'transparent',
+                        opacity: resizing ? 0.35 : 1,
+                    }}
+                />
+            )}
             {/* 工具栏 */}
             {!collapsed && (
                 <div

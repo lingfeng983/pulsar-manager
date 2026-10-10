@@ -131,6 +131,25 @@ code, pre, .mono {
   background: var(--color-text-secondary);
 }
 
+/* 标签页内容区：面板撑满剩余高度，内容超出时出现滚动条 */
+.ant-tabs-content-holder {
+  min-height: 0;
+}
+
+.ant-tabs-content {
+  height: 100%;
+}
+
+.ant-tabs-tabpane {
+  height: 100%;
+  overflow: auto;
+}
+
+/* 宽表格横向滚动，避免列被裁掉 */
+.ant-table-content {
+  overflow-x: auto !important;
+}
+
 /* 工具类 */
 .text-primary {
   color: var(--color-text-primary);
