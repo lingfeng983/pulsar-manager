@@ -267,7 +267,12 @@ export const MessageSendSchema = TopicPathSchema.extend({
         .string()
         .min(1)
         .max(5 * 1024 * 1024),
-    properties: z.record(z.string().max(1024), z.string().max(1024)).optional(),
+    // 键与值的长度都限了，条数不限的话同样能绕过 5MB：一万个属性就是几百 MB，
+    // 而且这些键值会原样进原生 producer.send 并在 broker 侧长期存储。
+    properties: z
+        .record(z.string().max(1024), z.string().max(1024))
+        .optional()
+        .refine(props => !props || Object.keys(props).length <= 100, '属性条目最多 100 个'),
 });
 
 // maxMessages = 0 表示一直收到手动停止为止；默认给一个上限，
@@ -283,14 +288,17 @@ export const ReadStartSchema = TopicPathSchema.extend({
     from: z.enum(['earliest', 'latest', 'timestamp']).default('earliest'),
     timestamp: z.number().int().positive().optional(),
     maxMessages: z.number().int().min(0).max(10000).default(500),
-});
+})
+    // 起点与时间戳必须二选一：两个都给的话服务层会拿 timestamp 去 seek，
+    // 用户选"最新位置"却看到从旧时间开始回放，而且界面报成功。
+    .refine(params => (params.from === 'timestamp' ? !!params.timestamp : !params.timestamp), {
+        message: '按时间读取需要 timestamp，其他起点不能带 timestamp',
+    });
 
 export const SessionIdSchema = z.object({
-    sessionId: z
-        .string()
-        .min(1)
-        .max(64)
-        .regex(/^s\d+$/),
+    // 会话 id 由主进程用 uuid 生成；限成 uuid 可以避免拿着上一个进程的 id
+    // 去停这一进程里恰好同名的会话
+    sessionId: z.string().uuid(),
 });
 
 // 快速压测：全部字段都有默认值，渲染层只提交用户改动过的项。

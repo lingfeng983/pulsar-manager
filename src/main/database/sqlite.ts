@@ -366,12 +366,19 @@ export function insertOperationLog(
       @details, @result, @error_message, @created_at
     )
   `);
-    stmt.run({
-        ...log,
-        details: log.details || null,
-        error_message: log.error_message || null,
-        created_at: now,
-    });
+    try {
+        stmt.run({
+            ...log,
+            details: log.details || null,
+            error_message: log.error_message || null,
+            created_at: now,
+        });
+    } catch (error) {
+        // 审计是旁路，不能反噬业务：开了外键之后，「消息已发出去、日志却插不进去」
+        // 是会真实发生的——删集群与发消息并发时，写日志那一步面对的集群行已经没了，
+        // FOREIGN KEY constraint failed 会把一次成功的操作报成失败。
+        console.warn('[Database] Operation log write failed:', error instanceof Error ? error.message : error);
+    }
 }
 
 export function getRecentOperationLogs(limit: number = 50): OperationLogRecord[] {

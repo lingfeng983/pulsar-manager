@@ -172,6 +172,9 @@ interface Run {
     // 循环退出 + 资源关闭 + 终态上报的整体 Promise：停止时等它，
     // 而不是自己去关原生对象（在途发送/接收还没落地就关是崩溃温床）。
     settled: Promise<void>;
+    // execute 是否已经跑起来。没跑起来时 settled 还是初始的空 Promise，
+    // 作废握手不能等它，只能直接关已经建好的 producer/consumer。
+    running: boolean;
 }
 
 // 同一目标（集群 + Topic + 订阅）只允许一条压测在跑：两条并发写同一个 Topic，
@@ -258,27 +261,37 @@ class LoadTestManager {
             consumer: null,
             releaseClient: null,
             settled: Promise.resolve(),
+            running: false,
         };
         this.runs.set(key, run);
 
         try {
             // 与缓存客户端的握手：集群被删或改配置时先作废这条压测，再关原生 Client。
             // 顺序反过来就是原生层的 use-after-free（实测段错误）。
+            // stop 必须等整条循环自己收尾（execute 末尾会 settle+discard），
+            // 不能在这里直接 settle——那会在还有在途 send/receive 时关掉 producer，
+            // 正是用户点"停止"那条路径早就避开、只有作废路径漏掉的崩溃来源。
             const held = await nativeClientManager.retain(params.clusterId, config, {
                 onInvalidate: () => this.halt(run, '本集群的连接配置已变更（改配置或删除集群），压测已中止'),
-                stop: () => this.settle(run),
+                stop: () => this.windDown(run),
             });
             if (!held) {
                 throw new Error('该集群的连接正在重建，请稍后重新开始压测');
             }
             run.releaseClient = held.release;
             await this.createResources(run, held.client);
+            if (run.stopped) {
+                // 建资源期间被作废：此时 execute 还没开始，客户端可能已经关掉，
+                // 不能再拿这批 producer 去发送。
+                throw new Error(run.stopReason || '压测在启动过程中被中止');
+            }
         } catch (error) {
             await this.settle(run);
             this.discard(run);
             throw new Error(`压测启动失败：${error instanceof Error ? error.message : String(error)}`);
         }
 
+        run.running = true;
         run.settled = this.execute(run, emit);
         return {runId: run.id, topic: run.topic};
     }
@@ -289,16 +302,25 @@ class LoadTestManager {
             return false;
         }
         this.halt(run, '用户停止');
-        await withHardTimeout(run.settled, `run ${runId} did not settle`, RECEIVE_TIMEOUT_MS + CLOSE_TIMEOUT_MS);
+        await this.windDown(run);
         return true;
     }
 
     async closeAll(): Promise<void> {
         const runs = [...this.runs.values()];
         runs.forEach(run => this.halt(run, '应用退出'));
-        await Promise.all(
-            runs.map(run => withHardTimeout(run.settled, `run ${run.id} did not settle`, CLOSE_TIMEOUT_MS)),
-        );
+        await Promise.all(runs.map(run => this.windDown(run)));
+    }
+
+    // 等一条压测彻底收尾。循环已经跑起来就必须等它自己关资源——execute 的末尾
+    // 会 settle + discard；还卡在启动途中的话 settled 只是初始空 Promise，
+    // 等它等于什么都没等，这时直接关已经建好的 producer/consumer 才是安全的。
+    private async windDown(run: Run): Promise<void> {
+        if (run.running) {
+            await withHardTimeout(run.settled, `run ${run.id} did not settle`, RECEIVE_TIMEOUT_MS + CLOSE_TIMEOUT_MS);
+            return;
+        }
+        await this.settle(run);
     }
 
     // reason 为 null 表示"因故障中止"：终态由 failure 决定，不能把异常伪装成用户停止。
@@ -462,7 +484,9 @@ class LoadTestManager {
         let lastEmitAt = 0;
         let sendFinishedAt = 0;
         while (!run.stopped) {
-            const sendDone = run.sent + run.failed >= run.params.totalMessages;
+            // "发完"看的是投出去的条数都已落地：issued 上界是总量，sent+failed 上界是
+            // issued，两段合起来才等于"队列里没有在途消息"。
+            const sendDone = run.issued >= run.params.totalMessages && run.sent + run.failed >= run.issued;
             if (sendDone && !sendFinishedAt) {
                 sendFinishedAt = Date.now();
             }

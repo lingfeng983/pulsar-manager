@@ -238,17 +238,34 @@ app.on('before-quit', () => {
     isQuitting = true;
 });
 
-app.on('will-quit', () => {
-    // 压测跑在缓存客户端上，必须先叫停：clear 关客户端时 producer/consumer 还活着
-    // 就是原生层的 use-after-free（实测段错误）。closeAll 的作废是同步生效的。
-    void loadTestManager.closeAll();
-    // 原生客户端的会话要主动关，否则 broker 侧会留下未关闭的消费者/生产者
-    // （订阅看起来"卡住"往往就是这个原因）。will-quit 无法等待异步关闭，只能尽力而为。
-    void nativeClientManager.clear();
-    // 隧道是本地端口监听 + SSH 长连接，退出前必须关掉，否则残留的监听端口
-    // 会让下一次启动拿到不同的端口号
-    void sshTunnelManager.closeAll();
-    cleanupDatabase();
+let resourcesReleased = false;
+
+app.on('will-quit', event => {
+    // 这三项收尾都是异步的，而它们绝不能跑到 client.close() 后面去：压测的
+    // producer/consumer 还挂在原生 Client 上就关客户端是实测过的段错误，消费者
+    // 不先退订 broker 侧会留下"卡住"的订阅，隧道的本地监听端口也会残留。
+    // 原来这里是三个 void 加一句立即执行的 cleanupDatabase，等于全程尽力而为。
+    if (resourcesReleased) {
+        return;
+    }
+    event.preventDefault();
+    const release = async (step: string, task: () => Promise<void>) => {
+        try {
+            await task();
+        } catch (error) {
+            log.error(`${step} failed on shutdown`, error instanceof Error ? error.message : String(error));
+        }
+    };
+    (async () => {
+        // 顺序不能并起来：clear() 会关掉压测正挂在上面的原生 Client
+        await release('load test shutdown', () => loadTestManager.closeAll());
+        await release('native client shutdown', () => nativeClientManager.clear());
+        await release('ssh tunnel shutdown', () => sshTunnelManager.closeAll());
+    })().finally(() => {
+        resourcesReleased = true;
+        cleanupDatabase();
+        app.quit();
+    });
 });
 
 // IPC handlers 将在后续模块中注册

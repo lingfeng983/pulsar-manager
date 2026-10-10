@@ -328,7 +328,9 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({clusterId, tenant, names
                 topic,
                 persistent,
                 from: readFrom,
-                timestamp: readTimestamp ? readTimestamp.valueOf() : undefined,
+                // 时间戳只在「按时间」时带上：选过时间再切回最新/最早，控件里的值还在，
+                // 带着它提交会被主进程按「起点与时间戳二选一」拒掉，用户只看到一句参数错误。
+                timestamp: readFrom === 'timestamp' ? readTimestamp?.valueOf() : undefined,
                 maxMessages: readMax,
             }),
         );

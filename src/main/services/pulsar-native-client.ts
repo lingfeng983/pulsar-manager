@@ -196,7 +196,44 @@ export interface ClientHold {
 export class NativeClientManager {
     private clients = new Map<string, CachedClient>();
     private sessions = new Map<string, Session>();
-    private sessionCounter = 0;
+    // 发消息这类一次性操作只借用缓存 Client 几分钟甚至几毫秒，不值得为它建会话，
+    // 但它创建的 producer 同样怕 client.close()——所以登记在这里，让 removeCluster
+    // 在关原生 Client 之前先等在途的那几条落地。
+    private shortLived = new Map<string, Set<Promise<void>>>();
+
+    private trackShortLived(clusterId: string, op: Promise<unknown>): void {
+        let bucket = this.shortLived.get(clusterId);
+        if (!bucket) {
+            bucket = new Set();
+            this.shortLived.set(clusterId, bucket);
+        }
+        const registry = bucket;
+        const tracked = op.then(
+            () => registry.delete(tracked),
+            () => registry.delete(tracked),
+        );
+        registry.add(tracked);
+    }
+
+    // 等待该集群上全部在途一次性操作。必须带硬超时：发送卡住时不能把
+    // 「删除集群」也一起吊死。
+    private async drainShortLived(clusterId: string): Promise<void> {
+        const registry = this.shortLived.get(clusterId);
+        if (!registry || registry.size === 0) {
+            this.shortLived.delete(clusterId);
+            return;
+        }
+        await withHardTimeout(
+            Promise.all([...registry]).then(() => undefined),
+            `cluster ${clusterId} still has in-flight native sends`,
+            SETTLE_TIMEOUT_MS,
+        );
+        // 只在桶还是同一个、且确实排空时摘掉：集群 id 是 uuid，删除的集群留着空桶
+        // 就是永不回收的条目。排水期间新起的发送会落回同一个桶，那种情况不能删。
+        if (this.shortLived.get(clusterId) === registry && registry.size === 0) {
+            this.shortLived.delete(clusterId);
+        }
+    }
 
     // 集群配置变更后必须重建客户端，否则会一直用旧的 serviceUrl / 凭据。
     // 配置变化时先停掉该集群的全部会话再关旧客户端：在还活着的 consumer 下面
@@ -276,6 +313,8 @@ export class NativeClientManager {
         await Promise.all([
             ...targets.map(session => this.stopSession(session)),
             ...holds.map(hold => withHardTimeout(hold.stop(), 'held run did not settle')),
+            // 一次性发送也跑在这份 Client 上，同一条 Promise.all 里等它们落地
+            this.drainShortLived(clusterId),
         ]);
         if (cached) {
             await withHardTimeout(
@@ -304,19 +343,26 @@ export class NativeClientManager {
     ): Promise<{messageId: string}> {
         const topic = topicFullName(params.tenant, params.namespace, params.topic, params.persistent);
         const client = await this.getClient(clusterId, config);
-        const producer: Producer = await client.createProducer({topic});
-        try {
-            const messageId = await producer.send({
-                data: Buffer.from(params.message, 'utf8'),
-                properties: params.properties,
-            });
-            return {messageId: messageId.toString()};
-        } finally {
-            await withHardTimeout(
-                producer.close().then(() => undefined),
-                'producer close failed',
-            );
-        }
+        const work = (async (): Promise<{messageId: string}> => {
+            const producer: Producer = await client.createProducer({topic});
+            try {
+                const messageId = await producer.send({
+                    data: Buffer.from(params.message, 'utf8'),
+                    properties: params.properties,
+                });
+                return {messageId: messageId.toString()};
+            } finally {
+                await withHardTimeout(
+                    producer.close().then(() => undefined),
+                    'producer close failed',
+                );
+            }
+        })();
+        // 登记必须在 await 之前：从 createProducer 到 close 之间如果集群被删或改配置，
+        // removeCluster 会直接 client.close()，而原生层在还挂着的 producer 下面关
+        // Client 就是段错误——和压测那条路径完全同一类，只是窗口更短更难复现。
+        this.trackShortLived(clusterId, work);
+        return work;
     }
 
     // 同一个订阅只允许一个会话：两个消费者抢 Exclusive 订阅会互相踢下线，
@@ -327,7 +373,9 @@ export class NativeClientManager {
             throw new Error('该订阅已有正在运行的会话，请先停止');
         }
         const session: Session = {
-            id: `s${++this.sessionCounter}`,
+            // uuid 而不是自计数：自计数会重复出现在"渲染层还握着上一个进程的 s1"
+            // 这类场景里，停错会话比停不到更难排查
+            id: crypto.randomUUID(),
             clusterId,
             key,
             stopped: false,
@@ -474,7 +522,7 @@ export class NativeClientManager {
         if (params.from === 'timestamp' && !params.timestamp) {
             throw new Error('按时间读取需要指定 timestamp');
         }
-        const seekTimestamp = params.timestamp;
+        const seekTimestamp = params.from === 'timestamp' ? params.timestamp : undefined;
         const session = this.reserveSession(clusterId, `${clusterId}|${topic}|reader|${params.from}`);
         const client = await this.getClient(clusterId, config);
 
