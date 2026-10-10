@@ -118,10 +118,23 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
 
     useEffect(() => {
         fetchTopicStats();
-        const interval = setInterval(fetchTopicStats, 15000);
+        const interval = setInterval(() => {
+            // 窗口最小化/隐藏时不轮询；回到可见时由 visibilitychange 补一次
+            if (!document.hidden) {
+                fetchTopicStats();
+            }
+        }, 15000);
+        const onVisible = () => {
+            if (!document.hidden) {
+                fetchTopicStats();
+            }
+        };
+        document.addEventListener('visibilitychange', onVisible);
         return () => {
-            requestIdRef.current = 0;
             clearInterval(interval);
+            document.removeEventListener('visibilitychange', onVisible);
+            // 不清零 requestIdRef：归零后新请求会复用旧编号，
+            // 失效前发出的在途响应就能冒充最新结果落进 state
         };
     }, [fetchTopicStats]);
 
@@ -631,6 +644,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                                                         }
                                                         pagination={false}
                                                         size="small"
+                                                        scroll={{x: 'max-content'}}
                                                     />
                                                 ) : (
                                                     <div
@@ -655,6 +669,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                                                         }
                                                         pagination={false}
                                                         size="small"
+                                                        scroll={{x: 'max-content'}}
                                                     />
                                                 ) : (
                                                     <div
@@ -702,6 +717,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                                             rowKey="name"
                                             pagination={false}
                                             size="small"
+                                            scroll={{x: 'max-content'}}
                                         />
                                     ) : (
                                         <div

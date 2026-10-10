@@ -779,6 +779,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({clusterId, tenant, names
                                 rowKey={(record, index) => `${record.messageId}-${index}`}
                                 pagination={false}
                                 size="small"
+                                scroll={{x: 'max-content'}}
                             />
                         )}
                     </div>

@@ -162,7 +162,8 @@ export function formatBinding(binding: string | null | undefined, platform: Plat
     const table = platform === 'mac' ? MAC_SYMBOLS : WINDOWS_LABELS;
     const parts = binding.split('+');
     const key = parts.pop() ?? '';
-    const label = key.length === 1 ? key.toUpperCase() : (table[key] ?? key);
+    // 空格是单字符但不是普通键，直接走 length===1 分支会渲染成空白
+    const label = key === ' ' ? 'Space' : key.length === 1 ? key.toUpperCase() : (table[key] ?? key);
     const modifiers = parts.map(part => table[part] ?? part);
     // macOS 的书写习惯是修饰键紧邻主键，无需分隔符。
     return platform === 'mac' ? [...modifiers, label].join('') : [...modifiers, label].join('+');

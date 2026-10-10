@@ -162,6 +162,8 @@ const HomeTopology: React.FC = () => {
     const layout: TopologyLayout = 'force';
     const chartInstance = useRef<any>(null);
     const getChart = useCallback(() => chartInstance.current, []);
+    // 拓扑加载代次：集群列表变化后，旧一轮的晚到响应必须作废
+    const homeTopologyRequestRef = useRef(0);
     const palette = useTopologyPalette();
     const {addTab} = useTabStore();
 
@@ -190,6 +192,9 @@ const HomeTopology: React.FC = () => {
 
     // 加载集群拓扑数据
     const loadTopology = useCallback(async () => {
+        const requestId = ++homeTopologyRequestRef.current;
+        const isStale = () => requestId !== homeTopologyRequestRef.current;
+
         if (clusters.length === 0) {
             setNodes([]);
             setEdges([]);
@@ -225,6 +230,10 @@ const HomeTopology: React.FC = () => {
                     fetchClusterTopology(cluster.id, cluster.name, cluster.status || 'disconnected'),
                 ),
             );
+            // 集群列表在加载期间又变了：这一轮的响应整体作废，等下一轮
+            if (isStale()) {
+                return;
+            }
 
             const successfulData: ClusterTopologyData[] = [];
             const errors: string[] = [];
@@ -269,7 +278,9 @@ const HomeTopology: React.FC = () => {
             console.error('Failed to load topology:', err);
             setError('加载拓扑数据失败，请稍后重试');
         } finally {
-            setLoading(false);
+            if (!isStale()) {
+                setLoading(false);
+            }
         }
     }, [clusters]);
 

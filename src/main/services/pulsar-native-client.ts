@@ -66,7 +66,7 @@ function toClientConfig(config: NativeConnectionConfig): ClientConfig {
             clientConfig.tlsTrustCertsFilePath = writeTrustCert(config.tlsTrustCerts);
         }
         clientConfig.tlsAllowInsecureConnection = false;
-        clientConfig.tlsValidateHostname = false;
+        clientConfig.tlsValidateHostname = true;
     }
     return clientConfig;
 }
@@ -392,6 +392,12 @@ export class NativeClientManager {
         onEnd: (event: SessionEndEvent) => void,
     ): Promise<{sessionId: string}> {
         const topic = topicFullName(params.tenant, params.namespace, params.topic, params.persistent);
+        // seek 参数缺失必须在创建 Reader 之前拒绝：否则 seek 不执行，会话会
+        // 从 earliest 一路回放，且 catch 里已分配的 Reader 不会被关。
+        if (params.from === 'timestamp' && !params.timestamp) {
+            throw new Error('按时间读取需要指定 timestamp');
+        }
+        const seekTimestamp = params.timestamp;
         const session = this.reserveSession(clusterId, `${clusterId}|${topic}|reader|${params.from}`);
         const client = this.getClient(clusterId, config);
 
@@ -401,11 +407,8 @@ export class NativeClientManager {
                 topic,
                 startMessageId: params.from === 'latest' ? MessageId.latest() : MessageId.earliest(),
             });
-            if (params.from === 'timestamp') {
-                if (!params.timestamp) {
-                    throw new Error('按时间读取需要指定 timestamp');
-                }
-                await reader.seekTimestamp(params.timestamp);
+            if (seekTimestamp) {
+                await reader.seekTimestamp(seekTimestamp);
             }
         } catch (error) {
             this.sessions.delete(session.id);

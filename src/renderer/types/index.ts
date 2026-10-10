@@ -28,8 +28,6 @@ export type {
     MessageBatch,
     SessionEndEvent,
     BacklogInfo,
-    MetricData,
-    TimeRange,
     TopologyLimits,
     ClusterTopology,
     OperationLog,

@@ -141,6 +141,15 @@ function createWindow() {
         }
         return {action: 'deny'};
     });
+
+    // 禁止页面导航离开应用自身的内容：一旦跳到远程页面，渲染层就带着
+    // window.electronAPI 暴露的 IPC 面暴露在对方脚本之下。
+    mainWindow.webContents.on('will-navigate', (event, url) => {
+        const devOriginAllowed = isDev && (url.startsWith('http://localhost:') || url.startsWith('http://127.0.0.1:'));
+        if (!devOriginAllowed) {
+            event.preventDefault();
+        }
+    });
 }
 
 // 单实例锁定，防止多开

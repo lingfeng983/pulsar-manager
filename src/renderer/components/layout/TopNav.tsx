@@ -35,6 +35,10 @@ interface SearchResult {
     };
 }
 
+// 搜索结果达到这个数量就停止继续扇出请求：全集群深度遍历的代价
+// 只在需要更多结果时才付
+const SEARCH_RESULT_LIMIT = 20;
+
 const TopNav: React.FC = () => {
     const {theme, setTheme} = useThemeStore();
     const {addTab} = useTabStore();
@@ -44,6 +48,7 @@ const TopNav: React.FC = () => {
     const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
     const [searchLoading, setSearchLoading] = useState(false);
     const searchRef = useRef<any>(null);
+    const searchRequestRef = useRef(0);
     const [appVersion, setAppVersion] = useState('1.0.0');
     const platform = useShortcutStore(state => state.platform);
     const shortcutConfig = useShortcutStore(state => state.config);
@@ -84,6 +89,10 @@ const TopNav: React.FC = () => {
     // 搜索资源
     const searchResources = useCallback(
         async (keyword: string) => {
+            // 单调递增的请求代次：逐键触发搜索时，旧请求晚到不能覆盖新结果
+            const requestId = ++searchRequestRef.current;
+            const isStale = () => requestId !== searchRequestRef.current;
+
             if (!keyword.trim()) {
                 setSearchResults([]);
                 return;
@@ -92,10 +101,15 @@ const TopNav: React.FC = () => {
             setSearchLoading(true);
             try {
                 const results: SearchResult[] = [];
+                const lower = keyword.toLowerCase();
+                const full = () => results.length >= SEARCH_RESULT_LIMIT || isStale();
 
                 // 搜索集群
                 clusters.forEach(cluster => {
-                    if (cluster.name.toLowerCase().includes(keyword.toLowerCase())) {
+                    if (results.length >= SEARCH_RESULT_LIMIT) {
+                        return;
+                    }
+                    if (cluster.name.toLowerCase().includes(lower)) {
                         results.push({
                             key: `cluster-${cluster.id}`,
                             label: `${cluster.name}`,
@@ -107,14 +121,23 @@ const TopNav: React.FC = () => {
 
                 // 搜索租户、命名空间、Topic（走共享缓存，避免每次输入都重新打全量请求）
                 for (const cluster of clusters) {
+                    if (full()) {
+                        break;
+                    }
                     if (cluster.status !== 'connected') {
                         continue;
                     }
 
                     try {
                         const tenants = await loadTenants(cluster.id);
+                        if (isStale()) {
+                            return;
+                        }
                         for (const tenant of tenants) {
-                            if (tenant.name.toLowerCase().includes(keyword.toLowerCase())) {
+                            if (full()) {
+                                break;
+                            }
+                            if (tenant.name.toLowerCase().includes(lower)) {
                                 results.push({
                                     key: `tenant-${cluster.id}-${tenant.name}`,
                                     label: `${cluster.name} / ${tenant.name}`,
@@ -126,9 +149,15 @@ const TopNav: React.FC = () => {
                             // 搜索命名空间
                             try {
                                 const namespaces = await loadNamespaces(cluster.id, tenant.name);
+                                if (isStale()) {
+                                    return;
+                                }
                                 for (const namespace of namespaces) {
+                                    if (full()) {
+                                        break;
+                                    }
                                     const nsName = shortName(namespace);
-                                    if (nsName.toLowerCase().includes(keyword.toLowerCase())) {
+                                    if (nsName.toLowerCase().includes(lower)) {
                                         results.push({
                                             key: `namespace-${cluster.id}-${tenant.name}-${nsName}`,
                                             label: `${cluster.name} / ${tenant.name} / ${nsName}`,
@@ -140,14 +169,18 @@ const TopNav: React.FC = () => {
                                     // 搜索 Topic
                                     try {
                                         const topics = await loadTopics(cluster.id, tenant.name, nsName);
+                                        if (isStale()) {
+                                            return;
+                                        }
                                         for (const topic of topics) {
+                                            if (full()) {
+                                                break;
+                                            }
                                             const topicName = shortName(topic.name);
-                                            if (topicName.toLowerCase().includes(keyword.toLowerCase())) {
-                                                const parts = [cluster.name, tenant.name, nsName, topicName];
-                                                const label = parts.join(' / ');
+                                            if (topicName.toLowerCase().includes(lower)) {
                                                 results.push({
                                                     key: `topic-${cluster.id}-${tenant.name}-${nsName}-${topicName}`,
-                                                    label,
+                                                    label: [cluster.name, tenant.name, nsName, topicName].join(' / '),
                                                     type: 'topic',
                                                     data: {
                                                         clusterId: cluster.id,
@@ -172,11 +205,16 @@ const TopNav: React.FC = () => {
                     }
                 }
 
-                setSearchResults(results.slice(0, 20));
+                if (isStale()) {
+                    return;
+                }
+                setSearchResults(results.slice(0, SEARCH_RESULT_LIMIT));
             } catch (error) {
                 console.error('Search error:', error);
             } finally {
-                setSearchLoading(false);
+                if (!isStale()) {
+                    setSearchLoading(false);
+                }
             }
         },
         [clusters],

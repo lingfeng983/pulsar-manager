@@ -349,7 +349,7 @@ const HomePage: React.FC = () => {
                     </Row>
 
                     {/* 集群列表 */}
-                    <Card title="集群列表" bordered={false}>
+                    <Card title="集群列表" variant="borderless">
                         <Spin spinning={loading}>
                             {clusters.length === 0 && !loading ? (
                                 <div style={{textAlign: 'center', padding: '40px 0'}}>
@@ -366,6 +366,7 @@ const HomePage: React.FC = () => {
                                     rowKey="id"
                                     pagination={false}
                                     size="middle"
+                                    scroll={{x: 'max-content'}}
                                 />
                             )}
                         </Spin>

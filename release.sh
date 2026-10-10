@@ -63,6 +63,8 @@ SIZE="$(stat -c %s "$EXE")"
 SHA="$(sha256sum "$EXE" | cut -d' ' -f1)"
 echo "    产物 $EXE（$((SIZE / 1048576)) MB）"
 echo "    sha256 $SHA"
+# Gitee 附件硬上限 100MB，留 5MB 余量提前拦截，别让上传阶段才发现
+[ "$SIZE" -le 99614720 ] || die "安装包 $((SIZE / 1048576)) MB 超过 Gitee 附件上限（95MB 门禁），检查是否有依赖被错误放回 dependencies"
 
 # ---------- 3. 标签 ----------
 echo "==> [3/4] 标签 $TAG"

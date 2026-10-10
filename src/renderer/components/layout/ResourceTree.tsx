@@ -63,6 +63,11 @@ const ResourceTree: React.FC = () => {
     const [loading, setLoading] = useState(false);
     const [treeData, setTreeData] = useState<DataNode[]>([]);
     const [expandedKeys, setExpandedKeys] = useState<React.Key[]>([]);
+    // 供刷新回调读取最新树/展开状态，避免把 state 闭包进 useCallback 依赖里
+    const treeDataRef = useRef<DataNode[]>([]);
+    treeDataRef.current = treeData;
+    const expandedKeysRef = useRef<React.Key[]>([]);
+    expandedKeysRef.current = expandedKeys;
     const [contextMenu, setContextMenu] = useState<{x: number; y: number; node: ResourceTreeNode | null} | null>(null);
     const {clusters, fetchClusters, setActiveCluster, deleteClusterAsync, expandedClusterId} = useClusterStore();
     const {addTab} = useTabStore();
@@ -220,9 +225,17 @@ const ResourceTree: React.FC = () => {
         dataRef: {type: 'namespace', clusterId, tenant, namespace},
     });
 
-    // 初始加载
+    // 初始加载 / 集群列表变化时增量合并：整体替换会把已加载的租户/命名空间/
+    // topic 子树全部丢掉，任何一次集群状态刷新都让展开的分支被打回空壳。
+    // 这里只增删集群根节点、更新其标题与状态徽标，展开节点的 children 原样保留。
     useEffect(() => {
-        setTreeData(clusterToTreeData);
+        setTreeData(prev => {
+            const existingByKey = new Map(prev.map(n => [n.key, n]));
+            return clusterToTreeData.map(next => {
+                const existing = existingByKey.get(next.key);
+                return existing ? {...next, children: existing.children} : next;
+            });
+        });
     }, [clusterToTreeData]);
 
     // 响应集群展开事件
@@ -631,34 +644,41 @@ const ResourceTree: React.FC = () => {
         return baseItems;
     }, [contextMenu]);
 
-    // 刷新整个树（重置状态）
+    // 重拉当前展开的分支：合并策略会保留旧 children，展开节点必须强制重载，
+    // 否则"刷新"只是重读集群状态，树里的租户/命名空间/topic 还是旧的。
+    const reloadExpandedNodes = useCallback(async () => {
+        const targets: ResourceTreeNode[] = [];
+        const walk = (nodes: DataNode[]) => {
+            for (const n of nodes) {
+                const node = n as ResourceTreeNode;
+                if (node.dataRef && expandedKeysRef.current.includes(n.key)) {
+                    targets.push(node);
+                }
+                if (n.children) {
+                    walk(n.children);
+                }
+            }
+        };
+        walk(treeDataRef.current);
+        await Promise.all(targets.map(target => reloadNodeChildren(target)));
+    }, [reloadNodeChildren]);
+
+    // 刷新整个树（增量合并，不重置展开状态）
     const handleRefresh = useCallback(async () => {
         setLoading(true);
         // 强制刷新时清空资源缓存，确保拉取到最新的租户/命名空间/Topic
         invalidateResourceCache();
-        const previousExpanded = [...expandedKeys];
-        // Don't collapse - just refresh data
         try {
             await fetchClusters();
-            // Keep previous expansion state, filtering out keys for removed clusters
-            setExpandedKeys(prev =>
-                prev.filter(key => {
-                    if (typeof key === 'string' && key.startsWith('cluster-')) {
-                        const clusterId = key.replace('cluster-', '');
-                        return clusters.some(c => c.id === clusterId);
-                    }
-                    return true;
-                }),
-            );
+            await reloadExpandedNodes();
             message.success('刷新成功');
         } catch (error) {
             console.error('Failed to refresh clusters:', error);
-            setExpandedKeys(previousExpanded);
             message.error('刷新失败');
         } finally {
             setLoading(false);
         }
-    }, [fetchClusters, expandedKeys, clusters]);
+    }, [fetchClusters, reloadExpandedNodes]);
 
     useCommand('refreshResources', () => {
         void handleRefresh();
@@ -683,6 +703,13 @@ const ResourceTree: React.FC = () => {
     }, [addTab]);
 
     // 左右拖动调整侧边栏宽度
+    const dragCleanupRef = useRef<(() => void) | null>(null);
+
+    useEffect(() => {
+        // 组件卸载时拖拽若仍在进行，收回全局样式与监听。
+        return () => dragCleanupRef.current?.();
+    }, []);
+
     const handleResizeStart = useCallback((e: React.MouseEvent) => {
         e.preventDefault();
         const startX = e.clientX;
@@ -694,16 +721,22 @@ const ResourceTree: React.FC = () => {
         const onMove = (moveEvent: MouseEvent) => {
             setSidebarWidth(clampSidebarWidth(startWidth + moveEvent.clientX - startX));
         };
-        const onUp = () => {
+        const cleanup = () => {
+            if (dragCleanupRef.current !== cleanup) return;
+            dragCleanupRef.current = null;
             document.removeEventListener('mousemove', onMove);
-            document.removeEventListener('mouseup', onUp);
+            document.removeEventListener('mouseup', cleanup);
+            window.removeEventListener('blur', cleanup);
             document.body.style.userSelect = '';
             document.body.style.cursor = '';
             setResizing(false);
             localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidthRef.current));
         };
+        dragCleanupRef.current = cleanup;
         document.addEventListener('mousemove', onMove);
-        document.addEventListener('mouseup', onUp);
+        document.addEventListener('mouseup', cleanup);
+        // 在窗口外松开鼠标或切走焦点时 mouseup 送不回来，blur 兜底结束拖拽。
+        window.addEventListener('blur', cleanup);
     }, []);
 
     // 空状态

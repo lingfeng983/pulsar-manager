@@ -251,28 +251,6 @@ export const SessionIdSchema = z.object({
         .regex(/^s\d+$/),
 });
 
-// 验证函数
-export function validateClusterId(clusterId: string): boolean {
-    const result = ClusterIdSchema.safeParse(clusterId);
-    if (!result.success) {
-        console.warn('[IPC] Invalid clusterId:', clusterId);
-    }
-    return result.success;
-}
-
-export function validateTopicPath(params: {
-    clusterId: string;
-    tenant: string;
-    namespace: string;
-    topic: string;
-}): boolean {
-    const result = TopicPathSchema.safeParse(params);
-    if (!result.success) {
-        console.warn('[IPC] Invalid topic path:', params);
-    }
-    return result.success;
-}
-
 // 初始化数据库
 let dbInitialized = false;
 
@@ -339,6 +317,9 @@ export interface ClusterConnectionConfig {
     serviceUrl: string;
     webServiceUrl?: string | null;
     adminApiTimeoutMs: number;
+    // 原生客户端的超时单位是秒；由集群配置的 admin_api_timeout（毫秒）换算，
+    // 否则两条链路会读同一个集群却用两套超时。
+    operationTimeoutSeconds: number;
     authPlugin?: string | null;
     authParams?: string | null;
     tlsEnabled: boolean;
@@ -350,10 +331,17 @@ export function buildConnectionConfig(clusterId: string): ClusterConnectionConfi
     if (!cluster) {
         return null;
     }
+    // SSH 隧道端口转发尚未实现：勾选了隧道的集群若静默直连 serviceUrl，
+    // 用户会以为凭据/网络生效了，必须在这里显式拒绝而不是假装能连。
+    if (cluster.use_ssh_tunnel) {
+        throw new Error('SSH 隧道尚未实现，请在集群设置中关闭隧道后直连');
+    }
+    const adminApiTimeoutMs = cluster.admin_api_timeout || 5000;
     return {
         serviceUrl: cluster.service_url,
         webServiceUrl: cluster.web_service_url,
-        adminApiTimeoutMs: cluster.admin_api_timeout || 5000,
+        adminApiTimeoutMs,
+        operationTimeoutSeconds: Math.max(1, Math.round(adminApiTimeoutMs / 1000)),
         authPlugin: cluster.auth_plugin,
         authParams: cluster.auth_params ? decrypt(cluster.auth_params) : null,
         tlsEnabled: !!cluster.tls_enabled,
@@ -386,6 +374,18 @@ export function getAdminClient(clusterId: string): PulsarAdminClient | null {
 export function cleanupDatabase() {
     closeDatabase();
     dbInitialized = false;
+}
+
+// 集群状态只在真正变化时落库：资源树轮询每次都会走到这里，无条件写会让
+// SQLite 持续吃无效更新，updated_at 也会被轮询时间戳一直顶掉。
+export function markClusterStatus(clusterId: string, status: 'connected' | 'disconnected'): void {
+    const cluster = getClusterById(clusterId);
+    if (!cluster) {
+        return;
+    }
+    if ((cluster.status || 'disconnected') !== status) {
+        updateCluster(clusterId, {status});
+    }
 }
 
 // ========== IPC 请求来源校验 ==========

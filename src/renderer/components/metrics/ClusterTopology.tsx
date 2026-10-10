@@ -75,6 +75,8 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
     const [stats, setStats] = useState({brokers: 0, topics: 0, subscriptions: 0, partitions: 0});
     const chartRef = useRef<ReactECharts>(null);
     const getChart = useCallback(() => chartRef.current?.getEchartsInstance(), []);
+    // 拓扑请求代次：切换集群后旧请求的晚到响应必须作废
+    const topologyRequestRef = useRef(0);
     const palette = useTopologyPalette();
     const {addTab} = useTabStore();
     // zrender 会把量到的高度写成行内像素并钉住容器，所以尺寸由外层容器量出来反喂给图表。
@@ -189,9 +191,14 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
     const loadTopology = useCallback(async () => {
         if (!selectedCluster) return;
 
+        const requestId = ++topologyRequestRef.current;
         setLoading(true);
         try {
             const response = await window.electronAPI.topology.getClusterTopology(selectedCluster);
+            // 切换集群后旧集群的晚到响应不能覆盖当前图
+            if (requestId !== topologyRequestRef.current) {
+                return;
+            }
 
             if (response.success && response.data) {
                 const {nodes, edges} = transformTopologyData(response.data, showPartitions);
@@ -218,11 +225,16 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
                 setStats({brokers: 0, topics: 0, subscriptions: 0, partitions: 0});
             }
         } catch (error) {
+            if (requestId !== topologyRequestRef.current) {
+                return;
+            }
             console.error('Failed to load topology:', error);
             message.error('加载拓扑数据失败');
             setStats({brokers: 0, topics: 0, subscriptions: 0, partitions: 0});
         } finally {
-            setLoading(false);
+            if (requestId === topologyRequestRef.current) {
+                setLoading(false);
+            }
         }
     }, [selectedCluster, showPartitions, transformTopologyData]);
 

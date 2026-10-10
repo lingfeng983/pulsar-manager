@@ -273,10 +273,6 @@ export class PulsarAdminClient {
         return this.metricsAPI.getClusterTopology(limits);
     }
 
-    async getMetrics(query: string, range?: {start: number; end: number}) {
-        return this.metricsAPI.getMetrics(query, range);
-    }
-
     // ========== 生命周期 ==========
 
     // 清理客户端资源

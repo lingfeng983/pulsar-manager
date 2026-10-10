@@ -1,6 +1,6 @@
 import {
     z,
-    updateCluster,
+    markClusterStatus,
     registerClientHandler,
     insertOperationLog,
     formatError,
@@ -76,10 +76,10 @@ export function registerResourceHandlers() {
         async (client, {clusterId}) => {
             try {
                 const tenants = await client.getTenants();
-                updateCluster(clusterId, {status: 'connected'});
+                markClusterStatus(clusterId, 'connected');
                 return tenants;
             } catch (error) {
-                updateCluster(clusterId, {status: 'disconnected'});
+                markClusterStatus(clusterId, 'disconnected');
                 throw error;
             }
         },

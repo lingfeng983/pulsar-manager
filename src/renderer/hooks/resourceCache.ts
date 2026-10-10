@@ -73,6 +73,11 @@ function unwrap<T>(response: {success: boolean; data?: T; error?: string}, what:
 // 这里让后来者复用同一个 Promise，成功后一起拿结果，失败后一起报错。
 const inFlight = new Map<string, Promise<unknown>>();
 
+// 单调递增的写入代次：任何失效动作都会 +1。失效之前发出的在途请求，其结果
+// 已经不代表"最新"，必须禁止它回写缓存——否则删掉 topic 后一次慢刷新
+// 落地，旧列表原样回填，界面看起来像 topic 又活了。
+let writeEpoch = 0;
+
 async function cachedLoad<T>(cache: LRUCache<T>, key: string, fetcher: () => Promise<T>): Promise<T> {
     const cached = cache.get(key);
     if (cached) {
@@ -84,9 +89,12 @@ async function cachedLoad<T>(cache: LRUCache<T>, key: string, fetcher: () => Pro
         return pending;
     }
 
+    const epochAtStart = writeEpoch;
     const request = fetcher()
         .then(data => {
-            cache.set(key, data);
+            if (epochAtStart === writeEpoch) {
+                cache.set(key, data);
+            }
             return data;
         })
         .finally(() => {
@@ -137,6 +145,7 @@ export async function loadTopicStats(
 
 /** 清空全部资源缓存（例如切换集群或强制刷新时）。 */
 export function invalidateResourceCache(): void {
+    writeEpoch += 1;
     tenantsCache.clear();
     namespacesCache.clear();
     topicsCache.clear();
@@ -151,16 +160,19 @@ export function invalidateResourceCache(): void {
 
 /** 租户列表变更后调用。 */
 export function invalidateTenants(clusterId: string): void {
+    writeEpoch += 1;
     tenantsCache.delete(`tenants:${clusterId}`);
 }
 
 /** 命名空间增删后调用。 */
 export function invalidateNamespaces(clusterId: string, tenant: string): void {
+    writeEpoch += 1;
     namespacesCache.delete(`namespaces:${clusterId}:${tenant}`);
 }
 
 /** Topic 增删后调用。 */
 export function invalidateTopics(clusterId: string, tenant: string, namespace: string): void {
+    writeEpoch += 1;
     topicsCache.delete(`topics:${clusterId}:${tenant}:${namespace}`);
 }
 

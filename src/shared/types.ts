@@ -319,18 +319,6 @@ export interface BacklogInfo {
 
 // ========== 指标与拓扑 ==========
 
-export interface MetricData {
-    timestamp: number;
-    value: number;
-    labels?: Record<string, string>;
-}
-
-export interface TimeRange {
-    start: number;
-    end: number;
-    step?: string;
-}
-
 // 拓扑聚合规模上限：由调用方按场景收紧，服务端仍会与全局上限取较小值
 export interface TopologyLimits {
     maxTenants?: number;

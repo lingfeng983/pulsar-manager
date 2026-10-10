@@ -260,6 +260,7 @@ const ShortcutConfig: React.FC = () => {
                             columns={columns}
                             dataSource={groupRows}
                             pagination={false}
+                            scroll={{x: 'max-content'}}
                             rowClassName={row => (row.conflictWith.length > 0 ? 'shortcut-row-conflict' : '')}
                         />
                     </Card>

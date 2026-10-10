@@ -15,6 +15,14 @@ import {createLogger} from '../utils/logger';
 
 const log = createLogger('IPC');
 
+// settings 通道是通用键值口，放开任意 key 会让渲染层（一旦被注入脚本控制）
+// 读写 user_settings 里任何内容，包括主题等内部键。只放行界面上真实用到的。
+const SETTINGS_KEYS = new Set(['shortcuts']);
+
+function isAllowedSettingsKey(key: unknown): key is string {
+    return typeof key === 'string' && SETTINGS_KEYS.has(key);
+}
+
 export function registerSystemHandlers() {
     // ========== SSH 隧道 ==========
 
@@ -127,7 +135,7 @@ export function registerSystemHandlers() {
     registerRawHandler('settings:get', async key => {
         try {
             ensureDbInitialized();
-            if (typeof key !== 'string' || !key) {
+            if (!isAllowedSettingsKey(key)) {
                 return {success: false, error: 'Invalid settings key'};
             }
             const value = getSetting(key);
@@ -141,10 +149,13 @@ export function registerSystemHandlers() {
     registerRawHandler('settings:set', async (key, value) => {
         try {
             ensureDbInitialized();
-            if (typeof key !== 'string' || !key) {
+            if (!isAllowedSettingsKey(key)) {
                 return {success: false, error: 'Invalid settings key'};
             }
-            setSetting(key, value as string);
+            if (typeof value !== 'string' || value.length > 64 * 1024) {
+                return {success: false, error: 'Invalid settings value'};
+            }
+            setSetting(key, value);
             return {success: true};
         } catch (error) {
             log.error('settings:set failed', formatError(error));

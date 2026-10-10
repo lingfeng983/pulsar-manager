@@ -1,5 +1,6 @@
 import {create} from 'zustand';
 import type {ClusterConfig} from '../types';
+import {useTabStore} from './tabs';
 
 interface ClusterState {
     clusters: ClusterConfig[];
@@ -41,11 +42,14 @@ export const useClusterStore = create<ClusterState>((set, get) => ({
         set(state => ({
             clusters: state.clusters.map(c => (c.id === id ? {...c, ...updates} : c)),
         })),
-    deleteCluster: id =>
+    deleteCluster: id => {
         set(state => ({
             clusters: state.clusters.filter(c => c.id !== id),
             activeClusterId: state.activeClusterId === id ? null : state.activeClusterId,
-        })),
+        }));
+        // 集群没了，指向它的详情页/监控/拓扑标签全部会变成死链接，一并关掉。
+        useTabStore.getState().removeClusterTabs(id);
+    },
     setLoading: loading => set({loading}),
     setError: error => set({error}),
 

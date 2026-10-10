@@ -98,7 +98,7 @@ pulsar-manager/
 ### 安装与开发
 
 ```bash
-npm install
+npm install          # postinstall 会执行 electron-builder install-app-deps，把 better-sqlite3 重建到 Electron ABI
 npm run dev          # 并行启动 Vite(5173) 与 Electron
 ```
 
@@ -113,7 +113,7 @@ npm run electron:pack  # 免安装目录，产物在 release/win-unpacked
 npm run electron:dist  # NSIS 安装包 → release/Pulsar管理工具-安装包-<version>.exe
 ```
 
-原生 `.node` 通过 `asarUnpack` 解包到 `app.asar.unpacked`；`npmRebuild` 保持 `false`，因为 pulsar-client 走 N-API 预编译，跨 Node/Electron ABI 稳定。**开发态能跑不代表打包态能跑**，改过原生依赖后请在 `release/win-unpacked` 里启动验证一次。
+原生 `.node` 通过 `asarUnpack` 精确解包（better-sqlite3、pulsar-client 两个文件各自列出）。`npmRebuild` 保持 `false`，原生模块的 Electron ABI 适配由 `postinstall` 的 `install-app-deps` 在安装阶段一次完成——pulsar-client 走 N-API 跨 ABI 稳定，better-sqlite3 是 V8 ABI，必须按 Electron 头重建，缺了这一步打包态启动即崩。**开发态能跑不代表打包态能跑**，改过原生依赖后请在 `release/win-unpacked` 里启动验证一次。
 
 ### 提交前的四道门
 
@@ -162,9 +162,8 @@ npm run build:main && npm run build
 
 以下是**当前确实没做**的部分，界面不会假装它们可用：
 
-- **SSH 隧道端口转发未实现**：`ssh:connect` 只保存配置并明确返回失败，不会编造一个本地端口
+- **SSH 隧道端口转发未实现**：`ssh:connect` 只保存配置并明确返回失败，不会编造一个本地端口；集群若开启隧道，连接时主进程直接拒绝并提示直连
 - **检查更新是占位**：恒返回"已是最新版本"
-- **自定义指标查询未接入界面**：`metrics:query` 指向 `/admin/v2/metrics/query`，而标准 Pulsar 的对应路由是 `/admin/v2/broker-stats/metrics`，这条通道目前不可用；`metrics:getNamespaceStats` 已实现但同样没有页面调用
 - **快速压测入口是占位**：顶部导航点击后只提示"功能即将推出"
 - **消费没有逐条手动 ack**：只有"自动 ack"开关，关掉之后消息就一直不确认
 - 未实现：Schema 管理、权限管理、压测引擎、告警、时序降采样、国际化、K8s 端口转发

@@ -43,19 +43,26 @@ const TabWorkspace: React.FC = () => {
         const containerRect = containerRef.current?.getBoundingClientRect();
         const offsetX = containerRect ? containerRect.left : 0;
         const offsetY = containerRect ? containerRect.top : 0;
+        // 菜单最宽约 160px、4 项约 116px，靠近容器右/下边缘时向内收，避免溢出被裁剪。
+        const MENU_WIDTH = 160;
+        const MENU_HEIGHT = 116;
+        const maxX = (containerRect?.width ?? window.innerWidth) - MENU_WIDTH - 4;
+        const maxY = (containerRect?.height ?? window.innerHeight) - MENU_HEIGHT - 4;
         setTabContextMenu({
             visible: true,
-            x: e.clientX - offsetX,
-            y: e.clientY - offsetY,
+            x: Math.max(4, Math.min(e.clientX - offsetX, maxX)),
+            y: Math.max(4, Math.min(e.clientY - offsetY, maxY)),
             tabKey,
         });
     };
 
     // 在整个工作区容器上兜住 contextmenu：右键命中页签任意位置（含 padding/关闭钮）都能弹菜单，
-    // 通过 data-node-key 反查是否为本工作区的页签。
+    // 通过 data-node-key 反查是否为主工作区自己的页签（详情页内嵌的 Tabs 不算）。
     const handleContainerContextMenu = (e: React.MouseEvent) => {
         const tabEl = (e.target as HTMLElement).closest?.('.ant-tabs-tab');
         if (!tabEl) return;
+        const ownRoot = tabEl.closest('.ant-tabs');
+        if (!ownRoot?.classList.contains('main-workspace-tabs')) return;
         const key = tabEl.getAttribute('data-node-key');
         if (!key || !tabs.some(t => t.id === key)) return;
         handleTabContextMenu(e, key);
@@ -129,6 +136,18 @@ const TabWorkspace: React.FC = () => {
         return () => document.removeEventListener('click', handleClickOutside);
     }, [tabContextMenu.visible]);
 
+    // Esc 收起右键菜单
+    useEffect(() => {
+        if (!tabContextMenu.visible) return;
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') {
+                setTabContextMenu(prev => ({...prev, visible: false}));
+            }
+        };
+        document.addEventListener('keydown', handleKeyDown);
+        return () => document.removeEventListener('keydown', handleKeyDown);
+    }, [tabContextMenu.visible]);
+
     // 根据 tab 类型渲染内容
     const renderTabContent = (tab: (typeof tabs)[0]) => {
         if (tab.id === 'home') {
@@ -180,6 +199,7 @@ const TabWorkspace: React.FC = () => {
             }}
         >
             <Tabs
+                rootClassName="main-workspace-tabs"
                 type="editable-card"
                 hideAdd
                 activeKey={activeTabId}
@@ -203,12 +223,6 @@ const TabWorkspace: React.FC = () => {
                     marginBottom: 0,
                     paddingLeft: 'var(--spacing-sm)',
                     height: 'var(--tab-height)',
-                }}
-                onTabClick={(key, e) => {
-                    // 拦截右键事件以显示上下文菜单
-                    if (e.nativeEvent instanceof MouseEvent && e.nativeEvent.button === 2) {
-                        handleTabContextMenu(e as unknown as React.MouseEvent, key);
-                    }
                 }}
             />
 
@@ -246,12 +260,7 @@ const TabWorkspace: React.FC = () => {
                             opacity: enabled ? 1 : 0.5,
                         });
 
-                        const renderItem = (
-                            label: string,
-                            enabled: boolean,
-                            onClick: () => void,
-                            danger = false,
-                        ) => {
+                        const renderItem = (label: string, enabled: boolean, onClick: () => void, danger = false) => {
                             const style: React.CSSProperties = {...itemStyle(enabled)};
                             if (danger && enabled) {
                                 style.color = 'var(--color-error, #ff4d4f)';
@@ -262,8 +271,7 @@ const TabWorkspace: React.FC = () => {
                                     style={style}
                                     onMouseEnter={e => {
                                         if (enabled) {
-                                            e.currentTarget.style.background =
-                                                'var(--color-fill-secondary, #f5f5f5)';
+                                            e.currentTarget.style.background = 'var(--color-fill-secondary, #f5f5f5)';
                                         }
                                     }}
                                     onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}

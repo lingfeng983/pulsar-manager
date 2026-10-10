@@ -11,7 +11,6 @@ import type {
     ConsumeStartParams,
     MessageBatch,
     MessageSendParams,
-    MetricData,
     NamespaceStats,
     OperationLog,
     ReadStartParams,
@@ -20,7 +19,6 @@ import type {
     SSHTunnel,
     SubscriptionPathParams,
     Tenant,
-    TimeRange,
     Topic,
     TopicConfig,
     TopicConfigPatch,
@@ -189,8 +187,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
     // 监控
     metrics: {
-        query: (clusterId: string, query: string, range: TimeRange) =>
-            ipcRenderer.invoke('metrics:query', clusterId, query, range),
         getAggregatedStats: (clusterId: string) => ipcRenderer.invoke('metrics:getAggregatedStats', clusterId),
         getBrokers: (clusterId: string) => ipcRenderer.invoke('metrics:getBrokers', clusterId),
         getNamespaceStats: (clusterId: string, tenant: string, namespace: string) =>
@@ -369,7 +365,6 @@ declare global {
                 onSessionEnd: (callback: (event: SessionEndEvent) => void) => () => void;
             };
             metrics: {
-                query: (clusterId: string, query: string, range: TimeRange) => Promise<APIResponse<MetricData[]>>;
                 getAggregatedStats: (clusterId: string) => Promise<APIResponse<AggregatedStats>>;
                 getBrokers: (clusterId: string) => Promise<APIResponse<BrokerInfo>>;
                 getNamespaceStats: (

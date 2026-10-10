@@ -1,4 +1,4 @@
-import React, {useState, useEffect, useCallback} from 'react';
+import React, {useState, useEffect, useCallback, useRef} from 'react';
 import {Card, Tabs, Row, Col, Statistic, Tag, Button, Table, Spin, Alert} from 'antd';
 import {FolderOutlined, DatabaseOutlined, TagOutlined, ArrowRightOutlined} from '@ant-design/icons';
 import {useTabStore} from '../store/tabs';
@@ -12,7 +12,6 @@ interface TenantDetailProps {
 
 interface NamespaceInfo {
     name: string;
-    replicationClusters: string[];
 }
 
 const TenantDetail: React.FC<TenantDetailProps> = ({clusterId, tenant}) => {
@@ -25,7 +24,11 @@ const TenantDetail: React.FC<TenantDetailProps> = ({clusterId, tenant}) => {
         allowedClusters: string[];
     } | null>(null);
 
+    // 参数切换时旧请求的晚到响应不能覆盖新数据，编号单调递增、绝不归零
+    const requestIdRef = useRef(0);
+
     const fetchTenantInfo = useCallback(async () => {
+        const currentRequestId = ++requestIdRef.current;
         setLoading(true);
         setError(null);
         try {
@@ -33,10 +36,12 @@ const TenantDetail: React.FC<TenantDetailProps> = ({clusterId, tenant}) => {
                 loadNamespaces(clusterId, tenant),
                 window.electronAPI.resources.getTenantInfo(clusterId, tenant),
             ]);
+            if (currentRequestId !== requestIdRef.current) {
+                return;
+            }
 
             const nsList: NamespaceInfo[] = namespaceNames.map((ns: string) => ({
                 name: shortName(ns),
-                replicationClusters: [],
             }));
             setNamespaces(nsList);
 
@@ -44,10 +49,15 @@ const TenantDetail: React.FC<TenantDetailProps> = ({clusterId, tenant}) => {
                 setTenantInfo(tenantResponse.data);
             }
         } catch (error) {
+            if (currentRequestId !== requestIdRef.current) {
+                return;
+            }
             console.error('Failed to fetch tenant info:', error);
             setError('获取租户信息失败');
         } finally {
-            setLoading(false);
+            if (currentRequestId === requestIdRef.current) {
+                setLoading(false);
+            }
         }
     }, [clusterId, tenant]);
 
@@ -75,17 +85,6 @@ const TenantDetail: React.FC<TenantDetailProps> = ({clusterId, tenant}) => {
                     <ArrowRightOutlined style={{marginLeft: 4}} />
                 </Button>
             ),
-        },
-        {
-            title: '复制集群',
-            dataIndex: 'replicationClusters',
-            key: 'replicationClusters',
-            render: (clusters: string[]) =>
-                clusters.length > 0 ? (
-                    clusters.map(c => <Tag key={c}>{c}</Tag>)
-                ) : (
-                    <span style={{color: '#909399'}}>默认集群</span>
-                ),
         },
     ];
 
@@ -149,7 +148,7 @@ const TenantDetail: React.FC<TenantDetailProps> = ({clusterId, tenant}) => {
                                                     ))}
                                                     {(!tenantInfo?.adminRoles ||
                                                         tenantInfo?.adminRoles?.length === 0) && (
-                                                        <span style={{color: '#909399'}}>无</span>
+                                                        <span style={{color: 'var(--color-text-tertiary)'}}>无</span>
                                                     )}
                                                 </div>
                                             </div>
@@ -161,7 +160,7 @@ const TenantDetail: React.FC<TenantDetailProps> = ({clusterId, tenant}) => {
                                                     ))}
                                                     {(!tenantInfo?.allowedClusters ||
                                                         tenantInfo?.allowedClusters?.length === 0) && (
-                                                        <span style={{color: '#909399'}}>无</span>
+                                                        <span style={{color: 'var(--color-text-tertiary)'}}>无</span>
                                                     )}
                                                 </div>
                                             </div>
@@ -182,6 +181,7 @@ const TenantDetail: React.FC<TenantDetailProps> = ({clusterId, tenant}) => {
                                             rowKey="name"
                                             pagination={false}
                                             size="small"
+                                            scroll={{x: 'max-content'}}
                                         />
                                     ) : (
                                         <div

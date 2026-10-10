@@ -1,4 +1,4 @@
-import React, {useState, useEffect, useCallback} from 'react';
+import React, {useState, useEffect, useCallback, useRef} from 'react';
 import {Card, Tabs, Row, Col, Statistic, Tag, Button, Table, Spin, Alert} from 'antd';
 import {FileTextOutlined, DatabaseOutlined, TagOutlined, ArrowRightOutlined} from '@ant-design/icons';
 import {useTabStore} from '../store/tabs';
@@ -27,7 +27,11 @@ const NamespaceDetail: React.FC<NamespaceDetailProps> = ({clusterId, tenant, nam
         clusters: string[];
     } | null>(null);
 
+    // 参数切换时旧请求的晚到响应不能覆盖新数据，编号单调递增、绝不归零
+    const requestIdRef = useRef(0);
+
     const fetchNamespaceInfo = useCallback(async () => {
+        const currentRequestId = ++requestIdRef.current;
         setLoading(true);
         setError(null);
         try {
@@ -35,6 +39,9 @@ const NamespaceDetail: React.FC<NamespaceDetailProps> = ({clusterId, tenant, nam
                 loadTopics(clusterId, tenant, namespace),
                 window.electronAPI.resources.getNamespaceInfo(clusterId, tenant, namespace),
             ]);
+            if (currentRequestId !== requestIdRef.current) {
+                return;
+            }
 
             const topicList: TopicInfo[] = topicItems.map(t => ({
                 name: shortName(t.name),
@@ -47,10 +54,15 @@ const NamespaceDetail: React.FC<NamespaceDetailProps> = ({clusterId, tenant, nam
                 setNamespaceInfo(nsResponse.data);
             }
         } catch (error) {
+            if (currentRequestId !== requestIdRef.current) {
+                return;
+            }
             console.error('Failed to fetch namespace info:', error);
             setError('获取命名空间信息失败');
         } finally {
-            setLoading(false);
+            if (currentRequestId === requestIdRef.current) {
+                setLoading(false);
+            }
         }
     }, [clusterId, tenant, namespace]);
 
@@ -155,7 +167,9 @@ const NamespaceDetail: React.FC<NamespaceDetailProps> = ({clusterId, tenant, nam
                                                     ))}
                                                     {(!namespaceInfo?.replicationClusters ||
                                                         namespaceInfo?.replicationClusters?.length === 0) && (
-                                                        <span style={{color: '#909399'}}>默认集群</span>
+                                                        <span style={{color: 'var(--color-text-tertiary)'}}>
+                                                            默认集群
+                                                        </span>
                                                     )}
                                                 </div>
                                             </div>
@@ -167,7 +181,7 @@ const NamespaceDetail: React.FC<NamespaceDetailProps> = ({clusterId, tenant, nam
                                                     ))}
                                                     {(!namespaceInfo?.clusters ||
                                                         namespaceInfo?.clusters?.length === 0) && (
-                                                        <span style={{color: '#909399'}}>无</span>
+                                                        <span style={{color: 'var(--color-text-tertiary)'}}>无</span>
                                                     )}
                                                 </div>
                                             </div>
@@ -188,6 +202,7 @@ const NamespaceDetail: React.FC<NamespaceDetailProps> = ({clusterId, tenant, nam
                                             rowKey="name"
                                             pagination={false}
                                             size="small"
+                                            scroll={{x: 'max-content'}}
                                         />
                                     ) : (
                                         <div

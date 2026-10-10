@@ -99,26 +99,20 @@ export class MetricsAPI {
     // 获取 Broker 运行信息
     async getBrokers(): Promise<{activeBrokers: string[]; allBrokers: string[]}> {
         return this.enqueue(async () => {
+            // broker 不可达必须向上抛：连接状态判定依赖这条链路，
+            // 静默返回空列表会把不可达的集群显示成"在线"。
+            const activeResponse = await withRetry(() => this.http.get('/admin/v2/brokers'));
+            const activeBrokers = activeResponse.data || [];
+
+            let allBrokers = activeBrokers;
             try {
-                // 获取活跃的 Broker
-                const activeResponse = await withRetry(() => this.http.get('/admin/v2/brokers'));
-                const activeBrokers = activeResponse.data || [];
-
-                // 尝试获取所有 Broker（如果有这个 API）
-                let allBrokers = activeBrokers;
-                try {
-                    const allResponse = await this.http.get('/admin/v2/brokers/all');
-                    allBrokers = allResponse.data || activeBrokers;
-                } catch {
-                    // 某些版本可能不支持 /brokers/all
-                    console.log('[PulsarAdmin] /brokers/all not available');
-                }
-
-                return {activeBrokers, allBrokers};
-            } catch (error) {
-                console.error('[PulsarAdmin] getBrokers error:', error);
-                return {activeBrokers: [], allBrokers: []};
+                const allResponse = await this.http.get('/admin/v2/brokers/all');
+                allBrokers = allResponse.data || activeBrokers;
+            } catch {
+                // 部分版本不支持 /brokers/all，退回活跃列表
             }
+
+            return {activeBrokers, allBrokers};
         });
     }
 
@@ -148,8 +142,9 @@ export class MetricsAPI {
                     lastUpdateTimestamp: data.lastUpdateTimestamp || Date.now(),
                     loadReport: data.loadReport,
                 };
-            } catch (error) {
-                console.error('[PulsarAdmin] getBrokerStats error:', error);
+            } catch {
+                // 单个 broker 的负载读不到返回 null，由界面显示为离线；
+                // 这是降级不是故障，轮询场景下不打印堆栈。
                 return null;
             }
         });
@@ -267,7 +262,8 @@ export class MetricsAPI {
                     }
                 }
             } catch (error) {
-                console.error('[PulsarAdmin] getAggregatedStats error:', error);
+                // 租户列表拉不动说明集群不可达；向上抛，连接状态判定依赖这个信号
+                throw error instanceof Error ? error : new Error(String(error));
             }
 
             return stats;
@@ -334,7 +330,8 @@ export class MetricsAPI {
                     }
                 }
             } catch (error) {
-                console.error('[PulsarAdmin] getNamespaceStats error:', error);
+                // 命名空间的 topic 列表拉不动同理必须向上抛，不能显示成全 0 统计
+                throw error instanceof Error ? error : new Error(String(error));
             }
 
             return stats;
@@ -404,7 +401,8 @@ export class MetricsAPI {
 
                 assignTopicOwnership(result);
             } catch (error) {
-                console.error('[PulsarAdmin] getClusterTopology error:', error);
+                // brokers/tenants 任一列不出来即集群不可达，向上抛而不是返回空拓扑
+                throw error instanceof Error ? error : new Error(String(error));
             }
 
             return result;
@@ -449,30 +447,5 @@ export class MetricsAPI {
         } catch {
             return base;
         }
-    }
-
-    // 查询 metrics 指标
-    async getMetrics(query: string, range?: {start: number; end: number}): Promise<any> {
-        return this.enqueue(async () => {
-            try {
-                const params: Record<string, any> = {};
-                if (range) {
-                    params.start = range.start;
-                    params.end = range.end;
-                }
-
-                const response = await this.http.get('/admin/v2/metrics/query', {
-                    params: {
-                        query,
-                        ...params,
-                    },
-                });
-
-                return response.data;
-            } catch (error) {
-                console.error('[PulsarAdmin] getMetrics error:', error);
-                return [];
-            }
-        });
     }
 }

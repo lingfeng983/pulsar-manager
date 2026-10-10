@@ -11,5 +11,6 @@ export function downloadBlob(content: string, filename: string, mimeType = 'appl
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+    // 同一 tick 内 revoke 可能掐断尚未开始的下载，推迟到下一个宏任务。
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
 }

@@ -21,6 +21,7 @@ import type {EChartsOption} from 'echarts';
 import dayjs from 'dayjs';
 import {useClusterStore} from '../store/cluster';
 import {formatThroughput, toKilobytesPerSecond} from '../utils/format';
+import {useTopologyPalette, type TopologyPalette} from '../utils/topologyColors';
 import {useFullscreen} from '../hooks/useFullscreen';
 import {useCommand} from '../hooks/useKeybindings';
 
@@ -53,20 +54,38 @@ interface AggregatedStats {
     totalBacklog: number;
 }
 
+// 三套主题共用的 ECharts 基色：文字/坐标轴/分割线/tooltip 全部从 CSS 变量读，
+// 否则暗色主题下轴标签是默认深灰，整张图糊成一片。
+const seriesAxes = (p: TopologyPalette) => ({
+    axisLabel: {color: p.label},
+    axisLine: {lineStyle: {color: p.border}},
+    splitLine: {lineStyle: {color: p.border}},
+});
+
+const seriesTooltip = (p: TopologyPalette) => ({
+    backgroundColor: p.surface,
+    borderColor: p.border,
+    textStyle: {color: p.text},
+});
+
+const seriesTitle = (p: TopologyPalette, text: string) => ({
+    text,
+    left: 'center' as const,
+    textStyle: {fontSize: 14, fontWeight: 500 as const, color: p.text},
+});
+
 // 时序折线图配置
 const createTimeSeriesOption = (
     title: string,
     data: MetricsData[],
     color: string,
+    palette: TopologyPalette,
     unit: string = '',
 ): EChartsOption => ({
-    title: {
-        text: title,
-        left: 'center',
-        textStyle: {fontSize: 14, fontWeight: 500},
-    },
+    title: seriesTitle(palette, title),
     tooltip: {
         trigger: 'axis',
+        ...seriesTooltip(palette),
         formatter: (params: any) => {
             const point = params[0];
             return `${dayjs(point.value[0]).format('HH:mm:ss')}<br/>${point.value[1].toFixed(2)} ${unit}`;
@@ -75,9 +94,13 @@ const createTimeSeriesOption = (
     grid: {left: '3%', right: '4%', bottom: '3%', top: '40px', containLabel: true},
     xAxis: {
         type: 'time',
-        axisLabel: {formatter: (value: number) => dayjs(value).format('HH:mm:ss')},
+        ...seriesAxes(palette),
+        axisLabel: {
+            ...seriesAxes(palette).axisLabel,
+            formatter: (value: number) => dayjs(value).format('HH:mm:ss'),
+        },
     },
-    yAxis: {type: 'value', name: unit},
+    yAxis: {type: 'value', name: unit, nameTextStyle: {color: palette.label}, ...seriesAxes(palette)},
     series: [
         {
             type: 'line',
@@ -91,42 +114,47 @@ const createTimeSeriesOption = (
 });
 
 // 吞吐量柱状图配置
-const createThroughputBarOption = (data: {time: string; in: number; out: number}[]): EChartsOption => ({
-    tooltip: {trigger: 'axis'},
-    legend: {data: ['输入', '输出'], top: 0},
+const createThroughputBarOption = (
+    data: {time: string; in: number; out: number}[],
+    palette: TopologyPalette,
+): EChartsOption => ({
+    tooltip: {trigger: 'axis', ...seriesTooltip(palette)},
+    legend: {data: ['输入', '输出'], top: 0, textStyle: {color: palette.label}},
     grid: {left: '3%', right: '4%', bottom: '3%', top: '40px', containLabel: true},
-    xAxis: {type: 'category', data: data.map(d => d.time)},
-    yAxis: {type: 'value', name: 'KB/s'},
+    xAxis: {type: 'category', data: data.map(d => d.time), ...seriesAxes(palette)},
+    yAxis: {type: 'value', name: 'KB/s', nameTextStyle: {color: palette.label}, ...seriesAxes(palette)},
     series: [
         {
             name: '输入',
             type: 'bar',
             data: data.map(d => d.in),
-            itemStyle: {color: '#1677FF'},
+            itemStyle: {color: palette.primary},
         },
         {
             name: '输出',
             type: 'bar',
             data: data.map(d => d.out),
-            itemStyle: {color: '#00B42A'},
+            itemStyle: {color: palette.success},
         },
     ],
 });
 
 // 资源分布饼图配置
-const createPieOption = (data: {name: string; value: number}[], title: string): EChartsOption => ({
-    title: {
-        text: title,
-        left: 'center',
-        textStyle: {fontSize: 14, fontWeight: 500},
-    },
+const createPieOption = (
+    data: {name: string; value: number}[],
+    title: string,
+    palette: TopologyPalette,
+): EChartsOption => ({
+    title: seriesTitle(palette, title),
     tooltip: {
         trigger: 'item',
         formatter: '{a} <br/>{b}: {c} ({d}%)',
+        ...seriesTooltip(palette),
     },
     legend: {
         orient: 'vertical',
         left: 'left',
+        textStyle: {color: palette.label},
     },
     series: [
         {
@@ -136,12 +164,13 @@ const createPieOption = (data: {name: string; value: number}[], title: string): 
             avoidLabelOverlap: false,
             itemStyle: {
                 borderRadius: 10,
-                borderColor: '#fff',
+                borderColor: palette.surface,
                 borderWidth: 2,
             },
             label: {
                 show: true,
                 formatter: '{b}: {c}',
+                color: palette.label,
             },
             data,
         },
@@ -149,6 +178,7 @@ const createPieOption = (data: {name: string; value: number}[], title: string): 
 });
 
 const MetricsDashboard: React.FC = () => {
+    const palette = useTopologyPalette();
     const [loading, setLoading] = useState(false);
     const [selectedCluster, setSelectedCluster] = useState<string>('');
     const [stats, setStats] = useState<AggregatedStats | null>(null);
@@ -167,6 +197,16 @@ const MetricsDashboard: React.FC = () => {
     const chartRef = useRef<ReactECharts>(null);
     const intervalRef = useRef<NodeJS.Timeout | null>(null);
     const lastFetchRef = useRef<number>(0);
+    // 单调递增的请求代次：切换集群后，旧集群的晚到响应不能覆盖新集群的数据
+    const loadRequestRef = useRef(0);
+
+    const EMPTY_HISTORY: MultiMetricsHistory = {
+        msgRateIn: [],
+        msgRateOut: [],
+        throughputIn: [],
+        throughputOut: [],
+        backlog: [],
+    };
 
     const {ref: chartContainerRef, toggle: toggleFullscreen} = useFullscreen<HTMLDivElement>();
 
@@ -219,11 +259,17 @@ const MetricsDashboard: React.FC = () => {
             }
             lastFetchRef.current = now;
 
+            const requestId = ++loadRequestRef.current;
+            const isStale = () => requestId !== loadRequestRef.current;
+
             setLoading(true);
             setError(null);
             try {
                 // 获取聚合统计
                 const statsResponse = await window.electronAPI.metrics.getAggregatedStats(selectedCluster);
+                if (isStale()) {
+                    return;
+                }
                 if (statsResponse.success && statsResponse.data) {
                     setStats(statsResponse.data);
 
@@ -259,36 +305,54 @@ const MetricsDashboard: React.FC = () => {
 
                 // 获取 Broker 信息
                 const brokersResponse = await window.electronAPI.metrics.getBrokers(selectedCluster);
+                if (isStale()) {
+                    return;
+                }
                 if (brokersResponse.success && brokersResponse.data) {
                     setBrokers(brokersResponse.data.activeBrokers || []);
                 } else if (!brokersResponse.success) {
                     console.warn('获取 Broker 信息失败:', brokersResponse.error);
                 }
             } catch (error) {
+                if (isStale()) {
+                    return;
+                }
                 console.error('Failed to load aggregated stats:', error);
                 setError('网络错误，请检查连接');
             } finally {
-                setLoading(false);
+                if (!isStale()) {
+                    setLoading(false);
+                }
             }
         },
         [selectedCluster],
     );
+
+    // 切换集群：作废在途请求并清空上一个集群的统计、历史与峰值
+    useEffect(() => {
+        loadRequestRef.current += 1;
+        lastFetchRef.current = 0;
+        setStats(null);
+        setBrokers([]);
+        setMetricsHistory(EMPTY_HISTORY);
+        setPeakMsgRate(0);
+        setError(null);
+        setLoading(false);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [selectedCluster]);
 
     useCommand('refreshMetrics', () => {
         void loadAggregatedStats(true);
     });
 
     // 初始加载和定时刷新
+    const hasConnectedCluster = clusters.some(c => c.status === 'connected');
     useEffect(() => {
-        // 检查是否有已连接的集群
-        const hasConnectedCluster = clusters.some(c => c.status === 'connected');
-
         // 只有有已连接集群时才加载和刷新
         if (selectedCluster && hasConnectedCluster) {
             loadAggregatedStats(true);
         }
 
-        // 设置定时刷新（只有有已连接集群时才设置）
         if (refreshInterval > 0 && hasConnectedCluster) {
             intervalRef.current = setInterval(() => loadAggregatedStats(true), refreshInterval * 1000);
         }
@@ -298,18 +362,18 @@ const MetricsDashboard: React.FC = () => {
                 clearInterval(intervalRef.current);
             }
         };
-    }, [selectedCluster, loadAggregatedStats, refreshInterval, clusters]);
+    }, [selectedCluster, loadAggregatedStats, refreshInterval, hasConnectedCluster]);
 
     // 使用 useMemo 缓存图表配置
     const msgRateInChartOption = useMemo(() => {
         const filteredData = filterMetricsByDateRange(metricsHistory.msgRateIn, dateRange);
-        return createTimeSeriesOption('', filteredData, '#1677FF', 'msg/s');
-    }, [metricsHistory.msgRateIn, dateRange, filterMetricsByDateRange]);
+        return createTimeSeriesOption('', filteredData, palette.primary, palette, 'msg/s');
+    }, [metricsHistory.msgRateIn, dateRange, filterMetricsByDateRange, palette]);
 
     const msgRateOutChartOption = useMemo(() => {
         const filteredData = filterMetricsByDateRange(metricsHistory.msgRateOut, dateRange);
-        return createTimeSeriesOption('', filteredData, '#00B42A', 'msg/s');
-    }, [metricsHistory.msgRateOut, dateRange, filterMetricsByDateRange]);
+        return createTimeSeriesOption('', filteredData, palette.success, palette, 'msg/s');
+    }, [metricsHistory.msgRateOut, dateRange, filterMetricsByDateRange, palette]);
 
     // 生成吞吐量柱状图数据（使用真实历史数据 + 日期过滤）
     const throughputData = useMemo(() => {
@@ -327,7 +391,10 @@ const MetricsDashboard: React.FC = () => {
     }, [metricsHistory.throughputIn, metricsHistory.throughputOut, dateRange, filterMetricsByDateRange]);
 
     // 吞吐量柱状图配置
-    const throughputChartOption = useMemo(() => createThroughputBarOption(throughputData), [throughputData]);
+    const throughputChartOption = useMemo(
+        () => createThroughputBarOption(throughputData, palette),
+        [throughputData, palette],
+    );
 
     // 资源分布数据
     const resourceData = useMemo(() => {
@@ -341,7 +408,10 @@ const MetricsDashboard: React.FC = () => {
     }, [stats]);
 
     // 资源分布饼图配置
-    const resourceChartOption = useMemo(() => createPieOption(resourceData, '集群资源'), [resourceData]);
+    const resourceChartOption = useMemo(
+        () => createPieOption(resourceData, '集群资源', palette),
+        [resourceData, palette],
+    );
 
     return (
         <div ref={chartContainerRef} style={{padding: 'var(--spacing-lg)', height: '100%', overflow: 'auto'}}>

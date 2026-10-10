@@ -67,29 +67,20 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
     };
 
     const handleSubmit = async () => {
+        let allValues: ClusterConfig;
         try {
-            const allValues = form.getFieldsValue([
-                'name',
-                'serviceUrl',
-                'webServiceUrl',
-                'authPlugin',
-                'authParams',
-                'tlsEnabled',
-                'tlsTrustCerts',
-                'useSshTunnel',
-                'sshConfigId',
-                'adminApiTimeout',
-            ]);
-
-            if (!allValues.name) {
-                message.error('请输入集群名称');
+            // 表单值即集群配置（id 由 update 调用单独传）
+            allValues = (await form.validateFields()) as unknown as ClusterConfig;
+        } catch (error) {
+            // 校验失败时字段下方已有红字提示，不要再叠一条全局 message
+            if (error && typeof error === 'object' && 'errorFields' in error) {
                 return;
             }
-            if (!allValues.serviceUrl) {
-                message.error('请输入 Broker Service URL');
-                return;
-            }
+            message.error('操作失败');
+            return;
+        }
 
+        try {
             setLoading(true);
 
             let response;
@@ -119,7 +110,20 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
         onCancel();
     };
 
-    const nextStep = () => setCurrentStep(prev => prev + 1);
+    const STEP_FIELDS: string[][] = [
+        ['name', 'serviceUrl', 'webServiceUrl', 'adminApiTimeout'],
+        ['authPlugin', 'authParams', 'useSshTunnel'],
+        ['tlsEnabled', 'tlsTrustCerts'],
+    ];
+
+    const nextStep = async () => {
+        try {
+            await form.validateFields(STEP_FIELDS[currentStep]);
+        } catch {
+            return;
+        }
+        setCurrentStep(prev => prev + 1);
+    };
     const prevStep = () => setCurrentStep(prev => prev - 1);
 
     const renderStep0 = () => (
@@ -133,7 +137,11 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
                 label="Broker Service URL"
                 rules={[
                     {required: true, message: '请输入 Broker Service URL'},
-                    {type: 'url', message: '请输入有效的 URL'},
+                    {
+                        // type:'url' 的正则不认 pulsar:// 这类自定义协议，必须按 scheme 白名单校验
+                        pattern: /^(pulsar|pulsar\+ssl|ssl):\/\/[^\s]+$/,
+                        message: '需为 pulsar://、pulsar+ssl:// 或 ssl:// 地址',
+                    },
                 ]}
                 extra="Pulsar Broker 协议地址，如 pulsar://localhost:6650"
             >
@@ -143,7 +151,12 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
             <Form.Item
                 name="webServiceUrl"
                 label="Admin API URL"
-                rules={[{type: 'url', message: '请输入有效的 URL'}]}
+                rules={[
+                    {
+                        pattern: /^https?:\/\/[^\s]+$/,
+                        message: '需为 http:// 或 https:// 地址',
+                    },
+                ]}
                 extra="Pulsar Admin HTTP 地址，如 http://localhost:8080"
             >
                 <Input placeholder="http://localhost:8080" />
@@ -183,7 +196,12 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
 
             <Divider>或使用 SSH 隧道</Divider>
 
-            <Form.Item name="useSshTunnel" label="启用 SSH 隧道" valuePropName="checked">
+            <Form.Item
+                name="useSshTunnel"
+                label="启用 SSH 隧道"
+                valuePropName="checked"
+                extra="隧道功能尚未实现，开启后连接会被主进程拒绝，请先直连"
+            >
                 <Switch />
             </Form.Item>
 

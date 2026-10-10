@@ -13,6 +13,7 @@ interface TabState {
     setTabs: (tabs: TabItem[]) => void;
     addTab: (tab: TabItem) => void;
     removeTab: (id: string) => void;
+    removeClusterTabs: (clusterId: string) => void;
     setActiveTab: (id: string) => void;
 }
 
@@ -35,6 +36,19 @@ export const useTabStore = create<TabState>(set => ({
             const newTabs = state.tabs.filter(t => t.id !== id);
             const newActiveId =
                 state.activeTabId === id ? newTabs[newTabs.length - 1]?.id || 'home' : state.activeTabId;
+            return {tabs: newTabs, activeTabId: newActiveId};
+        }),
+    removeClusterTabs: clusterId =>
+        set(state => {
+            // 标签 id 形如 `topic-${clusterId}-...`、`topology-${clusterId}`，clusterId 是 uuid，
+            // 直接做子串匹配即可锁定归属；顶层 `metrics`/`topology` 等无簇标签不会被误伤。
+            const belongsToCluster = (t: TabItem) =>
+                t.id !== 'home' && (t.data?.clusterId === clusterId || t.id.includes(clusterId));
+            const newTabs = state.tabs.filter(t => !belongsToCluster(t));
+            if (newTabs.length === state.tabs.length) return state;
+            const newActiveId = newTabs.some(t => t.id === state.activeTabId)
+                ? state.activeTabId
+                : newTabs[newTabs.length - 1]?.id || 'home';
             return {tabs: newTabs, activeTabId: newActiveId};
         }),
     setActiveTab: id => set({activeTabId: id}),

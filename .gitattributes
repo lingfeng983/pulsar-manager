@@ -1,2 +1,4 @@
 # bash 脚本必须保持 LF：CRLF 会让 bash 报 "$'\r': command not found"
 *.sh text eol=lf
+# prettier endOfLine=lf，检出统一 LF，避免 format:check 在 autocrlf 机器上打爆
+* text=auto eol=lf

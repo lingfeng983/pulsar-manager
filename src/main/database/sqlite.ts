@@ -6,6 +6,33 @@ import fs from 'fs';
 // 数据库实例
 let db: Database.Database | null = null;
 
+// schema 版本以 user_version 跟踪。改 schema.sql 时：升 SCHEMA_VERSION，
+// 并把该版本的增量 DDL 写进 migrate()——CREATE TABLE IF NOT EXISTS 对已存在的
+// 旧库什么都不做，没有这套机制，加列只会对新装用户生效，旧库静默落后。
+const SCHEMA_VERSION = 1;
+
+function migrate(database: Database.Database, from: number): void {
+    // 增量迁移从这里开始，例如：
+    // if (from < 2) {
+    //     database.exec('ALTER TABLE clusters ADD COLUMN example TEXT');
+    // }
+    void from;
+}
+
+function applySchema(database: Database.Database, schema: string): void {
+    const current = database.pragma('user_version', {simple: true}) as number;
+    if (current === 0) {
+        // 新库，或引入版本管理之前创建的老库：直接执行完整 baseline
+        //（schema.sql 全部是幂等语句，重复执行安全）
+        database.exec(schema);
+    } else if (current < SCHEMA_VERSION) {
+        migrate(database, current);
+    } else if (current > SCHEMA_VERSION) {
+        throw new Error(`Database schema version ${current} is newer than this app supports (${SCHEMA_VERSION})`);
+    }
+    database.pragma(`user_version = ${SCHEMA_VERSION}`);
+}
+
 // 获取数据库文件路径
 function getDatabasePath(): string {
     const userDataPath = app.getPath('userData');
@@ -44,17 +71,20 @@ export function initDatabase(): Database.Database {
 
     console.log('[Database] Initializing database at:', dbPath);
 
-    // 创建数据库连接
-    db = new Database(dbPath, {
-        verbose: process.env.NODE_ENV === 'development' ? console.log : undefined,
-    });
+    // 创建数据库连接。不开 better-sqlite3 的 verbose：它会把每条 SQL 及参数
+    // （含加密后的凭据字段）原样打进控制台。
+    db = new Database(dbPath);
 
     // 启用 WAL 模式，提升并发性能
     db.pragma('journal_mode = WAL');
 
-    // 执行 schema 初始化
+    // SQLite 的 foreign_keys 默认是关的：不显式打开，schema 里的
+    // operation_logs.cluster_id 外键就是一行装饰
+    db.pragma('foreign_keys = ON');
+
+    // 执行 schema 初始化 / 版本迁移
     const schema = fs.readFileSync(schemaPath, 'utf-8');
-    db.exec(schema);
+    applySchema(db, schema);
 
     console.log('[Database] Database initialized successfully');
 
