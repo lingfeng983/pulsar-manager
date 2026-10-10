@@ -34,6 +34,7 @@ import {formatBytes} from '../utils/format';
 import dayjs from 'dayjs';
 import {downloadBlob} from '../utils/download';
 import {useCommand} from '../hooks/useKeybindings';
+import {useSettingsStore} from '../store/settings';
 
 const {TextArea} = Input;
 
@@ -54,9 +55,10 @@ interface ActiveSession {
 }
 
 const MAX_DISPLAY_COUNT = 500;
-const TRUNCATE_LENGTH = 50;
 
 const MessageBrowser: React.FC<MessageBrowserProps> = ({clusterId, tenant, namespace, topic, persistent = true}) => {
+    // 正文截断长度是配置中心里的应用设置，改完立刻对所有消息浏览器生效
+    const truncateLength = useSettingsStore(state => state.settings.truncateLength);
     const [mode, setMode] = useState<PanelMode>('send');
     const [messages, setMessages] = useState<Message[]>([]);
     const [sessionId, setSessionId] = useState<string | null>(null);
@@ -389,7 +391,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({clusterId, tenant, names
         }
     };
 
-    const truncateMessage = (content: string, maxLength: number = TRUNCATE_LENGTH): string =>
+    const truncateMessage = (content: string, maxLength: number = truncateLength): string =>
         content.length <= maxLength ? content : content.substring(0, maxLength) + '...';
 
     const handleExportMessages = async (format: 'json' | 'csv') => {
@@ -506,7 +508,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({clusterId, tenant, names
                         >
                             {displayContent}
                         </div>
-                        {formatted.length > TRUNCATE_LENGTH && (
+                        {formatted.length > truncateLength && (
                             <Button
                                 type="text"
                                 size="small"

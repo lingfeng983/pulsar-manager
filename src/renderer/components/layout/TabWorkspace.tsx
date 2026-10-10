@@ -7,6 +7,7 @@ import TenantDetail from '../../pages/TenantDetail';
 import NamespaceDetail from '../../pages/NamespaceDetail';
 import MetricsDashboard from '../../pages/MetricsDashboard';
 import ShortcutConfig from '../../pages/ShortcutConfig';
+import ConfigCenter from '../../pages/ConfigCenter';
 import ClusterTopology from '../../components/metrics/ClusterTopology';
 import {useCommand} from '../../hooks/useKeybindings';
 
@@ -181,6 +182,9 @@ const TabWorkspace: React.FC = () => {
         }
         if (tab.type === 'shortcuts') {
             return <ShortcutConfig />;
+        }
+        if (tab.type === 'config-center') {
+            return <ConfigCenter />;
         }
         return <div>TODO: {tab.title}</div>;
     };

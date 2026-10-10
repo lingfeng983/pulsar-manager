@@ -8,6 +8,10 @@ import type {
     ClusterConfig,
     ClusterConfigDraft,
     ClusterTopology,
+    AppSettings,
+    ConfigBundle,
+    ConfigImportResult,
+    ConfigMeta,
     ConsumeStartParams,
     LoadTestParams,
     LoadTestProgress,
@@ -228,6 +232,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
         set: (key: string, value: string) => ipcRenderer.invoke('settings:set', key, value),
     },
 
+    // 配置中心：可持久化应用设置的读写，加上导出一整套 / 导入一整套
+    config: {
+        getAll: () => ipcRenderer.invoke('config:getAll'),
+        update: (patch: Partial<AppSettings>) => ipcRenderer.invoke('config:update', patch),
+        reset: () => ipcRenderer.invoke('config:reset'),
+        meta: () => ipcRenderer.invoke('config:meta'),
+        export: () => ipcRenderer.invoke('config:export'),
+        import: (bundle: ConfigBundle) => ipcRenderer.invoke('config:import', bundle),
+        clearLogs: () => ipcRenderer.invoke('config:clearLogs'),
+    },
+
     // 操作日志
     logs: {
         getRecent: (limit?: number) => ipcRenderer.invoke('logs:getRecent', limit),
@@ -421,6 +436,15 @@ declare global {
             settings: {
                 get: (key: string) => Promise<APIResponse<string | undefined>>;
                 set: (key: string, value: string) => Promise<APIResponse<void>>;
+            };
+            config: {
+                getAll: () => Promise<APIResponse<AppSettings>>;
+                update: (patch: Partial<AppSettings>) => Promise<APIResponse<AppSettings>>;
+                reset: () => Promise<APIResponse<AppSettings>>;
+                meta: () => Promise<APIResponse<ConfigMeta>>;
+                export: () => Promise<APIResponse<ConfigBundle>>;
+                import: (bundle: ConfigBundle) => Promise<APIResponse<ConfigImportResult>>;
+                clearLogs: () => Promise<APIResponse<{deleted: number}>>;
             };
             logs: {
                 getRecent: (limit?: number) => Promise<APIResponse<OperationLog[]>>;

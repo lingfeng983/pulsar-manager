@@ -3,6 +3,7 @@ import {registerResourceHandlers} from './resource-handlers';
 import {registerMessageHandlers} from './message-handlers';
 import {registerMetricsHandlers} from './metrics-handlers';
 import {registerLoadTestHandlers} from './load-test-handlers';
+import {registerConfigHandlers} from './config-handlers';
 import {registerSystemHandlers} from './system-handlers';
 import {registerUpdateHandlers} from './update-handlers';
 import {ensureDbInitialized, cleanupDatabase} from './_shared';
@@ -20,6 +21,7 @@ export function registerIPCHandlers() {
     registerMessageHandlers();
     registerMetricsHandlers();
     registerLoadTestHandlers();
+    registerConfigHandlers();
     registerSystemHandlers();
     registerUpdateHandlers();
 }

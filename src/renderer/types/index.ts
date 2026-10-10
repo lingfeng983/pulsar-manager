@@ -36,6 +36,11 @@ export type {
     LoadTestLatency,
     LoadTestPhase,
     LoadTestCompression,
+    AppSettings,
+    ConfigBundle,
+    ConfigImportResult,
+    ConfigMeta,
+    ExportedClusterConfig,
 } from '../../shared/types';
 
 // 订阅

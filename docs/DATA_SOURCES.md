@@ -384,6 +384,20 @@ CREATE TABLE operation_logs (
 
 压测数据不来自 Admin API，全部由主进程原生客户端现场产生：吞吐与带宽按已确认的发送数除以运行时长，延迟统计是 `send()` 调用到 broker 回调的耗时（含客户端在途队列排队），消费侧只计已收到条数。同一目标（集群 + topic + 订阅）并发只允许一轮，第二轮会被直接拒绝。
 
+### 4.8 应用配置
+
+| IPC 通道 | 方向 | 功能 |
+|---------|------|------|
+| `config:getAll` | renderer → main | 读取应用设置（截断长度、自动刷新、刷新间隔），缺项按默认值补齐 |
+| `config:update` | renderer → main | 局部更新设置，Zod 逐字段校验后写 `user_settings` |
+| `config:reset` | renderer → main | 恢复出厂设置并返回全量结果 |
+| `config:meta` | renderer → main | 应用版本与本地数据库文件路径 |
+| `config:export` | renderer → main | 生成配置包（设置 + 集群 + 快捷键），不含任何凭据字段 |
+| `config:import` | renderer → main | 校验并导入配置包，事务内完成，同名集群跳过 |
+| `config:clearLogs` | renderer → main | 清空 `operation_log`，返回删除条数 |
+
+设置全部存在本机 SQLite 的 `user_settings` 键值表里，渲染层用 `useSettingsStore` 缓存一份并订阅变更：`MessageBrowser` 读截断长度，`MetricsDashboard` 读自动刷新与刷新间隔（单位为秒）。导出的配置包以 `format: 'pulsar-manager-config'` + `version: 1` 为标记，导入方先做本地体检再发往主进程。
+
 ---
 
 ## 五、数据流向图
@@ -422,17 +436,17 @@ CREATE TABLE operation_logs (
 
 ### 5.3 消息浏览数据流
 ```
-用户选择订阅 → MessageBrowser.tsx
+用户打开消息浏览器 → MessageBrowser.tsx
                         ↓
-                  IPC:messages:browse
+                  IPC:messages:startRead（Reader）/ messages:startConsume（订阅）
                         ↓
-                  Pulsar Admin API
-                  GET /admin/v2/persistent/.../subscription/{sub}/peek/{count}
+                  主进程 pulsar-client 原生消费者
                         ↓
-                  Base64 解码消息内容
+                  按批推送（攒够 50 条或 300ms）
                         ↓
-                  更新消息列表 (最多500条)
+                  渲染层追加到消息列表（base64 尝试解回文本）
 ```
+Admin REST 没有发消息与 peek 的端点，消息收发只有原生客户端这一条路。
 
 ---
 
@@ -483,8 +497,9 @@ CREATE TABLE operation_logs (
 ## 八、总结
 
 ### 当前数据来源
-1. **本地存储**: SQLite 数据库 (集群配置、SSH 隧道、操作日志)
-2. **Pulsar Admin API**: Topic 统计、消息浏览、资源列表、聚合统计、集群拓扑
+1. **本地存储**: SQLite 数据库 (集群配置、SSH 隧道、操作日志、应用设置、快捷键绑定)
+2. **Pulsar Admin API**: Topic 统计、资源列表、聚合统计、集群拓扑
+3. **原生客户端 (pulsar-client)**: 消息发送、订阅消费、Reader 读取、快速压测
 3. **真实 API**: 监控仪表盘、集群拓扑（已实现）
 
 ### 优化方向

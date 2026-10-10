@@ -460,3 +460,64 @@ export interface OperationLog {
     error_message?: string | null;
     created_at: string;
 }
+
+// ========== 应用配置（配置中心） ==========
+
+// 界面与刷新相关的可持久化设置。每一项都必须被真实消费：
+// truncateLength 用于消息列表正文截断，autoRefresh / refreshIntervalSeconds
+// 是监控页的刷新节奏。加了字段不接线，就是又一个死设置。
+export interface AppSettings {
+    truncateLength: number;
+    autoRefresh: boolean;
+    refreshIntervalSeconds: number;
+}
+
+export interface ExportedSshConfig {
+    host: string;
+    port: number;
+    username: string;
+    authType: 'password' | 'privateKey';
+    remoteHost?: string | null;
+    remoteAdminPort?: number | null;
+    remoteBrokerPort?: number | null;
+}
+
+// 导出文件里的集群条目：刻意没有 authParams / 密码 / 私钥，
+// 明文导出文件不该携带凭据，导入后需用户在集群表单里补一次。
+export interface ExportedClusterConfig {
+    name: string;
+    serviceUrl: string;
+    webServiceUrl?: string | null;
+    authPlugin?: string | null;
+    tlsEnabled: boolean;
+    adminApiTimeout: number;
+    ssh?: ExportedSshConfig | null;
+}
+
+export interface ExportedShortcutConfig {
+    version: 1;
+    enabled: boolean;
+    windows: Record<string, string | null>;
+    mac: Record<string, string | null>;
+}
+
+export interface ConfigBundle {
+    format: 'pulsar-manager-config';
+    version: 1;
+    settings: AppSettings;
+    clusters: ExportedClusterConfig[];
+    shortcuts?: ExportedShortcutConfig | null;
+}
+
+export interface ConfigImportResult {
+    settingsApplied: boolean;
+    clustersImported: number;
+    clustersSkipped: string[];
+    tunnelsImported: number;
+    shortcutsApplied: boolean;
+}
+
+export interface ConfigMeta {
+    appVersion: string;
+    databasePath: string;
+}

@@ -9,22 +9,24 @@ let db: Database.Database | null = null;
 // schema 版本以 user_version 跟踪。改 schema.sql 时：升 SCHEMA_VERSION，
 // 并把该版本的增量 DDL 写进 migrate()——CREATE TABLE IF NOT EXISTS 对已存在的
 // 旧库什么都不做，没有这套机制，加列只会对新装用户生效，旧库静默落后。
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 function migrate(database: Database.Database, from: number): void {
-    // 增量迁移从这里开始，例如：
-    // if (from < 2) {
-    //     database.exec('ALTER TABLE clusters ADD COLUMN example TEXT');
-    // }
-    void from;
+    // v2：refreshInterval 那行出厂值是 30000，而监控页的刷新间隔单位是秒，
+    // 两者永远对不上；换成 refreshIntervalSeconds 后旧行就是纯垃圾，直接删。
+    if (from < 2) {
+        database.prepare("DELETE FROM user_settings WHERE key = 'refreshInterval'").run();
+    }
 }
 
 function applySchema(database: Database.Database, schema: string): void {
     const current = database.pragma('user_version', {simple: true}) as number;
     if (current === 0) {
         // 新库，或引入版本管理之前创建的老库：直接执行完整 baseline
-        //（schema.sql 全部是幂等语句，重复执行安全）
+        //（schema.sql 全部是幂等语句，重复执行安全），随后照常走一遍迁移，
+        // 因为 baseline 的 INSERT OR IGNORE 不会清掉老库里已经存在的坏行。
         database.exec(schema);
+        migrate(database, 0);
     } else if (current < SCHEMA_VERSION) {
         migrate(database, current);
     } else if (current > SCHEMA_VERSION) {

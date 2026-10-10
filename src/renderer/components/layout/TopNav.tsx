@@ -321,7 +321,7 @@ const TopNav: React.FC = () => {
     const handleSettingClick = ({key}: {key: string}) => {
         switch (key) {
             case 'config':
-                message.info('功能即将推出，敬请期待');
+                addTab({id: 'config-center', title: '配置中心', type: 'config-center'});
                 break;
             case 'shortcuts':
                 addTab({id: 'shortcuts', title: '快捷键配置', type: 'shortcuts'});
@@ -367,14 +367,7 @@ const TopNav: React.FC = () => {
         items: [
             {
                 key: 'config',
-                label: (
-                    <span>
-                        配置中心{' '}
-                        <Tag color="default" style={{fontSize: 10}}>
-                            Coming Soon
-                        </Tag>
-                    </span>
-                ),
+                label: <span>配置中心</span>,
             },
             {
                 key: 'shortcuts',

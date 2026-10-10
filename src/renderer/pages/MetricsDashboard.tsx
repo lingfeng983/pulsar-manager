@@ -14,12 +14,14 @@ import {
     DatePicker,
     Empty,
     Typography,
+    message,
 } from 'antd';
 import {ReloadOutlined, FullscreenOutlined} from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
 import type {EChartsOption} from 'echarts';
 import dayjs from 'dayjs';
 import {useClusterStore} from '../store/cluster';
+import {useSettingsStore} from '../store/settings';
 import {formatThroughput, toKilobytesPerSecond} from '../utils/format';
 import {useTopologyPalette, type TopologyPalette} from '../utils/topologyColors';
 import {useFullscreen} from '../hooks/useFullscreen';
@@ -183,7 +185,12 @@ const MetricsDashboard: React.FC = () => {
     const [selectedCluster, setSelectedCluster] = useState<string>('');
     const [stats, setStats] = useState<AggregatedStats | null>(null);
     const [brokers, setBrokers] = useState<string[]>([]);
-    const [refreshInterval, setRefreshInterval] = useState<number>(30);
+    // 刷新节奏是应用级设置（配置中心可改），页面上的选择器直接读写它：
+    // 关掉自动刷新等价于选择"手动"，两处状态不会各说各话。
+    const autoRefresh = useSettingsStore(state => state.settings.autoRefresh);
+    const refreshIntervalSeconds = useSettingsStore(state => state.settings.refreshIntervalSeconds);
+    const updateSettings = useSettingsStore(state => state.update);
+    const refreshInterval = autoRefresh ? refreshIntervalSeconds : 0;
     const [dateRange, setDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null);
     const [metricsHistory, setMetricsHistory] = useState<MultiMetricsHistory>({
         msgRateIn: [],
@@ -445,13 +452,22 @@ const MetricsDashboard: React.FC = () => {
                     />
                     <Select
                         value={refreshInterval}
-                        onChange={setRefreshInterval}
+                        onChange={async (value: number) => {
+                            const result = await updateSettings({
+                                autoRefresh: value > 0,
+                                refreshIntervalSeconds: value,
+                            });
+                            if (!result.ok) {
+                                message.error(`刷新间隔保存失败：${result.error}`);
+                            }
+                        }}
                         style={{width: 120}}
                         options={[
                             {label: '实时 5s', value: 5},
                             {label: '10秒', value: 10},
                             {label: '30秒', value: 30},
                             {label: '1分钟', value: 60},
+                            {label: '5分钟', value: 300},
                             {label: '手动', value: 0},
                         ]}
                     />
