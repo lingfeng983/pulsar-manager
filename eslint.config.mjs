@@ -10,7 +10,7 @@ import prettierConfig from 'eslint-config-prettier';
 // 关掉两者冲突的规则。
 export default tseslint.config(
     {
-        ignores: ['dist/**', 'release/**', 'node_modules/**', '*.tsbuildinfo'],
+        ignores: ['dist/**', 'release/**', 'node_modules/**', '*.tsbuildinfo', 'scripts/**'],
     },
     js.configs.recommended,
     ...tseslint.configs.recommended,

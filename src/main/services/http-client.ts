@@ -1,5 +1,6 @@
-import axios, {AxiosInstance, AxiosError, InternalAxiosRequestConfig} from 'axios';
+import axios, {AxiosError, AxiosInstance, InternalAxiosRequestConfig} from 'axios';
 import https from 'node:https';
+import {checkServerIdentity} from 'node:tls';
 import fs from 'node:fs';
 import {REQUEST_CONFIG} from '../config/constants';
 
@@ -78,6 +79,9 @@ export interface PulsarAdminConfig {
     timeout?: number;
     auth?: AuthConfig;
     tls?: TLSConfig;
+    // 经 SSH 隧道时请求发往 127.0.0.1，但证书是按真实主机名签发的：
+    // SNI 与主机名校验都要用这个原始名字，不能因为地址变成回环就跳过。
+    tlsVerifyHost?: string;
 }
 
 // ========== HTTP Client Factory ==========
@@ -139,18 +143,25 @@ export function resolveBaseUrl(config: PulsarAdminConfig): string {
     return mapped;
 }
 
-function createHttpsAgent(tls: TLSConfig | undefined): https.Agent | undefined {
+function createHttpsAgent(tls: TLSConfig | undefined, verifyHost?: string): https.Agent | undefined {
     if (!tls?.enabled) {
         return undefined;
     }
-    return new https.Agent({
+    const options: https.AgentOptions = {
         // Certificate verification stays on; a custom CA is supplied instead of
         // disabling the check.
         rejectUnauthorized: true,
         ca: readPem(tls.trustCerts),
         cert: readPem(tls.clientCert),
         key: readPem(tls.clientKey),
-    });
+    };
+    if (verifyHost) {
+        options.servername = verifyHost;
+        // 连接目标是 127.0.0.1（隧道端点），Node 默认按它对端主机名校验必然失败，
+        // 所以这里显式改成按真实主机名校验——是替换校验对象，不是取消校验。
+        options.checkServerIdentity = (_host, cert) => checkServerIdentity(verifyHost, cert);
+    }
+    return new https.Agent(options);
 }
 
 /**
@@ -164,7 +175,7 @@ export function createAxiosClient(config: PulsarAdminConfig): AxiosInstance {
     const client = axios.create({
         baseURL: resolveBaseUrl(config),
         timeout: config.timeout || REQUEST_CONFIG.TIMEOUT,
-        httpsAgent: createHttpsAgent(config.tls),
+        httpsAgent: createHttpsAgent(config.tls, config.tlsVerifyHost),
         headers: {
             'Content-Type': 'application/json',
         },

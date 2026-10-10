@@ -18,6 +18,8 @@ export interface NativeConnectionConfig {
     authParams?: string | null;
     tlsEnabled?: boolean;
     tlsTrustCerts?: string | null;
+    // 地址是被 SSH 隧道改写出来的 127.0.0.1
+    viaSshTunnel?: boolean;
 }
 
 // 原生客户端只接受证书文件路径，而集群里存的是 PEM 内容，只能落一次盘。
@@ -53,6 +55,15 @@ function buildAuthentication(
 }
 
 function toClientConfig(config: NativeConnectionConfig): ClientConfig {
+    const tlsScheme = /^(pulsar\+ssl|ssl):\/\//.test(config.serviceUrl);
+    // 隧道把地址换成 127.0.0.1 后，Broker 证书的主机名校验必然失败，而 pulsar-client
+    // 的 Node 绑定没有暴露 SNI/服务名覆盖项（只有 tlsValidateHostname 开关），
+    // 关掉校验等于放弃 TLS，所以这一组合明确拒绝而不是静默降级。
+    if (config.viaSshTunnel && tlsScheme) {
+        throw new Error(
+            '消息收发暂不支持「TLS + SSH 隧道」组合（原生客户端无法指定 SNI 主机名），请改用 pulsar:// 明文地址经隧道，或关闭隧道直连',
+        );
+    }
     const clientConfig: ClientConfig = {
         serviceUrl: config.serviceUrl,
         operationTimeoutSeconds: config.operationTimeoutSeconds || 10,
@@ -169,19 +180,49 @@ function withHardTimeout(work: Promise<void>, failureLabel: string, timeoutMs = 
     });
 }
 
+// 原生客户端的连接参数指纹：隧道重连后本地端口变化，旧 Client 指向已经没人
+// 监听的端口，必须重建（admin 侧同理，见 PulsarAdminClientManager）。
+function nativeConfigFingerprint(config: NativeConnectionConfig): string {
+    return crypto
+        .createHash('sha1')
+        .update(
+            JSON.stringify({
+                serviceUrl: config.serviceUrl,
+                operationTimeoutSeconds: config.operationTimeoutSeconds,
+                authPlugin: config.authPlugin,
+                authParams: config.authParams || '',
+                tlsEnabled: config.tlsEnabled,
+                tlsTrustCerts: config.tlsTrustCerts || '',
+                viaSshTunnel: config.viaSshTunnel,
+            }),
+        )
+        .digest('hex');
+}
+
+interface CachedClient {
+    client: Client;
+    fingerprint: string;
+}
+
 export class NativeClientManager {
-    private clients = new Map<string, Client>();
+    private clients = new Map<string, CachedClient>();
     private sessions = new Map<string, Session>();
     private sessionCounter = 0;
 
     // 集群配置变更后必须重建客户端，否则会一直用旧的 serviceUrl / 凭据。
-    getClient(clusterId: string, config: NativeConnectionConfig): Client {
-        const existing = this.clients.get(clusterId);
-        if (existing) {
-            return existing;
+    // 配置变化时先停掉该集群的全部会话再关旧客户端：在还活着的 consumer 下面
+    // 关闭原生 Client 是段错误来源。
+    async getClient(clusterId: string, config: NativeConnectionConfig): Promise<Client> {
+        const fingerprint = nativeConfigFingerprint(config);
+        const cached = this.clients.get(clusterId);
+        if (cached && cached.fingerprint === fingerprint) {
+            return cached.client;
+        }
+        if (cached) {
+            await this.removeCluster(clusterId);
         }
         const client = new Client(toClientConfig(config));
-        this.clients.set(clusterId, client);
+        this.clients.set(clusterId, {client, fingerprint});
         return client;
     }
 
@@ -197,13 +238,13 @@ export class NativeClientManager {
     // 缓存的移除发生在第一个 await 之前，所以调用方可以不等它完成，
     // 后续请求也不会拿到旧客户端。
     async removeCluster(clusterId: string): Promise<void> {
-        const client = this.clients.get(clusterId);
+        const cached = this.clients.get(clusterId);
         this.clients.delete(clusterId);
         const targets = [...this.sessions.values()].filter(session => session.clusterId === clusterId);
         await Promise.all(targets.map(session => this.stopSession(session)));
-        if (client) {
+        if (cached) {
             await withHardTimeout(
-                client.close().then(() => undefined),
+                cached.client.close().then(() => undefined),
                 `client ${clusterId} close failed`,
             );
         }
@@ -227,7 +268,8 @@ export class NativeClientManager {
         },
     ): Promise<{messageId: string}> {
         const topic = topicFullName(params.tenant, params.namespace, params.topic, params.persistent);
-        const producer: Producer = await this.getClient(clusterId, config).createProducer({topic});
+        const client = await this.getClient(clusterId, config);
+        const producer: Producer = await client.createProducer({topic});
         try {
             const messageId = await producer.send({
                 data: Buffer.from(params.message, 'utf8'),
@@ -341,7 +383,7 @@ export class NativeClientManager {
     ): Promise<{sessionId: string}> {
         const topic = topicFullName(params.tenant, params.namespace, params.topic, params.persistent);
         const session = this.reserveSession(clusterId, `${clusterId}|${topic}|${params.subscription}`);
-        const client = this.getClient(clusterId, config);
+        const client = await this.getClient(clusterId, config);
 
         let consumer: Consumer;
         try {
@@ -399,7 +441,7 @@ export class NativeClientManager {
         }
         const seekTimestamp = params.timestamp;
         const session = this.reserveSession(clusterId, `${clusterId}|${topic}|reader|${params.from}`);
-        const client = this.getClient(clusterId, config);
+        const client = await this.getClient(clusterId, config);
 
         let reader: Reader;
         try {

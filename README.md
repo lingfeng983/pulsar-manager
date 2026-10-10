@@ -80,6 +80,8 @@ pulsar-manager/
 ├── docs/DATA_SOURCES.md       # 每个页面的数据来源说明
 ├── release.sh                 # 一键出包 + 发布 Gitee 发行版
 ├── scripts/release-publish.mjs# 调 Gitee API 建/更新发行版并上传附件
+├── scripts/tunnel-selftest/   # SSH 隧道端到端自检（本机起真 SSH 服务器 + 假 Pulsar 源站）
+├── scripts/dev-ssh-bridge.js  # 开发期本机 SSH 服务器，供隧道功能实机验证
 ├── electron-builder.json      # 打包配置
 ├── vite.config.ts             # 前端构建 + 生产 CSP 注入
 └── tsconfig.node.json         # 主进程/preload 的 TS 配置（CommonJS）
@@ -162,7 +164,7 @@ npm run build:main && npm run build
 
 以下是**当前确实没做**的部分，界面不会假装它们可用：
 
-- **SSH 隧道端口转发未实现**：`ssh:connect` 只保存配置并明确返回失败，不会编造一个本地端口；集群若开启隧道，连接时主进程直接拒绝并提示直连
+- **SSH 隧道的边界**：启用后应用在本机起两条随机端口转发（Admin 与 Broker 各一条），集群地址自动改写到隧道上，TLS 仍按用户填写的原始主机名校验证书。两点限制：原生客户端（消息收发）无法指定 SNI，所以「TLS + SSH 隧道」会被明确拒绝，请改用 `pulsar://` 明文经隧道；topic lookup 之后 broker 回源的地址若本机不可达，原生收发仍需直连或代理
 - **在线更新依赖 Gitee 私有仓库 API**：设置→检查更新 会拉取最新发行版并对比版本号，下载其 exe 附件后静默安装重启；私有仓库必须先在更新弹窗里配置只读 access_token（本机加密存储）。仓库地址写死为 `lingfeng983/pulsar-manager`，换仓库需改 `src/main/services/update-service.ts`
 - **快速压测入口是占位**：顶部导航点击后只提示"功能即将推出"
 - **消费没有逐条手动 ack**：只有"自动 ack"开关，关掉之后消息就一直不确认

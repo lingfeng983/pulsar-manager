@@ -11,6 +11,7 @@ import {
     updateCluster,
     deleteCluster,
     getAllSSHTunnels,
+    getSSHTunnelById,
     insertSSHTunnel,
     updateSSHTunnel,
     deleteSSHTunnel,
@@ -18,10 +19,12 @@ import {
     setSetting,
     insertOperationLog,
     runInTransaction,
+    type SSHTunnelRecord,
 } from '../database/sqlite';
 import {encrypt, decrypt} from '../services/encryption';
 import {PulsarAdminClient, clientManager} from '../services/pulsar-admin';
 import {condenseErrorText} from '../services/http-client';
+import {sshTunnelManager, type TunnelEndpoints, type TunnelTargets} from '../services/ssh-tunnel';
 import {createLogger} from '../utils/logger';
 
 const log = createLogger('IPC');
@@ -39,6 +42,7 @@ export {
     updateCluster,
     deleteCluster,
     getAllSSHTunnels,
+    getSSHTunnelById,
     insertSSHTunnel,
     updateSSHTunnel,
     deleteSSHTunnel,
@@ -50,46 +54,73 @@ export {
     decrypt,
     PulsarAdminClient,
     clientManager,
+    sshTunnelManager,
 };
 
+export type {SSHTunnelRecord, TunnelTargets};
+
 // Zod schemas for validation
-export const ClusterConfigSchema = z.object({
-    name: z.string().min(1),
-    serviceUrl: z.string().min(1),
-    webServiceUrl: z.string().optional().nullable(),
-    authPlugin: z.string().optional().nullable(),
-    authParams: z.string().optional().nullable(),
-    tlsEnabled: z.boolean().optional().nullable(),
-    tlsTrustCerts: z.string().optional().nullable(),
-    useSshTunnel: z.boolean().optional().nullable(),
-    sshConfigId: z.string().optional().nullable(),
-    adminApiTimeout: z.number().optional().nullable(),
+export const ClusterIdSchema = z.string().min(1).uuid();
+
+export const SshInlineSchema = z.object({
+    host: z.string().min(1).max(253),
+    port: z.number().int().min(1).max(65535).optional(),
+    username: z.string().min(1).max(128),
+    authType: z.enum(['password', 'privateKey']).default('password'),
+    // 凭据不回传渲染进程，所以编辑时留空表示"沿用已保存的值"（见 cluster:update）
+    password: z.string().max(4096).optional().nullable(),
+    privateKey: z
+        .string()
+        .max(64 * 1024)
+        .optional()
+        .nullable(),
+    passphrase: z.string().max(4096).optional().nullable(),
+    // 远端 Pulsar 主机与端口：留空时按集群自身的服务地址解析
+    remoteHost: z.string().max(253).optional().nullable(),
+    remoteAdminPort: z.number().int().min(1).max(65535).optional().nullable(),
+    remoteBrokerPort: z.number().int().min(1).max(65535).optional().nullable(),
 });
 
+export const SSHConfigSchema = SshInlineSchema.extend({
+    id: ClusterIdSchema.optional(),
+});
+
+export const ClusterConfigSchema = z
+    .object({
+        name: z.string().min(1),
+        serviceUrl: z.string().min(1),
+        webServiceUrl: z.string().optional().nullable(),
+        authPlugin: z.string().optional().nullable(),
+        authParams: z.string().optional().nullable(),
+        tlsEnabled: z.boolean().optional().nullable(),
+        tlsTrustCerts: z.string().optional().nullable(),
+        useSshTunnel: z.boolean().optional().nullable(),
+        sshConfigId: z.string().optional().nullable(),
+        ssh: SshInlineSchema.optional().nullable(),
+        adminApiTimeout: z.number().optional().nullable(),
+    })
+    // 勾选了隧道就必须有可用的隧道配置：要么这次填了新参数，要么已经有落库的
+    // sshConfigId。缺了它会在连接阶段才报"隧道配置不存在"，用户看不到原因。
+    .refine(config => !config.useSshTunnel || !!config.ssh?.host || !!config.sshConfigId, {
+        message: 'SSH 隧道需要主机与用户名',
+    });
+
+// 测试连接与真实请求走同一套地址解析：勾选隧道时先建隧道再打本地端口，
+// 否则"测试通过但保存后连不上"的情况永远对不上号。
 export const ClusterTestSchema = z.object({
     serviceUrl: z.string().min(1),
     webServiceUrl: z.string().optional().nullable(),
     authPlugin: z.string().optional().nullable(),
     authParams: z.string().optional().nullable(),
     adminApiTimeout: z.number().optional().nullable(),
-});
-
-export const SSHConfigSchema = z.object({
-    host: z.string().min(1),
-    port: z.number().min(1).max(65535).optional(),
-    username: z.string().min(1),
-    authType: z.enum(['password', 'privateKey']),
-    password: z.string().optional(),
-    privateKey: z.string().optional(),
-    passphrase: z.string().optional(),
-    remoteHost: z.string().optional(),
-    remoteAdminPort: z.number().optional(),
-    remoteBrokerPort: z.number().optional(),
+    tlsEnabled: z.boolean().optional().nullable(),
+    tlsTrustCerts: z.string().optional().nullable(),
+    useSshTunnel: z.boolean().optional().nullable(),
+    sshConfigId: z.string().optional().nullable(),
+    ssh: SshInlineSchema.optional().nullable(),
 });
 
 // 通用验证 schema
-export const ClusterIdSchema = z.string().min(1).uuid();
-
 export const TenantSchema = z
     .string()
     .min(1)
@@ -284,12 +315,42 @@ export function encryptSensitiveFields(config: z.infer<typeof ClusterConfigSchem
     return encrypted;
 }
 
+// SSH 隧道凭据单独加密：字段名与 ssh_tunnels 表一致，直接落库。
+export function encryptSshSecrets(ssh: z.infer<typeof SshInlineSchema>): Partial<SSHTunnelRecord> {
+    const record: Partial<SSHTunnelRecord> = {
+        host: ssh.host,
+        port: ssh.port || 22,
+        username: ssh.username,
+        auth_type: ssh.authType,
+    };
+    if (ssh.password) {
+        record.password = encrypt(ssh.password);
+    }
+    if (ssh.privateKey) {
+        record.private_key = encrypt(ssh.privateKey);
+    }
+    if (ssh.passphrase) {
+        record.passphrase = encrypt(ssh.passphrase);
+    }
+    if (ssh.remoteHost) {
+        record.remote_host = ssh.remoteHost;
+    }
+    if (ssh.remoteAdminPort) {
+        record.remote_admin_port = ssh.remoteAdminPort;
+    }
+    if (ssh.remoteBrokerPort) {
+        record.remote_broker_port = ssh.remoteBrokerPort;
+    }
+    return record;
+}
+
 // 解密敏感字段
 
 // 标准化集群数据。
-// 注意：authParams / tlsTrustCerts 属于凭据，只在主进程内解密使用，
+// 注意：authParams / tlsTrustCerts / SSH 凭据属于凭据，只在主进程内解密使用，
 // 绝不随集群列表下发到渲染进程；这里只暴露"是否已配置"的布尔标记。
-export function normalizeCluster(cluster: any) {
+// tunnel 是关联的 ssh_tunnels 行（cluster:list 一次查全部再按 id 匹配，避免 N+1）。
+export function normalizeCluster(cluster: any, tunnel?: SSHTunnelRecord) {
     return {
         id: cluster.id,
         name: cluster.name,
@@ -301,6 +362,21 @@ export function normalizeCluster(cluster: any) {
         hasTlsTrustCerts: !!cluster.tls_trust_certs,
         useSshTunnel: !!cluster.use_ssh_tunnel,
         sshConfigId: cluster.ssh_config_id,
+        ssh: tunnel
+            ? {
+                  host: tunnel.host,
+                  port: tunnel.port,
+                  username: tunnel.username,
+                  authType: tunnel.auth_type === 'privateKey' ? 'privateKey' : 'password',
+                  hasPassword: !!tunnel.password,
+                  hasPrivateKey: !!tunnel.private_key,
+                  remoteHost: tunnel.remote_host,
+                  remoteAdminPort: tunnel.remote_admin_port,
+                  remoteBrokerPort: tunnel.remote_broker_port,
+                  // 只报"当前是否有活的本地转发"，端口不下发（渲染层用不到）
+                  tunnelActive: sshTunnelManager.endpoints(tunnel.id) !== undefined,
+              }
+            : undefined,
         adminApiTimeout: cluster.admin_api_timeout || 5000,
         status: cluster.status || 'disconnected',
         version: cluster.version,
@@ -330,20 +406,175 @@ export interface ClusterConnectionConfig {
     authParams?: string | null;
     tlsEnabled: boolean;
     tlsTrustCerts?: string | null;
+    // 走隧道时地址被改写成 127.0.0.1，证书校验仍要用原始主机名，
+    // 否则等于把主机名校验关掉了。
+    tlsVerifyHost?: string | null;
+    viaSshTunnel: boolean;
 }
 
-export function buildConnectionConfig(clusterId: string): ClusterConnectionConfig | null {
+const LOCAL_TUNNEL_HOST = '127.0.0.1';
+
+function parseUrl(value: string | null | undefined): {host?: string; port?: number} {
+    if (!value) {
+        return {};
+    }
+    try {
+        const url = new URL(value);
+        const host = url.hostname.replace(/^\[|\]$/g, '');
+        return {host: host || undefined, port: url.port ? Number(url.port) : undefined};
+    } catch {
+        // 地址非法交给后续请求报错，这里不要抛异常——那会让"保存集群"因为
+        // 一个拼错的 URL 直接失败，而错误信息完全对不上真正的原因。
+        return {};
+    }
+}
+
+// 隧道转发的远端目标：优先用集群自身的服务地址（用户填的就是它想连的东西），
+// ssh_tunnels 里的端口只是历史/手工连接记录的兜底。
+function resolveTunnelTargets(cluster: any, record: SSHTunnelRecord): TunnelTargets {
+    const admin = parseUrl(cluster.web_service_url);
+    const broker = parseUrl(cluster.service_url);
+    const remoteHost = record.remote_host || admin.host || broker.host || record.host;
+    return {
+        remoteHost,
+        adminPort: admin.port || record.remote_admin_port || 8080,
+        brokerPort: broker.port || record.remote_broker_port || 6650,
+    };
+}
+
+export function rewriteUrl(original: string, port: number): string {
+    const fallbackScheme = original.startsWith('pulsar+ssl') || original.startsWith('ssl') ? 'pulsar+ssl' : 'pulsar';
+    try {
+        const url = new URL(original);
+        url.hostname = LOCAL_TUNNEL_HOST;
+        url.port = String(port);
+        return url.toString();
+    } catch {
+        return `${fallbackScheme}://${LOCAL_TUNNEL_HOST}:${port}`;
+    }
+}
+
+export interface TunnelResolution {
+    tunnelId: string;
+    endpoints: TunnelEndpoints;
+    targets: TunnelTargets;
+}
+
+// 证书校验用的主机名取用户填写的服务地址主机：隧道只是把连接"搬到"127.0.0.1，
+// 签发对象仍然是用户本意想连的那台机器（remoteHost 可能只是为了可达而填的 IP）。
+export function tunnelVerifyHost(
+    source: {service_url: string; web_service_url?: string | null},
+    targets: TunnelTargets,
+) {
+    return parseUrl(source.web_service_url).host || parseUrl(source.service_url).host || targets.remoteHost;
+}
+
+/**
+ * 把表单里的隧道参数落库：有 sshConfigId 就覆盖那一行，否则新建。
+ * 凭据留空表示沿用已保存的值（凭据从不下发到渲染进程）。返回落库后的行 id。
+ */
+export function persistSshConfig(ssh: z.infer<typeof SshInlineSchema>, sshConfigId?: string | null): string {
+    const existing = sshConfigId ? getSSHTunnelById(sshConfigId) : undefined;
+    if (sshConfigId && !existing) {
+        throw new Error('未找到对应的 SSH 隧道配置，请在集群设置里重新填写');
+    }
+    if (!existing) {
+        const id = uuidv4();
+        insertSSHTunnel({
+            id,
+            host: ssh.host,
+            port: ssh.port || 22,
+            username: ssh.username,
+            auth_type: ssh.authType,
+            password: ssh.password ? encrypt(ssh.password) : undefined,
+            private_key: ssh.privateKey ? encrypt(ssh.privateKey) : undefined,
+            passphrase: ssh.passphrase ? encrypt(ssh.passphrase) : undefined,
+            remote_host: ssh.remoteHost || undefined,
+            remote_admin_port: ssh.remoteAdminPort || 8080,
+            remote_broker_port: ssh.remoteBrokerPort || 6650,
+            local_admin_port: 0,
+            local_broker_port: 0,
+            status: 'disconnected',
+        });
+        return id;
+    }
+
+    const updates: Record<string, string | number | null> = {
+        host: ssh.host,
+        port: ssh.port || 22,
+        username: ssh.username,
+        auth_type: ssh.authType,
+        password: ssh.password ? encrypt(ssh.password) : (existing.password ?? null),
+        private_key: ssh.privateKey ? encrypt(ssh.privateKey) : (existing.private_key ?? null),
+        passphrase: ssh.passphrase ? encrypt(ssh.passphrase) : (existing.passphrase ?? null),
+        remote_host: ssh.remoteHost || existing.remote_host || null,
+        remote_admin_port: ssh.remoteAdminPort || existing.remote_admin_port || 8080,
+        remote_broker_port: ssh.remoteBrokerPort || existing.remote_broker_port || 6650,
+    };
+    // 认证方式换了，另一种凭据必须清掉：否则建隧道时会拿旧私钥去配新密码
+    if (ssh.authType === 'password') {
+        updates.private_key = null;
+        updates.passphrase = null;
+    } else {
+        updates.password = null;
+    }
+    updateSSHTunnel(existing.id, updates);
+    return existing.id;
+}
+
+/**
+ * 按（可能尚未落库的）隧道参数建立本地端口转发。
+ *
+ * - 传了 ssh（表单里的隧道参数）：先落库并作废旧的转发——换了 SSH 主机或凭据后
+ *   继续复用会让请求打到错误的对端。
+ * - 只传 sshConfigId：复用已保存的配置。
+ */
+export async function establishTunnel(
+    clusterLike: {service_url: string; web_service_url?: string | null},
+    options: {sshConfigId?: string | null; ssh?: z.infer<typeof SshInlineSchema> | null},
+): Promise<TunnelResolution> {
+    let tunnelId: string;
+    if (options.ssh) {
+        tunnelId = persistSshConfig(options.ssh, options.sshConfigId);
+        await sshTunnelManager.invalidate(tunnelId);
+    } else {
+        if (!options.sshConfigId) {
+            throw new Error('启用 SSH 隧道需要填写 SSH 主机与用户名');
+        }
+        tunnelId = options.sshConfigId;
+    }
+    const record = getSSHTunnelById(tunnelId);
+    if (!record) {
+        throw new Error('未找到对应的 SSH 隧道配置，请在集群设置里重新填写');
+    }
+    const targets = resolveTunnelTargets(clusterLike, record);
+    const endpoints = await sshTunnelManager.ensure(record, targets);
+    return {tunnelId: record.id, endpoints, targets};
+}
+
+// 已勾选隧道的集群：建立（或复用）本地端口转发，并把两条链路的地址都换成
+// 127.0.0.1 的隧道端点。原始主机名保留在 tlsVerifyHost 里供证书校验使用。
+async function applySshTunnel(cluster: any, config: ClusterConnectionConfig): Promise<ClusterConnectionConfig> {
+    const resolved = await establishTunnel(cluster, {sshConfigId: cluster.ssh_config_id});
+    return {
+        ...config,
+        serviceUrl: rewriteUrl(cluster.service_url, resolved.endpoints.localBrokerPort),
+        // serviceUrl 只有一个端口，映射不出 admin 地址，所以经隧道时 admin 必须显式落库
+        webServiceUrl: config.webServiceUrl
+            ? rewriteUrl(config.webServiceUrl, resolved.endpoints.localAdminPort)
+            : `${config.tlsEnabled ? 'https' : 'http'}://${LOCAL_TUNNEL_HOST}:${resolved.endpoints.localAdminPort}`,
+        tlsVerifyHost: tunnelVerifyHost(cluster, resolved.targets),
+        viaSshTunnel: true,
+    };
+}
+
+export async function buildConnectionConfig(clusterId: string): Promise<ClusterConnectionConfig | null> {
     const cluster = getClusterById(clusterId);
     if (!cluster) {
         return null;
     }
-    // SSH 隧道端口转发尚未实现：勾选了隧道的集群若静默直连 serviceUrl，
-    // 用户会以为凭据/网络生效了，必须在这里显式拒绝而不是假装能连。
-    if (cluster.use_ssh_tunnel) {
-        throw new Error('SSH 隧道尚未实现，请在集群设置中关闭隧道后直连');
-    }
     const adminApiTimeoutMs = cluster.admin_api_timeout || 5000;
-    return {
+    const config: ClusterConnectionConfig = {
         serviceUrl: cluster.service_url,
         webServiceUrl: cluster.web_service_url,
         adminApiTimeoutMs,
@@ -352,12 +583,18 @@ export function buildConnectionConfig(clusterId: string): ClusterConnectionConfi
         authParams: cluster.auth_params ? decrypt(cluster.auth_params) : null,
         tlsEnabled: !!cluster.tls_enabled,
         tlsTrustCerts: cluster.tls_trust_certs ? decrypt(cluster.tls_trust_certs) : null,
+        tlsVerifyHost: null,
+        viaSshTunnel: false,
     };
+    if (!cluster.use_ssh_tunnel) {
+        return config;
+    }
+    return applySshTunnel(cluster, config);
 }
 
 // 获取 Pulsar Admin Client（公共方法）
-export function getAdminClient(clusterId: string): PulsarAdminClient | null {
-    const config = buildConnectionConfig(clusterId);
+export async function getAdminClient(clusterId: string): Promise<PulsarAdminClient | null> {
+    const config = await buildConnectionConfig(clusterId);
     if (!config) {
         return null;
     }
@@ -373,6 +610,7 @@ export function getAdminClient(clusterId: string): PulsarAdminClient | null {
                   trustCerts: config.tlsTrustCerts || undefined,
               }
             : undefined,
+        tlsVerifyHost: config.tlsVerifyHost || undefined,
     });
 }
 
@@ -425,7 +663,7 @@ function registerResolvedHandler<S extends z.ZodTypeAny, R, T>(
     channel: string,
     schema: S,
     mapArgs: (args: unknown[]) => unknown,
-    resolve: (input: z.infer<S>) => R | null,
+    resolve: (input: z.infer<S>) => R | null | Promise<R | null>,
     resolveFailure: string,
     run: (resolved: R, input: z.infer<S>) => Promise<T>,
 ): void {
@@ -445,7 +683,8 @@ function registerResolvedHandler<S extends z.ZodTypeAny, R, T>(
 
             ensureDbInitialized();
             const input = parsed.data as z.infer<S>;
-            const resolved = resolve(input);
+            // resolve 可能是异步的（走隧道的集群要先建立本地转发才能拿到客户端）
+            const resolved = await resolve(input);
             if (!resolved) {
                 return {success: false, error: resolveFailure};
             }

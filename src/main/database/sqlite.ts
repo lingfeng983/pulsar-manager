@@ -91,6 +91,11 @@ export function initDatabase(): Database.Database {
     // 启动时清理过期操作日志
     cleanupOperationLogs();
 
+    const orphans = cleanupOrphanSshTunnels();
+    if (orphans > 0) {
+        console.log(`[Database] Cleaned up ${orphans} unreferenced SSH tunnel configs`);
+    }
+
     return db;
 }
 
@@ -387,4 +392,20 @@ export function cleanupOperationLogs(maxLogs: number = 10000): void {
             .run(deleteCount);
         console.log(`[Database] Cleaned up ${deleteCount} old operation logs`);
     }
+}
+
+/**
+ * 剪掉没有任何集群引用的 SSH 隧道配置。
+ * 集群表单里点一次「测试 SSH 隧道」就会落一条配置，用户随后取消弹窗就留下孤儿行；
+ * 应用没有独立的 SSH 配置管理界面，所以启动时按引用清理一次。
+ */
+export function cleanupOrphanSshTunnels(): number {
+    const database = getDatabase();
+    const result = database
+        .prepare(
+            `DELETE FROM ssh_tunnels
+             WHERE id NOT IN (SELECT ssh_config_id FROM clusters WHERE ssh_config_id IS NOT NULL)`,
+        )
+        .run();
+    return result.changes;
 }

@@ -369,10 +369,11 @@ CREATE TABLE operation_logs (
 ### 4.6 SSH 隧道
 | IPC 通道 | 方向 | 功能 |
 |---------|------|------|
-| `ssh:list` | renderer → main | 获取隧道列表 |
-| `ssh:add` | renderer → main | 添加隧道 |
-| `ssh:connect` | renderer → main | 连接隧道 |
-| `ssh:disconnect` | renderer → main | 断开隧道 |
+| `ssh:list` | renderer → main | 获取隧道配置与状态列表 |
+| `ssh:connect` | renderer → main | 按表单里的参数建立本地端口转发 |
+| `ssh:disconnect` | renderer → main | 关闭指定隧道并释放本地端口 |
+
+隧道配置本身随集群保存（`clusters.ssh_config_id` 指向 `ssh_tunnels` 行），没有独立的"添加隧道"通道；删除集群会连带删除其隧道配置，启动时也会剪掉无人引用的残留行。
 
 ---
 

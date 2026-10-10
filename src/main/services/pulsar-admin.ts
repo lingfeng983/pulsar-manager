@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import {AxiosInstance} from 'axios';
 import {createAxiosClient, Semaphore, PulsarAdminConfig} from './http-client';
 import {REQUEST_CONFIG} from '../config/constants';
@@ -284,19 +285,47 @@ export class PulsarAdminClient {
 
 // ========== Client Manager ==========
 
+// 缓存键要带上生效配置的指纹：隧道重连后本地端口会变，若只按 clusterId 缓存，
+// 客户端会一直指向已经没人监听的旧端口，表现为"重连之后所有请求都超时"。
+function adminConfigFingerprint(config: PulsarAdminConfig): string {
+    const digest = (value?: string) =>
+        value ? crypto.createHash('sha1').update(value).digest('hex').slice(0, 12) : '';
+    return crypto
+        .createHash('sha1')
+        .update(
+            JSON.stringify({
+                serviceUrl: config.serviceUrl,
+                webServiceUrl: config.webServiceUrl,
+                timeout: config.timeout,
+                authPlugin: config.auth?.authPlugin,
+                authParams: digest(config.auth?.authParams),
+                tlsEnabled: config.tls?.enabled,
+                trustCerts: digest(config.tls?.trustCerts),
+                tlsVerifyHost: config.tlsVerifyHost,
+            }),
+        )
+        .digest('hex');
+}
+
 // 客户端管理器 - 管理多个集群连接
 export class PulsarAdminClientManager {
     private clients: Map<string, PulsarAdminClient> = new Map();
+    private fingerprints: Map<string, string> = new Map();
 
     // 获取或创建客户端
     getClient(clusterId: string, config: PulsarAdminConfig): PulsarAdminClient {
         const existing = this.clients.get(clusterId);
-        if (existing) {
+        const fingerprint = adminConfigFingerprint(config);
+        if (existing && this.fingerprints.get(clusterId) === fingerprint) {
             return existing;
         }
-
+        if (existing) {
+            // 释放排队中的许可，否则旧请求会一直挂着
+            existing.destroy();
+        }
         const client = new PulsarAdminClient(config);
         this.clients.set(clusterId, client);
+        this.fingerprints.set(clusterId, fingerprint);
         return client;
     }
 
@@ -308,12 +337,14 @@ export class PulsarAdminClientManager {
             existing.destroy();
         }
         this.clients.delete(clusterId);
+        this.fingerprints.delete(clusterId);
     }
 
     // 清除所有客户端
     clear(): void {
         this.clients.forEach(client => client.destroy());
         this.clients.clear();
+        this.fingerprints.clear();
     }
 }
 

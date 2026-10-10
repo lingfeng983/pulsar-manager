@@ -254,7 +254,7 @@ declare global {
                 delete: (id: string) => Promise<APIResponse<void>>;
                 testConnection: (
                     config: ClusterConfigDraft,
-                ) => Promise<APIResponse<{connected: boolean; version?: string}>>;
+                ) => Promise<APIResponse<{connected: boolean; version?: string; sshConfigId?: string}>>;
             };
             resources: {
                 getTenants: (clusterId: string) => Promise<APIResponse<Tenant[]>>;

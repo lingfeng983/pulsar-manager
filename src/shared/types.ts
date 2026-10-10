@@ -37,6 +37,7 @@ export interface ClusterConfig {
     hasTlsTrustCerts?: boolean;
     useSshTunnel?: boolean;
     sshConfigId?: string;
+    ssh?: SSHTunnelSummary;
     adminApiTimeout?: number;
     status?: 'connected' | 'disconnected' | 'warning';
     version?: string;
@@ -48,6 +49,9 @@ export interface ClusterConfig {
 export type ClusterConfigDraft = Omit<ClusterConfig, 'id'> & {id?: string};
 
 export interface SSHConfig {
+    // 已落库的隧道行 id；不带表示新建。测试通过后渲染层会把它回填到表单，
+    // 避免"测一次留一条、保存再留一条"的孤儿配置。
+    id?: string;
     host: string;
     port?: number;
     username: string;
@@ -58,6 +62,21 @@ export interface SSHConfig {
     remoteHost?: string;
     remoteAdminPort?: number;
     remoteBrokerPort?: number;
+}
+
+// 随集群列表下发的隧道摘要：凭据一律不回传，只给"是否已配置"的标记。
+export interface SSHTunnelSummary {
+    host: string;
+    port?: number;
+    username: string;
+    authType: 'password' | 'privateKey';
+    hasPassword?: boolean;
+    hasPrivateKey?: boolean;
+    remoteHost?: string;
+    remoteAdminPort?: number;
+    remoteBrokerPort?: number;
+    // 当前是否已有活的本地端口转发
+    tunnelActive?: boolean;
 }
 
 export interface SSHTunnel {

@@ -2,6 +2,7 @@ import {app, BrowserWindow, shell, session, dialog, Menu, Tray, nativeImage} fro
 import path from 'path';
 import {registerIPCHandlers, cleanupDatabase} from './ipc/handlers';
 import {nativeClientManager} from './services/pulsar-native-client';
+import {sshTunnelManager} from './services/ssh-tunnel';
 
 process.on('uncaughtException', error => {
     console.error('[Main] Uncaught Exception:', error);
@@ -208,6 +209,9 @@ app.on('will-quit', () => {
     // 原生客户端的会话要主动关，否则 broker 侧会留下未关闭的消费者/生产者
     // （订阅看起来"卡住"往往就是这个原因）。will-quit 无法等待异步关闭，只能尽力而为。
     void nativeClientManager.clear();
+    // 隧道是本地端口监听 + SSH 长连接，退出前必须关掉，否则残留的监听端口
+    // 会让下一次启动拿到不同的端口号
+    void sshTunnelManager.closeAll();
     cleanupDatabase();
 });
 
