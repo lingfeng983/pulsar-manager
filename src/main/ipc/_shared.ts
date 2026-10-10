@@ -1,4 +1,4 @@
-import {ipcMain} from 'electron';
+import {app, ipcMain} from 'electron';
 import type {IpcMainInvokeEvent} from 'electron';
 import {z} from 'zod';
 import {v4 as uuidv4} from 'uuid';
@@ -662,16 +662,24 @@ export function markClusterStatus(clusterId: string, status: 'connected' | 'disc
 // ========== IPC 请求来源校验 ==========
 
 // 只有应用自身的页面可以调用 IPC。开发环境走 Vite dev server，
-// 生产环境是本地 file:// 页面；其他来源（被注入的 iframe、远程内容）一律拒绝。
+// 生产环境是本地 file:// 页面；其他来源一律拒绝。
+// 两条规则缺一不可：
+// - 只认主框架：否则页面里塞一个 <iframe src="file://..."> 就能拿到全部通道；
+// - 用"是否已打包"而不是 NODE_ENV 判断 dev：环境变量在别人的机器上不可控，
+//   没设上又会把 dev 页面当成外部来源，表现就是所有请求都回 Request rejected。
 function isTrustedSender(event: IpcMainInvokeEvent): boolean {
-    const url = event.senderFrame?.url;
+    const frame = event.senderFrame;
+    if (!frame || frame !== event.sender.mainFrame) {
+        return false;
+    }
+    const url = frame.url;
     if (!url) {
         return false;
     }
     if (url.startsWith('file://')) {
         return true;
     }
-    if (process.env.NODE_ENV === 'development') {
+    if (!app.isPackaged) {
         return url.startsWith('http://localhost:') || url.startsWith('http://127.0.0.1:');
     }
     return false;

@@ -118,7 +118,7 @@ pulsar-manager/
 
 - Node.js 20 或更高（开发在 v24 上验证）
 - npm 源已在 `.npmrc` 中指向 npmmirror，Electron 二进制也走国内镜像
-- `pulsar-client` 是原生模块（node-addon-api），安装时会下载预编译产物（Windows 为 `napi-win32-unknown-x64`），需要能访问镜像或 Apache 归档；**不需要**本地 C++ 工具链
+- `pulsar-client` 是原生模块（node-addon-api），安装时先下载预编译产物（Windows 为 `napi-win32-unknown-x64`），需要能访问镜像或 Apache 归档。预编译包拿不到时 npm 会退回 `node-gyp` 源码编译，这一步**必须有** MSVC 与 Python 工具链；`ssh2` 的可选加速模块 `cpu-features` 编不过也会让 `npm install` 整体失败（它对本应用无用），此时用 `npm install --ignore-scripts` 装依赖，再单独跑 `npm rebuild better-sqlite3 --update-binary` 与 `npx electron-builder install-app-deps`
 
 ### 安装与开发
 
@@ -127,16 +127,18 @@ npm install          # postinstall 会执行 electron-builder install-app-deps�
 npm run dev          # 并行启动 Vite(5173) 与 Electron
 ```
 
-也可以分开跑：`npm run dev:renderer`（只起前端）、`npm run dev:main`（编译主进程后启动 Electron）。
+也可以分开跑：`npm run dev:renderer`（只起前端）、`npm run dev:main`（编译主进程后启动 Electron）。未打包运行时窗口一律加载 `http://localhost:5173`，所以 `dev:main` 必须和 Vite 一起用；先起 main、Vite 还在编译的话首帧会连不上，主进程会重试到服务就绪。
 
 ### 构建与打包
 
 ```bash
 npm run build:main   # tsc -p tsconfig.node.json → dist/src/main、dist/src/preload.js
-npm run build        # tsc -b + vite build → dist/renderer
-npm run electron:pack  # 免安装目录，产物在 release/win-unpacked
-npm run electron:dist  # NSIS 安装包 → release/Pulsar管理工具-安装包-<version>.exe
+npm run build        # 清 dist → tsc -b → build:main → vite build
+npm run electron:pack  # 先完整构建，再出免安装目录 release/win-unpacked
+npm run electron:dist  # 先完整构建，再出 NSIS 安装包 release/Pulsar管理工具-安装包-<version>.exe
 ```
+
+数据库结构以 `src/main/database/schema.ts` 里的常量存在，而不是外部 `.sql` 文件：tsc 不拷贝非 TS 资源，走文件读取的话安装包里的其实是某次手工复制进 `dist` 的旧基线，干净环境构建甚至直接找不到文件而启动失败。
 
 原生 `.node` 通过 `asarUnpack` 精确解包（better-sqlite3、pulsar-client 两个文件各自列出）。`npmRebuild` 保持 `false`，原生模块的 Electron ABI 适配由 `postinstall` 的 `install-app-deps` 在安装阶段一次完成——pulsar-client 走 N-API 跨 ABI 稳定，better-sqlite3 是 V8 ABI，必须按 Electron 头重建，缺了这一步打包态启动即崩。**开发态能跑不代表打包态能跑**，改过原生依赖后请在 `release/win-unpacked` 里启动验证一次。
 

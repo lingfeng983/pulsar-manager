@@ -4,13 +4,19 @@ import {registerIPCHandlers, cleanupDatabase} from './ipc/handlers';
 import {nativeClientManager} from './services/pulsar-native-client';
 import {loadTestManager} from './services/load-test';
 import {sshTunnelManager} from './services/ssh-tunnel';
+import {createLogger, setLogFileForMainProcess} from './utils/logger';
+
+// 日志文件路径要在任何 logger 调用之前定下来
+setLogFileForMainProcess(path.join(app.getPath('userData'), 'logs', 'main.log'));
+
+const log = createLogger('Main');
 
 process.on('uncaughtException', error => {
-    console.error('[Main] Uncaught Exception:', error);
+    log.error('Uncaught Exception', error instanceof Error ? `${error.message}\n${error.stack ?? ''}` : String(error));
 });
 
 process.on('unhandledRejection', reason => {
-    console.error('[Main] Unhandled Rejection:', reason);
+    log.error('Unhandled Rejection', reason instanceof Error ? reason.message : String(reason));
 });
 
 app.commandLine.appendSwitch('disable-features', 'AutofillServerCommunication');
@@ -19,7 +25,9 @@ app.commandLine.appendSwitch('autofill-server-url', '');
 // 内容安全策略：仅允许本地资源与本地 Vite dev server，禁止加载远程脚本。
 // dev 环境走 http，Vite HMR 需要 inline/eval；生产是打包后的静态资源，
 // 不含内联脚本也不用 eval，因此收紧到仅 'self'。
-const isDev = process.env.NODE_ENV === 'development';
+// 只看"是否已打包"，不看 NODE_ENV：环境变量在别人的机器上不可控，一旦有人
+// 全局导出 NODE_ENV=development，装好的应用会去 load 一个不存在的 5173 端口。
+const isDev = !app.isPackaged;
 const CSP_DIRECTIVES = [
     "default-src 'self'",
     isDev ? "script-src 'self' 'unsafe-inline' 'unsafe-eval'" : "script-src 'self'",
@@ -88,6 +96,20 @@ function createWindow() {
     if (isDev) {
         const vitePort = process.env.VITE_PORT || 5173;
         mainWindow.loadURL(`http://localhost:${vitePort}`);
+        // npm run dev 里 main 与 renderer 是同时拉起的，Vite 常常慢几百毫秒才监听，
+        // 首帧拿到 ERR_CONNECTION_REFUSED 后 Chromium 不会自己重试，窗口就一直空白。
+        let devRetries = 0;
+        mainWindow.webContents.on('did-fail-load', (_event, errorCode, _description, _url, isMainFrame) => {
+            if (!isMainFrame || errorCode !== -102 || devRetries >= 20) {
+                return;
+            }
+            devRetries += 1;
+            setTimeout(() => {
+                if (mainWindow && !mainWindow.isDestroyed()) {
+                    mainWindow.loadURL(`http://localhost:${vitePort}`);
+                }
+            }, 500);
+        });
         mainWindow.webContents.openDevTools();
     } else {
         mainWindow.loadFile(path.join(__dirname, '../../renderer/index.html'));
@@ -179,11 +201,21 @@ if (!gotTheLock) {
             });
         });
 
-        // 注册 IPC handlers（包括数据库初始化）
-        registerIPCHandlers();
-
-        createWindow();
-        createTray();
+        try {
+            // 注册 IPC handlers（包括数据库初始化）
+            registerIPCHandlers();
+            createWindow();
+            createTray();
+        } catch (error) {
+            // 数据库打不开（文件损坏、旧版本程序把 user_version 写得比本机更高）时
+            // 绝不能只往控制台打一行就退出：安装版没有控制台，用户的现象是
+            // 「双击图标没反应」，而且单实例锁已经拿到，再双击也不会重试。
+            const detail = error instanceof Error ? error.message : String(error);
+            console.error('[Main] Startup failed:', detail);
+            dialog.showErrorBox('Pulsar Manager 启动失败', `本地数据库初始化失败：\n${detail}`);
+            app.quit();
+            return;
+        }
 
         app.on('activate', () => {
             if (BrowserWindow.getAllWindows().length === 0) {

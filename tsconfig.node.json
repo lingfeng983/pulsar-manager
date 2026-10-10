@@ -8,6 +8,9 @@
     "strict": false,
     "noImplicitAny": false,
     "outDir": "dist",
+    // 不要在这里加 "rootDir": "src"：那会把产物从 dist/src/main/** 挪到
+    // dist/main/**，而 package.json 的 main 与主进程里 ../preload.js 的相对路径
+    // 都按前者写死，改了打包出来的应用直接起不来。
     "sourceMap": true,
     "esModuleInterop": true,
     "resolveJsonModule": true,

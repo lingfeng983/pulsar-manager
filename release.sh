@@ -55,7 +55,8 @@ npm run format:check >> "$LOG" 2>&1 || { tail -30 "$LOG"; die "格式检查失�
 # ---------- 2. 出包 ----------
 echo "==> [2/4] 构建 + electron-builder 打包（约 2-4 分钟，日志 $LOG）"
 rm -f release/*-安装包-*.exe release/*-安装包-*.exe.blockmap
-npm run build >> "$LOG" 2>&1 || { tail -40 "$LOG"; die "构建失败（完整日志 $LOG）"; }
+# electron:dist 自己会先跑 build（避免"改了源码却把上一代 dist 打进安装包"），
+# 这里不再重复构建一次
 npm run electron:dist >> "$LOG" 2>&1 || { tail -40 "$LOG"; die "打包失败（完整日志 $LOG）"; }
 [ -f "$EXE" ] || { tail -40 "$LOG"; die "打包结束但没找到 $EXE（electron-builder.json 的 artifactName 与脚本不一致？）"; }
 

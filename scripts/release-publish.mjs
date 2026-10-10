@@ -66,33 +66,52 @@ async function findRelease(tag) {
     }
 }
 
-function resolveArtifact(explicit) {
-    if (explicit) {
-        if (!fs.existsSync(explicit)) {
-            throw new Error(`找不到安装包：${explicit}`);
-        }
-        return explicit;
-    }
+function resolveArtifact(explicit, tag) {
     const dir = path.join(ROOT, 'release');
-    const candidates = fs.existsSync(dir)
-        ? fs
-              .readdirSync(dir)
-              .filter(name => name.endsWith('.exe'))
-              .map(name => path.join(dir, name))
-        : [];
-    if (candidates.length === 0) {
-        throw new Error('release/ 下没有 .exe，先跑 npm run electron:dist');
+    const chosen = (() => {
+        if (explicit) {
+            if (!fs.existsSync(explicit)) {
+                throw new Error(`找不到安装包：${explicit}`);
+            }
+            return explicit;
+        }
+        const candidates = fs.existsSync(dir)
+            ? fs
+                  .readdirSync(dir)
+                  .filter(name => name.endsWith('.exe'))
+                  .map(name => path.join(dir, name))
+            : [];
+        if (candidates.length === 0) {
+            throw new Error('release/ 下没有 .exe，先跑 npm run electron:dist');
+        }
+        return candidates.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
+    })();
+
+    // 单独运行时取的是「release/ 里最新的那个 exe」，文件名不带标签版本号就中止：
+    // 把 1.1.0 的包挂到 v1.2.0 标签上，等于给所有装了的机器推送一个内容对不上号
+    // 的"新版本"，而更新通道一旦污染就再也收不回来。
+    const version = tag.replace(/^v/, '');
+    const name = path.basename(chosen);
+    if (!name.includes(version)) {
+        throw new Error(`安装包文件名 ${name} 与标签 ${tag} 的版本号不符，拒绝发布`);
     }
-    return candidates.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
+    return chosen;
 }
 
 async function uploadAttachment(releaseId, artifact) {
     const name = path.basename(artifact);
+    const localSize = fs.statSync(artifact).size;
     const existing = (await api(`${API}/releases/${releaseId}/attach_files`)) || [];
     for (const item of existing) {
-        if (item.name === name) {
+        const itemName = item.name || '';
+        const itemShowName = item.show_name || '';
+        const isSame = itemName === name || itemShowName === name;
+        // 除同名之外，任何残留的 .exe 也一并删掉：应用内「检查更新」在一个发行版
+        // 里按"最大的那个 exe"挑安装包，留旧包在原地就会把旧版本发给用户。
+        const isStaleExe = itemName.toLowerCase().endsWith('.exe') || itemShowName.toLowerCase().endsWith('.exe');
+        if (isSame || isStaleExe) {
             await api(`${API}/releases/${releaseId}/attach_files/${item.id}`, {method: 'DELETE'});
-            console.log(`已删除同名旧附件 ${name}（id=${item.id}）`);
+            console.log(`已删除旧附件 ${itemName || itemShowName}（id=${item.id}）`);
         }
     }
     const form = new FormData();
@@ -104,6 +123,17 @@ async function uploadAttachment(releaseId, artifact) {
         body: form,
         multipart: true,
     });
+    // Gitee 附件有 100MB 硬上限，超限时它可能返回 2xx 却只收下截断后的内容；
+    // 不核对就完成发布会把坏包变成"最新发行版"，所有客户端都会下它。
+    if (Number(uploaded.size) !== localSize) {
+        throw new Error(`上传后 Gitee 记录 ${uploaded.size} 字节，与本地 ${localSize} 字节不符`);
+    }
+    const listed = ((await api(`${API}/releases/${releaseId}/attach_files`)) || []).find(
+        item => item.name === name || item.show_name === name,
+    );
+    if (!listed) {
+        throw new Error(`上传接口返回成功，但附件列表里没有 ${name}`);
+    }
     console.log(`已上传 ${uploaded.name}（${uploaded.size} 字节）`);
     console.log(`download=${uploaded.browser_download_url}`);
 }
@@ -115,7 +145,7 @@ async function main() {
     }
     const name = fs.readFileSync(titleFile, 'utf8').trim();
     const body = fs.readFileSync(bodyFile, 'utf8').trim();
-    const artifact = resolveArtifact(artifactArg);
+    const artifact = resolveArtifact(artifactArg, tag);
 
     const payload = JSON.stringify({
         access_token: readToken(),
