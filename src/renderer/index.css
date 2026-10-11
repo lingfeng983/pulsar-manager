@@ -99,7 +99,16 @@
 
 /* 全局字号档位（配置中心 → 界面 → 字号），由 store/settings.ts 写到 <html data-font-size>。
    large 就是上面 :root 的取值，因此不写 data-font-size 时（首帧）与默认档完全一致。
-   降档时梯度整体收窄，最小一档不再低于 10px，避免中文笔画糊成一团。 */
+   降档时梯度整体收窄，最小一档不再低于 10px，避免中文笔画糊成一团。
+   升档只到正文 15px：再往上首页表格五列就要横向滚动了。 */
+[data-font-size='xlarge'] {
+    --font-size-xs: 13px;
+    --font-size-sm: 14px;
+    --font-size-md: 15px;
+    --font-size-lg: 17px;
+    --font-size-xl: 20px;
+}
+
 [data-font-size='medium'] {
     --font-size-xs: 11px;
     --font-size-sm: 12px;
@@ -331,6 +340,29 @@ pre,
     margin-left: auto;
 }
 
+/* 没有标题时工具栏独占整行，把它撑满行宽，页面内部的"右端一组"（如首页的
+   视图切换 + 添加集群）才有-auto 空间可推；有标题时不撑，否则上面的靠右会失效。 */
+.page-header:not(:has(.page-heading)) .page-actions {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+/* 页头里的挂载点：首页拓扑把计数与图操作 portal 进来。
+   display:contents 让portal 的子节点直接成为工具栏这一行的弹性项，
+   否则它们会被套进一个盒子、跟着整块一起换行错位。 */
+.page-actions-slot {
+    display: contents;
+}
+
+/* 工具栏右端的一组：视图切换与主操作按钮靠行尾，筛选与图操作从行首排起 */
+.page-actions-right {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--spacing-xs);
+    align-items: center;
+    margin-left: auto;
+}
+
 /* 页面正文：卡片/区块之间的纵向节奏统一由 gap 提供，页面不再各写 margin。
    flex: 1 1 auto 让需要撑满高度的页面（Topic 详情的内层页签）拿到剩余空间，
    basis 取 auto 而非 0，正文比可用高度长时仍按内容撑开、由 .page-shell 滚动。 */
@@ -476,6 +508,25 @@ pre,
     flex-direction: column;
     flex: 1;
     min-height: 0;
+}
+
+/* 图表卡片：全屏时卡片被 :fullscreen 拉到整个视口，标题栏不参与拉伸，
+   卡体与里面的图各吃一层 flex，图才能既加宽又加高（原来只写死高度，全屏就只变宽）。 */
+.chart-card {
+    display: flex;
+    flex-direction: column;
+}
+
+.chart-card > .ant-card-head {
+    flex: none;
+}
+
+.chart-card > .ant-card-body {
+    flex: 1 1 auto;
+}
+
+.chart-card-fullscreen {
+    height: 100vh;
 }
 
 /* content-holder 是 display:block，antd 没给 .ant-tabs-content 定高，

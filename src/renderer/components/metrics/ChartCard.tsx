@@ -34,6 +34,9 @@ const ChartCard: React.FC<ChartCardProps> = ({
     const {ref, isFullscreen, toggle} = useFullscreen<HTMLDivElement>();
     useEchartsResize(ref, getChart);
 
+    // 全屏时不能再写死像素高：:fullscreen 给卡片的是整个视口，图只跟着宽铺、
+    // 高度还是 300px，看上去就是"只有长度增加、宽度没变"。改成让卡片当 flex 容器，
+    // 图吃满剩余高度，卡片尺寸一变 ResizeObserver 就调 chart.resize()。
     return (
         <Card
             ref={ref}
@@ -46,14 +49,16 @@ const ChartCard: React.FC<ChartCardProps> = ({
                     onClick={toggle}
                 />
             }
+            className={isFullscreen ? 'chart-card chart-card-fullscreen' : 'chart-card'}
+            styles={{body: {display: 'flex', flexDirection: 'column', minHeight: 0}}}
         >
             {isEmpty ? (
-                <StateBlock empty emptyText={emptyText} height={height} />
+                <StateBlock empty emptyText={emptyText} height={isFullscreen ? '100%' : height} />
             ) : (
                 <ReactECharts
                     ref={chartRef}
                     option={option}
-                    style={{height, width: '100%'}}
+                    style={isFullscreen ? {flex: '1 1 auto', minHeight: 0, width: '100%'} : {height, width: '100%'}}
                     onEvents={onEvents}
                     notMerge={notMerge}
                 />

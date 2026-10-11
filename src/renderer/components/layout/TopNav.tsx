@@ -392,23 +392,24 @@ const TopNav: React.FC = () => {
                 zIndex: 1000,
             }}
         >
-            {/* Logo 区域 */}
+            {/* Logo 区域：与右侧工具区同为 flex:1 1 0，两半等宽才能把搜索框顶在正中 */}
             <div
                 style={{
+                    flex: '1 1 0',
+                    minWidth: 0,
                     display: 'flex',
                     alignItems: 'center',
                     gap: 'var(--spacing-sm)',
                     fontWeight: 600,
                     fontSize: 'var(--font-size-lg)',
                     color: 'var(--color-primary)',
-                    minWidth: '170px',
                 }}
             >
                 <span style={{fontSize: 'var(--font-size-xl)'}}>⚡</span>
                 <span>Pulsar Manager</span>
             </div>
 
-            {/* 全局搜索框 */}
+            {/* 全局搜索框：宽度按窗口比例走，窗口拉大它就跟着变宽，不再固定 280px */}
             <AutoComplete
                 ref={searchRef}
                 prefix={<SearchOutlined />}
@@ -418,7 +419,9 @@ const TopNav: React.FC = () => {
                 onSelect={handleSearchSelect}
                 notFoundContent={searchLoading ? '搜索中...' : '未找到匹配结果'}
                 style={{
-                    width: '280px',
+                    // 26% 的上限是按最小窗口 1000px 算的：两侧工具区各自约 330px，
+                    // 搜索框再宽就要把右边的按钮挤出去。
+                    width: 'clamp(200px, 26%, 520px)',
                     borderRadius: 'var(--radius-md)',
                 }}
                 options={searchResults.map(result => ({
@@ -432,36 +435,36 @@ const TopNav: React.FC = () => {
                 }))}
             />
 
-            {/* 右侧工具区 */}
-            <div style={{flex: 1}} />
+            {/* 右侧工具区：与左侧同宽（flex 1 1 0），内容靠右排 */}
+            <div style={{flex: '1 1 0', minWidth: 0, display: 'flex', justifyContent: 'flex-end'}}>
+                <Space size={4}>
+                    {/* 快速压测 */}
+                    <Tooltip title="向指定 Topic 并发写入，实时看吞吐与发送确认延迟">
+                        <Button icon={<ThunderboltOutlined />} size="small" onClick={() => setBenchmarkOpen(true)}>
+                            快速压测
+                        </Button>
+                    </Tooltip>
 
-            <Space size={4}>
-                {/* 快速压测 */}
-                <Tooltip title="向指定 Topic 并发写入，实时看吞吐与发送确认延迟">
-                    <Button icon={<ThunderboltOutlined />} size="small" onClick={() => setBenchmarkOpen(true)}>
-                        快速压测
+                    {/* 日志导出 */}
+                    <Button icon={<ExportOutlined />} size="small" onClick={handleExportLogs}>
+                        导出日志
                     </Button>
-                </Tooltip>
 
-                {/* 日志导出 */}
-                <Button icon={<ExportOutlined />} size="small" onClick={handleExportLogs}>
-                    导出日志
-                </Button>
+                    {/* 主题切换 */}
+                    <Dropdown menu={themeMenu} trigger={['click']} placement="bottomRight">
+                        <Button size="small" icon={theme === 'dark' ? <MoonOutlined /> : <SunOutlined />}>
+                            主题
+                        </Button>
+                    </Dropdown>
 
-                {/* 主题切换 */}
-                <Dropdown menu={themeMenu} trigger={['click']} placement="bottomRight">
-                    <Button size="small" icon={theme === 'dark' ? <MoonOutlined /> : <SunOutlined />}>
-                        主题
-                    </Button>
-                </Dropdown>
-
-                {/* 设置菜单 */}
-                <Dropdown menu={settingMenu} trigger={['click']} placement="bottomRight">
-                    <Button icon={<SettingOutlined />} size="small">
-                        设置
-                    </Button>
-                </Dropdown>
-            </Space>
+                    {/* 设置菜单 */}
+                    <Dropdown menu={settingMenu} trigger={['click']} placement="bottomRight">
+                        <Button icon={<SettingOutlined />} size="small">
+                            设置
+                        </Button>
+                    </Dropdown>
+                </Space>
+            </div>
 
             {/* 关于弹窗 */}
             <Modal

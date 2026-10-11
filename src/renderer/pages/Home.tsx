@@ -5,6 +5,7 @@ import {useClusterStore} from '../store/cluster';
 import ClusterConfigModal from './ClusterConfig';
 import HomeTopology from '../components/HomeTopology';
 import PageShell from '../components/common/PageShell';
+import IconButton from '../components/common/IconButton';
 import StateBlock from '../components/common/StateBlock';
 import ErrorBanner from '../components/common/ErrorBanner';
 import {useConfirmDanger} from '../components/common/dangerConfirm';
@@ -27,6 +28,9 @@ const HomePage: React.FC = () => {
     const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
     const [modalOpen, setModalOpen] = useState(false);
     const [editingCluster, setEditingCluster] = useState<ClusterConfig | null>(null);
+    // 拓扑视图的计数与图操作要出现在页头这一行，但那些状态都在 HomeTopology 里，
+    // 所以页头留一个挂载点，由它 portal 进来（搬状态等于把整块拓扑逻辑上提一层）。
+    const [topoSlot, setTopoSlot] = useState<HTMLElement | null>(null);
 
     const {clusters, loading, error, fetchClusters, deleteClusterAsync, setActiveCluster, setExpandedCluster} =
         useClusterStore();
@@ -149,9 +153,9 @@ const HomePage: React.FC = () => {
         <PageShell
             actions={
                 <>
-                    {/* 列表视图才有的筛选：拓扑视图画的是全部集群，筛它没有对应对象 */}
-                    {viewMode === 'list' && (
+                    {viewMode === 'list' ? (
                         <>
+                            {/* 列表视图才有的筛选：拓扑视图画的是全部集群，筛它没有对应对象 */}
                             <Input
                                 allowClear
                                 aria-label="按集群名称或地址筛选"
@@ -167,22 +171,30 @@ const HomePage: React.FC = () => {
                                 options={STATUS_OPTIONS}
                                 style={{width: 100}}
                             />
+                            <IconButton
+                                icon={<ReloadOutlined />}
+                                label="刷新集群列表"
+                                loading={loading}
+                                onClick={() => void fetchClusters()}
+                            />
                         </>
+                    ) : (
+                        /* 拓扑视图：计数与放大缩小/刷新/全屏由 HomeTopology portal 进这个占位 */
+                        <span ref={setTopoSlot} className="page-actions-slot" />
                     )}
-                    <Button icon={<ReloadOutlined />} onClick={() => fetchClusters()} loading={loading}>
-                        刷新
-                    </Button>
-                    <Switch
-                        aria-label="切换列表视图与拓扑视图"
-                        checkedChildren={<AppstoreOutlined />}
-                        unCheckedChildren={<BarChartOutlined />}
-                        checked={viewMode === 'topology'}
-                        onChange={checked => setViewMode(checked ? 'topology' : 'list')}
-                    />
-                    <span className="hint-text">{viewMode === 'list' ? '列表视图' : '拓扑视图'}</span>
-                    <Button type="primary" icon={<PlusOutlined />} onClick={handleAddCluster}>
-                        添加集群
-                    </Button>
+                    <span className="page-actions-right">
+                        <Switch
+                            aria-label="切换列表视图与拓扑视图"
+                            checkedChildren={<AppstoreOutlined />}
+                            unCheckedChildren={<BarChartOutlined />}
+                            checked={viewMode === 'topology'}
+                            onChange={checked => setViewMode(checked ? 'topology' : 'list')}
+                        />
+                        <span className="hint-text">{viewMode === 'list' ? '列表视图' : '拓扑视图'}</span>
+                        <Button type="primary" icon={<PlusOutlined />} onClick={handleAddCluster}>
+                            添加集群
+                        </Button>
+                    </span>
                 </>
             }
         >
@@ -215,7 +227,7 @@ const HomePage: React.FC = () => {
                 </Card>
             ) : (
                 /* 拓扑视图 */
-                <HomeTopology />
+                <HomeTopology toolbarContainer={topoSlot} />
             )}
 
             {/* 集群配置弹窗 */}

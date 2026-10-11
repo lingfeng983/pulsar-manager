@@ -300,7 +300,7 @@ CREATE TABLE user_settings (
     updated_at TEXT NOT NULL
 );
 ```
-键值表，应用设置、主题、快捷键方案、已停用的插件都存这里。出厂默认行用 `INSERT OR IGNORE` 写入（`theme`、`truncateLength`、`autoRefresh`、`refreshIntervalSeconds`），改过的值不会被启动流程覆盖。
+键值表，应用设置、主题、快捷键方案、已停用的插件都存这里。出厂默认行用 `INSERT OR IGNORE` 写入（`theme`、`truncateLength`、`autoRefresh`、`refreshIntervalSeconds`、`fontSize`），改过的值不会被启动流程覆盖。
 
 ### 3.5 索引
 ```sql
@@ -389,7 +389,7 @@ Admin REST 没有发消息与 peek 的端点（真实 broker 上返回 HTML 404�
 | `config:import` | renderer → main | 校验并导入配置包，事务内完成，同名集群跳过 |
 | `config:clearLogs` | renderer → main | 清空 `operation_logs`，返回删除条数 |
 
-设置全部存在本机 SQLite 的 `user_settings` 键值表里，渲染层用 `useSettingsStore` 缓存一份并订阅变更：`MessageBrowser` 读截断长度，`MetricsDashboard` 读自动刷新与刷新间隔（单位为秒）。导出的配置包以 `format: 'pulsar-manager-config'` + `version: 1` 为标记，导入方先做本地体检再发往主进程。
+设置全部存在本机 SQLite 的 `user_settings` 键值表里，渲染层用 `useSettingsStore` 缓存一份并订阅变更：`App` 读字号档位（小 / 中 / 大 / 特大，写进 `<html data-font-size>` 并驱动 antd 字号族），`MessageBrowser` 读截断长度，`MetricsDashboard` 读自动刷新与刷新间隔（单位为秒）。导出的配置包以 `format: 'pulsar-manager-config'` + `version: 1` 为标记，导入方先做本地体检再发往主进程。
 
 ### 4.8 插件市场（`plugin-handlers.ts`）
 

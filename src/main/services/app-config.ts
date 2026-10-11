@@ -38,7 +38,7 @@ export const AppSettingsSchema = z.object({
     // 0 表示手动刷新，上限 10 分钟
     refreshIntervalSeconds: z.number().int().min(0).max(600),
     // 全局字号档位
-    fontSize: z.enum(['small', 'medium', 'large']),
+    fontSize: z.enum(['small', 'medium', 'large', 'xlarge']),
 });
 
 type AppSettingsField = keyof AppSettings;
@@ -68,7 +68,7 @@ export function readAppSettings(): AppSettings {
     for (const field of FIELDS) {
         const parsed = AppSettingsSchema.shape[field].safeParse(decodeField(field, getSetting(field)));
         if (parsed.success) {
-            // 三个字段各自的类型由 AppSettingsSchema 保证，这里只做同构赋值
+            // 各字段各自的类型由 AppSettingsSchema 保证，这里只做同构赋值
             (settings as unknown as Record<string, unknown>)[field] = parsed.data;
         }
     }

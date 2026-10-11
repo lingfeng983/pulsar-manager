@@ -1,5 +1,6 @@
 import React, {useEffect, useRef, useState, useCallback, useMemo} from 'react';
-import {Card, Space, Spin, Alert} from 'antd';
+import {createPortal} from 'react-dom';
+import {Card, Spin, Alert} from 'antd';
 import {ReloadOutlined, ZoomInOutlined, ZoomOutOutlined, FullscreenOutlined, CompressOutlined} from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
 import {useClusterStore} from '../store/cluster';
@@ -147,7 +148,7 @@ function buildTopologyFromData(clusterData: ClusterTopologyData[]): {
     return {nodes, edges};
 }
 
-const HomeTopology: React.FC = () => {
+const HomeTopology: React.FC<{toolbarContainer?: HTMLElement | null}> = ({toolbarContainer}) => {
     const [loading, setLoading] = useState(false);
     const [nodes, setNodes] = useState<TopologyGraphNode[]>([]);
     const [edges, setEdges] = useState<TopologyGraphEdge[]>([]);
@@ -183,7 +184,10 @@ const HomeTopology: React.FC = () => {
                 edges,
                 palette,
                 layout,
-                showLegend: false,
+                // 图例走 ECharts 自己的 legend：点一下就把那一类节点从图上摘掉，
+                // 之前那排静态色点什么都点不动。概览画不到分区与订阅，不列进图例。
+                showLegend: true,
+                legendTypes: ['cluster', 'broker', 'topic'],
                 fontScale,
                 canvasSize: {width: chartWidth, height: chartHeight},
             }),
@@ -337,98 +341,89 @@ const HomeTopology: React.FC = () => {
         );
     }
 
+    // 规模计数与图操作搬到页头那一行（列表视图那里放的是筛选框）：
+    // 卡片不再自带标题栏，整张卡就是图。
+    const toolbarNode = (
+        <>
+            <span className="summary-line">
+                <span>
+                    集群 <strong>{stats.clusters}</strong>
+                </span>
+                <span>
+                    Brokers <strong>{stats.brokers}</strong>
+                </span>
+                <span>
+                    Topics <strong>{stats.topics}</strong>
+                </span>
+            </span>
+            <IconButton size="small" icon={<ZoomOutOutlined />} label="缩小拓扑图" onClick={handleZoomOut} />
+            <IconButton size="small" icon={<ZoomInOutlined />} label="放大拓扑图" onClick={handleZoomIn} />
+            <IconButton
+                size="small"
+                icon={<ReloadOutlined />}
+                label="刷新拓扑图"
+                loading={loading}
+                onClick={() => void loadTopology()}
+            />
+            <IconButton
+                size="small"
+                icon={isFullscreen ? <CompressOutlined /> : <FullscreenOutlined />}
+                label={isFullscreen ? '退出全屏' : '全屏'}
+                onClick={toggleFullscreen}
+            />
+        </>
+    );
+
     return (
-        <Card
-            extra={
-                <Space size={4}>
-                    <IconButton size="small" icon={<ZoomOutOutlined />} label="缩小拓扑图" onClick={handleZoomOut} />
-                    <IconButton size="small" icon={<ZoomInOutlined />} label="放大拓扑图" onClick={handleZoomIn} />
-                    <IconButton
-                        size="small"
-                        icon={<ReloadOutlined />}
-                        label="刷新拓扑图"
-                        loading={loading}
-                        onClick={loadTopology}
-                    />
-                    <IconButton
-                        size="small"
-                        icon={isFullscreen ? <CompressOutlined /> : <FullscreenOutlined />}
-                        label={isFullscreen ? '退出全屏' : '全屏'}
-                        onClick={toggleFullscreen}
-                    />
-                </Space>
-            }
-            style={{flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column'}}
-            styles={{body: {flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden'}}}
-        >
-            <Spin spinning={loading} tip="正在加载拓扑数据..." wrapperClassName="chart-spin">
-                {/* 规模提示与图例同一行：色点与拓扑节点同形，底部那条图例块整个省掉，
-                    高度全部让给图 */}
-                <div className="summary-line">
-                    <span>
-                        集群 <strong>{stats.clusters}</strong>
-                    </span>
-                    <span>
-                        Brokers <strong>{stats.brokers}</strong>
-                    </span>
-                    <span>
-                        Topics <strong>{stats.topics}</strong>
-                    </span>
-                    <span className="legend-item" style={{marginLeft: 'auto'}}>
-                        <span className="legend-dot" style={{background: palette.primary}} aria-hidden />
-                        集群
-                    </span>
-                    <span className="legend-item">
-                        <span className="legend-dot" style={{background: palette.success}} aria-hidden />
-                        Broker
-                    </span>
-                    <span className="legend-item">
-                        <span className="legend-dot" style={{background: palette.warning}} aria-hidden />
-                        Topic
-                    </span>
-                </div>
+        <>
+            {toolbarContainer ? createPortal(toolbarNode, toolbarContainer) : null}
+            <Card
+                style={{flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column'}}
+                styles={{body: {flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden'}}}
+            >
+                <Spin spinning={loading} tip="正在加载拓扑数据..." wrapperClassName="chart-spin">
+                    {/* 错误提示 */}
+                    {error && (
+                        <Alert
+                            message={error}
+                            type="warning"
+                            showIcon
+                            closable
+                            onClose={() => setError(null)}
+                            style={{marginBottom: 'var(--spacing-sm)'}}
+                        />
+                    )}
 
-                {/* 错误提示 */}
-                {error && (
-                    <Alert
-                        message={error}
-                        type="warning"
-                        showIcon
-                        closable
-                        onClose={() => setError(null)}
-                        style={{marginBottom: 'var(--spacing-sm)'}}
-                    />
-                )}
-
-                {/* 拓扑图 */}
-                <div
-                    ref={chartRef}
-                    style={{
-                        flex: 1,
-                        minHeight: 300,
-                        display: 'flex',
-                        flexDirection: 'column',
-                        // zrender 写回的行内像素宽就是内容的最小宽度，flex 项的 min-width
-                        // 默认 auto，不清零就回不去，窗口变窄时图只能溢出而不是跟着缩。
-                        minWidth: 0,
-                        overflow: 'hidden',
-                    }}
-                >
-                    <div ref={measureChartArea} style={{flex: 1, minHeight: 0, minWidth: 0}}>
-                        {nodes.length > 0 && (
-                            <ReactECharts
-                                ref={echartsRef}
-                                option={chartOption}
-                                notMerge={false}
-                                style={{width: chartWidth || '100%', height: chartHeight || 300}}
-                                opts={{renderer: 'canvas'}}
-                                onEvents={{click: handleChartClick}}
-                            />
-                        )}
+                    {/* 拓扑图 */}
+                    <div
+                        ref={chartRef}
+                        style={{
+                            flex: 1,
+                            minHeight: 300,
+                            display: 'flex',
+                            flexDirection: 'column',
+                            // zrender 写回的行内像素宽就是内容的最小宽度，flex 项的 min-width
+                            // 默认 auto，不清零就回不去，窗口变窄时图只能溢出而不是跟着缩。
+                            minWidth: 0,
+                            overflow: 'hidden',
+                        }}
+                    >
+                        <div ref={measureChartArea} style={{flex: 1, minHeight: 0, minWidth: 0}}>
+                            {nodes.length > 0 && (
+                                <ReactECharts
+                                    ref={echartsRef}
+                                    option={chartOption}
+                                    notMerge={false}
+                                    style={{width: chartWidth || '100%', height: chartHeight || 300}}
+                                    opts={{renderer: 'canvas'}}
+                                    onEvents={{click: handleChartClick}}
+                                />
+                            )}
+                        </div>
                     </div>
-                </div>
-            </Spin>
-        </Card>
+                </Spin>
+            </Card>
+        </>
     );
 };
 

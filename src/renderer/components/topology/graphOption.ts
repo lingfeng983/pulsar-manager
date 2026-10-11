@@ -146,6 +146,11 @@ export function buildTopologyOption(params: {
     palette: TopologyPalette;
     layout: TopologyLayout;
     showLegend?: boolean;
+    /**
+     * 图例只列这些类型。首页概览画不到 Partition / Subscription，
+     * 全列出来就是两个点了没反应的死项。
+     */
+    legendTypes?: TopologyNodeType[];
     /** 全局字号档位相对默认档的比例（见 utils/fontScale）：canvas 文字不受 CSS 变量影响。 */
     fontScale?: number;
     /** 画在图内左上角的一行规模计数。传了就不再在图外加提示行。 */
@@ -153,7 +158,17 @@ export function buildTopologyOption(params: {
     /** 绘图区实际像素尺寸：力导的斥力与边长按它缩放，图才随容器铺满而不是缩在中间一团。 */
     canvasSize?: {width: number; height: number};
 }): EChartsOption {
-    const {nodes, edges, palette, layout, showLegend = true, fontScale = 1, summary, canvasSize} = params;
+    const {
+        nodes,
+        edges,
+        palette,
+        layout,
+        showLegend = true,
+        legendTypes = CATEGORY_ORDER,
+        fontScale = 1,
+        summary,
+        canvasSize,
+    } = params;
     const nodeById = new Map(nodes.map(node => [node.id, node]));
 
     // 分类表固定为完整类型表、不随数据增删：两张拓扑图都用合并式 setOption
@@ -278,7 +293,7 @@ export function buildTopologyOption(params: {
         },
         legend: showLegend
             ? {
-                  data: categories.map(category => category.name),
+                  data: legendTypes.map(type => NODE_TYPE_LABELS[type]),
                   top: 8,
                   // 靠左：规模计数画在同一行的右侧，居中会让两者在窄窗口下叠在一起
                   left: 8,

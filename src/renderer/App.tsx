@@ -3,7 +3,7 @@ import {ConfigProvider, theme as antTheme} from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import {applyTheme, loadPersistedTheme, useThemeStore} from './store/theme';
 import {loadAppSettings, useSettingsStore} from './store/settings';
-import {FONT_BASE_PX, fontFactor} from './utils/fontScale';
+import {ANTD_FONT_BASE_PX, antdFontFactor, antdFontTokens} from './utils/fontScale';
 import {loadPlugins} from './store/plugins';
 import Layout from './components/layout/Layout';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -17,7 +17,7 @@ loadPersistedTheme();
 loadAppSettings();
 loadPlugins();
 
-// 紧凑档基准：以 large 字号档（14px）为 1 倍，控件高度与内边距按字号档位同比缩放，
+// 紧凑档基准：以 large 字号档的 antd 基准文字（12px）为 1 倍，控件高度与内边距按字号档位同比缩放，
 // 否则切到"小"字号后仍然是原来那套 32px 高的按钮，视觉上只小了字没小了面。
 const DENSITY = {
     controlHeight: 28,
@@ -41,7 +41,16 @@ const App: React.FC = () => {
 
     // 根据主题设置 Ant Design 暗色模式
     const isDark = theme === 'dark';
-    const d = (value: number) => Math.round(value * fontFactor(fontSizeLevel));
+    const d = (value: number) => Math.round(value * antdFontFactor(fontSizeLevel));
+
+    // compactAlgorithm 在派生阶段把基准字号取成它自己算出的 fontSizeSM（各档都是 12px），
+    // 而 ConfigProvider 的 fontSize 只是喂给算法的种子，会被这一步整个覆盖掉，
+    // 所以字号档位过去只作用得到 DOM 文字、表格与按钮永远是一号。这里在它之后再套一层，
+    // 按当前档位把整族字号与行高补回去（大档补回的就是原来的 12px，默认观感不变）。
+    const compactWithFont: typeof antTheme.compactAlgorithm = (seed, derived) => ({
+        ...antTheme.compactAlgorithm(seed, derived),
+        ...antdFontTokens(ANTD_FONT_BASE_PX[fontSizeLevel]),
+    });
 
     return (
         <ConfigProvider
@@ -50,13 +59,11 @@ const App: React.FC = () => {
                 // compactAlgorithm 一次性下调 padding/margin 系列派生 token，
                 // 组件里再显式覆盖少数几处对版面影响最大的尺寸。
                 algorithm: isDark
-                    ? [antTheme.darkAlgorithm, antTheme.compactAlgorithm]
-                    : [antTheme.defaultAlgorithm, antTheme.compactAlgorithm],
+                    ? [antTheme.darkAlgorithm, compactWithFont]
+                    : [antTheme.defaultAlgorithm, compactWithFont],
                 token: {
                     colorPrimary: getComputedStyle(document.documentElement).getPropertyValue('--color-primary').trim(),
                     borderRadius: 4,
-                    // 字号档位：DOM 文字走 CSS 变量，antd 组件（表格、按钮、正文）走这个 token
-                    fontSize: FONT_BASE_PX[fontSizeLevel],
                     controlHeight: d(DENSITY.controlHeight),
                     controlHeightSM: d(DENSITY.controlHeightSM),
                     controlHeightLG: d(DENSITY.controlHeightLG),

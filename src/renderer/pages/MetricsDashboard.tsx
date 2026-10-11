@@ -13,6 +13,7 @@ import PageShell from '../components/common/PageShell';
 import StateBlock from '../components/common/StateBlock';
 import ErrorBanner from '../components/common/ErrorBanner';
 import ChartCard from '../components/metrics/ChartCard';
+import type {ClusterTopology} from '../types';
 
 const {RangePicker} = DatePicker;
 
@@ -71,6 +72,35 @@ const seriesTitle = (p: TopologyPalette, text: string, scale: number) => ({
     textStyle: {fontSize: Math.round(14 * scale), fontWeight: 500 as const, color: p.text},
 });
 
+// 轴类图表通用的缩放交互：滚轮贴着鼠标位置横向缩放、按住拖拽平移、右上角框选任意区域放大
+// （框选同时缩放横纵两轴）、选错了点"区域还原"、全乱了点"重置"。饼图没有坐标轴，用不上
+// 这套，所以只给折线与柱状用。
+const zoomControls = (p: TopologyPalette) => ({
+    dataZoom: [
+        {
+            type: 'inside' as const,
+            xAxisIndex: 0,
+            zoomOnMouseWheel: true,
+            moveOnMouseMove: true,
+            moveOnMouseWheel: false,
+        },
+    ],
+    toolbox: {
+        right: 8,
+        top: 4,
+        itemGap: 8,
+        iconStyle: {borderColor: p.label},
+        emphasis: {iconStyle: {borderColor: p.primary}},
+        feature: {
+            dataZoom: {
+                title: {zoom: '框选区域放大', back: '区域还原'},
+                yAxisIndex: 0,
+            },
+            restore: {title: '重置'},
+        },
+    },
+});
+
 // 时序折线图配置
 const createTimeSeriesOption = (
     title: string,
@@ -83,6 +113,7 @@ const createTimeSeriesOption = (
     const axes = seriesAxes(palette, scale);
     return {
         title: seriesTitle(palette, title, scale),
+        ...zoomControls(palette),
         tooltip: {
             trigger: 'axis',
             ...seriesTooltip(palette, scale),
@@ -125,6 +156,7 @@ const createThroughputBarOption = (
     palette: TopologyPalette,
     scale: number,
 ): EChartsOption => ({
+    ...zoomControls(palette),
     tooltip: {trigger: 'axis', ...seriesTooltip(palette, scale)},
     legend: {data: ['输入', '输出'], top: 0, textStyle: {color: palette.label, fontSize: Math.round(12 * scale)}},
     grid: {left: '3%', right: '4%', bottom: '3%', top: '40px', containLabel: true},
@@ -193,6 +225,16 @@ const createPieOption = (
 
 // clusterId 由工作区页签传入（`metrics-<clusterId>`）；不带则是资源树工具栏的
 // 全局监控页签，此时回落到自动选一个已连接集群。
+type TopologyTopic = ClusterTopology['topics'][number];
+
+// 同名 topic 可以出现在不同 namespace / 不同持久性下，选项值必须是全路径而不是名字。
+const topicKey = (t: TopologyTopic) =>
+    `${t.persistent ? 'persistent' : 'non-persistent'}/${t.tenant}/${t.namespace}/${t.name}`;
+
+// 拓扑结果里的 topic.name 已经是 tenant/ns/topic 全路径，而 resources:getTopicStats
+// 的入参校验只收短名（正则不含斜杠），所以取最后一段。
+const shortTopicName = (fullName: string) => fullName.split('/').pop() ?? fullName;
+
 const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
     const palette = useTopologyPalette();
     const fontScale = useFontFactor();
@@ -200,6 +242,13 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
     const [selectedCluster, setSelectedCluster] = useState<string>(clusterId ?? '');
     const [stats, setStats] = useState<AggregatedStats | null>(null);
     const [brokers, setBrokers] = useState<string[]>([]);
+    // 这一行的 brokers 是"该 topic 的归属"还是"集群活跃列表"：两种口径不能共用一个标签
+    const [brokersAreOwner, setBrokersAreOwner] = useState(false);
+    // 监控维度：不选 topic 就是集群总体（走聚合统计），选了就是单个 topic
+    // （走该 topic 的 /stats），四条曲线与四张卡跟着换口径。
+    const [topics, setTopics] = useState<TopologyTopic[]>([]);
+    const [topicsLoading, setTopicsLoading] = useState(false);
+    const [selectedTopic, setSelectedTopic] = useState('');
     // 刷新节奏是应用级设置（配置中心可改），页面上的选择器直接读写它：
     // 关掉自动刷新等价于选择"手动"，两处状态不会各说各话。
     const autoRefresh = useSettingsStore(state => state.settings.autoRefresh);
@@ -257,16 +306,114 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
         [],
     );
 
-    // 加载聚合统计
+    // 一次采样写入五条序列：集群维度与 topic 维度只是数值来源不同，历史窗口
+    // （60 个点）和单位都一样，所以两边共用这一份写入逻辑。
+    const pushSample = useCallback((sample: AggregatedStats) => {
+        const now = Date.now();
+        const maxPoints = 60;
+        const point = (value: number) => ({timestamp: now, value});
+        setMetricsHistory(prev => ({
+            msgRateIn: [...prev.msgRateIn, point(sample.totalMsgRateIn)].slice(-maxPoints),
+            msgRateOut: [...prev.msgRateOut, point(sample.totalMsgRateOut)].slice(-maxPoints),
+            throughputIn: [...prev.throughputIn, point(sample.totalThroughputIn)].slice(-maxPoints),
+            throughputOut: [...prev.throughputOut, point(sample.totalThroughputOut)].slice(-maxPoints),
+            backlog: [...prev.backlog, point(sample.totalBacklog)].slice(-maxPoints),
+        }));
+    }, []);
+
+    // topic 维度候选：一次拓扑请求就够，拓扑结果里每个 topic 都带着
+    // tenant/namespace/持久性，正好是取该 topic 统计所需的三元组，不必再逐层展开资源树。
+    useEffect(() => {
+        // 换集群时 topic 维度归零：上一个集群的 topic 名字在新集群里没有意义
+        setSelectedTopic('');
+        if (!selectedCluster) {
+            setTopics([]);
+            return;
+        }
+        let cancelled = false;
+        setTopicsLoading(true);
+        window.electronAPI.topology
+            .getClusterTopology(selectedCluster)
+            .then(response => {
+                if (cancelled) {
+                    return;
+                }
+                setTopicsLoading(false);
+                setTopics(response.success && response.data ? response.data.topics : []);
+            })
+            .catch(() => {
+                if (cancelled) {
+                    return;
+                }
+                setTopicsLoading(false);
+                setTopics([]);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [selectedCluster]);
+
+    // 加载当前维度的统计：选了整个集群就走聚合统计 + broker 列表，选了单个 topic 就走它的 /stats
     const loadAggregatedStats = useCallback(async () => {
         if (!selectedCluster) return;
 
         const requestId = ++loadRequestRef.current;
         const isStale = () => requestId !== loadRequestRef.current;
+        const topic = selectedTopic ? topics.find(t => topicKey(t) === selectedTopic) : undefined;
+        if (selectedTopic && !topic) {
+            // 刚切集群、topic 候选还没回来的那一帧：本轮跳过，别把上一个集群的同名 topic 采进来
+            return;
+        }
 
         setLoading(true);
         setError(null);
         try {
+            if (topic) {
+                const response = await window.electronAPI.resources.getTopicStats(
+                    selectedCluster,
+                    topic.tenant,
+                    topic.namespace,
+                    shortTopicName(topic.name),
+                    topic.persistent,
+                );
+                if (isStale()) {
+                    return;
+                }
+                if (response.success && response.data) {
+                    const s = response.data;
+                    const sample: AggregatedStats = {
+                        totalTopics: 1,
+                        totalPartitions: s.partitions.length,
+                        totalSubscriptions: Object.keys(s.subscriptions).length,
+                        totalProducers: s.producers.length,
+                        totalConsumers: s.consumers.length,
+                        totalMsgRateIn: s.msgRateIn,
+                        totalMsgRateOut: s.msgRateOut,
+                        totalThroughputIn: s.msgThroughputIn,
+                        totalThroughputOut: s.msgThroughputOut,
+                        totalBacklog: s.backlogSize,
+                    };
+                    setStats(sample);
+                    pushSample(sample);
+                    // 归属拿得到就报归属；归属不可用时退回集群活跃列表并照实标注，
+                    // 否则界面上一个"归属 Broker 0"会被读成这个 topic 没有 broker。
+                    if (s.ownerBrokers?.length) {
+                        setBrokers(s.ownerBrokers);
+                        setBrokersAreOwner(true);
+                    } else {
+                        const brokerList = await window.electronAPI.metrics.getBrokers(selectedCluster);
+                        if (isStale()) {
+                            return;
+                        }
+                        setBrokers(brokerList.success && brokerList.data ? brokerList.data.activeBrokers || [] : []);
+                        setBrokersAreOwner(false);
+                    }
+                } else {
+                    setError(response.error || `获取 Topic ${topic.name} 统计失败`);
+                }
+                return;
+            }
+
             // 获取聚合统计
             const statsResponse = await window.electronAPI.metrics.getAggregatedStats(selectedCluster);
             if (isStale()) {
@@ -274,33 +421,7 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
             }
             if (statsResponse.success && statsResponse.data) {
                 setStats(statsResponse.data);
-
-                // 添加到历史记录（多维度数据）
-                const now = Date.now();
-                setMetricsHistory(prev => {
-                    const maxPoints = 60;
-                    return {
-                        msgRateIn: [
-                            ...prev.msgRateIn,
-                            {timestamp: now, value: statsResponse.data!.totalMsgRateIn},
-                        ].slice(-maxPoints),
-                        msgRateOut: [
-                            ...prev.msgRateOut,
-                            {timestamp: now, value: statsResponse.data!.totalMsgRateOut},
-                        ].slice(-maxPoints),
-                        throughputIn: [
-                            ...prev.throughputIn,
-                            {timestamp: now, value: statsResponse.data!.totalThroughputIn},
-                        ].slice(-maxPoints),
-                        throughputOut: [
-                            ...prev.throughputOut,
-                            {timestamp: now, value: statsResponse.data!.totalThroughputOut},
-                        ].slice(-maxPoints),
-                        backlog: [...prev.backlog, {timestamp: now, value: statsResponse.data!.totalBacklog}].slice(
-                            -maxPoints,
-                        ),
-                    };
-                });
+                pushSample(statsResponse.data);
             } else {
                 setError(statsResponse.error || '获取统计数据失败');
             }
@@ -312,6 +433,7 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
             }
             if (brokersResponse.success && brokersResponse.data) {
                 setBrokers(brokersResponse.data.activeBrokers || []);
+                setBrokersAreOwner(false);
             } else if (!brokersResponse.success) {
                 // 只写 console 的话界面上的"活跃 Brokers 0 个"看起来像集群真的没有 broker
                 setError(brokersResponse.error || '获取 Broker 信息失败');
@@ -327,18 +449,19 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                 setLoading(false);
             }
         }
-    }, [selectedCluster]);
+    }, [selectedCluster, selectedTopic, topics, pushSample]);
 
-    // 切换集群：作废在途请求并清空上一个集群的统计、历史与峰值
+    // 切换集群或 topic：作废在途请求并清空上一个维度的统计、历史与峰值
     useEffect(() => {
         loadRequestRef.current += 1;
         setStats(null);
         setBrokers([]);
+        setBrokersAreOwner(false);
         setMetricsHistory(EMPTY_HISTORY);
         setPeakMsgRate(0);
         setError(null);
         setLoading(false);
-    }, [selectedCluster]);
+    }, [selectedCluster, selectedTopic]);
 
     useCommand('refreshMetrics', () => {
         void loadAggregatedStats();
@@ -367,6 +490,10 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
     }, [selectedCluster, loadAggregatedStats, refreshInterval, hasConnectedCluster, paneActive]);
 
     // 使用 useMemo 缓存图表配置
+    const currentTopic = useMemo(() => topics.find(t => topicKey(t) === selectedTopic), [topics, selectedTopic]);
+    // 图上标出当前口径，否则切到某个 topic 后四条曲线看着和集群总体一模一样
+    const scopeSuffix = currentTopic ? ` · ${currentTopic.name}` : '';
+
     const msgRateInChartOption = useMemo(() => {
         const filteredData = filterMetricsByDateRange(metricsHistory.msgRateIn, dateRange);
         return createTimeSeriesOption('', filteredData, palette.primary, palette, 'msg/s', fontScale);
@@ -405,18 +532,26 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
     // 资源分布数据
     const resourceData = useMemo(() => {
         if (!stats) return [];
-        return [
-            {name: 'Topics', value: stats.totalTopics},
-            {name: 'Subscriptions', value: stats.totalSubscriptions},
-            {name: 'Producers', value: stats.totalProducers},
-            {name: 'Consumers', value: stats.totalConsumers},
-        ];
-    }, [stats]);
+        // topic 维度下 "Topics=1" 混在饼里就是一块没有意义的 1，换成该 topic 自己的构成
+        return selectedTopic
+            ? [
+                  {name: '分区', value: stats.totalPartitions},
+                  {name: 'Subscriptions', value: stats.totalSubscriptions},
+                  {name: 'Producers', value: stats.totalProducers},
+                  {name: 'Consumers', value: stats.totalConsumers},
+              ]
+            : [
+                  {name: 'Topics', value: stats.totalTopics},
+                  {name: 'Subscriptions', value: stats.totalSubscriptions},
+                  {name: 'Producers', value: stats.totalProducers},
+                  {name: 'Consumers', value: stats.totalConsumers},
+              ];
+    }, [stats, selectedTopic]);
 
     // 资源分布饼图配置
     const resourceChartOption = useMemo(
-        () => createPieOption(resourceData, '集群资源', palette, fontScale),
-        [resourceData, palette, fontScale],
+        () => createPieOption(resourceData, selectedTopic ? 'Topic 资源' : '集群资源', palette, fontScale),
+        [resourceData, selectedTopic, palette, fontScale],
     );
 
     // 保留窗口的起点：只存 60 个采样点，更早的时间在图上永远不会有数据。
@@ -442,6 +577,20 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                         placeholder="选择集群"
                         disabled={!!clusterId}
                         options={clusters.map(c => ({label: c.name, value: c.id}))}
+                    />
+                    <Select
+                        aria-label="监控维度"
+                        value={selectedTopic}
+                        onChange={setSelectedTopic}
+                        style={{width: 220}}
+                        loading={topicsLoading}
+                        showSearch
+                        optionFilterProp="label"
+                        placeholder="监控维度"
+                        options={[
+                            {value: '', label: '集群总体'},
+                            ...topics.map(t => ({value: topicKey(t), label: `${t.name}（${t.namespace}）`})),
+                        ]}
                     />
                     <RangePicker
                         value={dateRange}
@@ -494,12 +643,16 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                     <Col span={6}>
                         <Card>
                             <Statistic
-                                title="总 Topics"
-                                value={stats?.totalTopics || 0}
-                                suffix="个"
+                                title={selectedTopic ? '分区数' : '总 Topics'}
+                                value={selectedTopic ? stats?.totalPartitions || 0 : stats?.totalTopics || 0}
+                                suffix={selectedTopic ? '个' : '个'}
                                 valueStyle={{color: 'var(--color-primary)'}}
                             />
-                            <div className="stat-subline">分区: {stats?.totalPartitions || 0}</div>
+                            <div className="stat-subline">
+                                {selectedTopic
+                                    ? `订阅: ${stats?.totalSubscriptions || 0}`
+                                    : `分区: ${stats?.totalPartitions || 0}`}
+                            </div>
                         </Card>
                     </Col>
                     <Col span={6}>
@@ -562,7 +715,7 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                 {/* Broker 与连接计数：三张统计卡说的就是三个数字，收进一行把高度留给趋势图 */}
                 <div className="summary-line">
                     <span>
-                        活跃 Brokers <strong>{brokers.length}</strong>
+                        {brokersAreOwner ? '归属 Broker' : '活跃 Brokers'} <strong>{brokers.length}</strong>
                     </span>
                     {brokers.map((broker, idx) => (
                         <span key={idx} className="mono">
@@ -581,7 +734,7 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                 <Row gutter={[12, 12]}>
                     <Col span={12}>
                         <ChartCard
-                            title="消息输入速率趋势"
+                            title={`消息输入速率趋势${scopeSuffix}`}
                             option={msgRateInChartOption}
                             isEmpty={metricsHistory.msgRateIn.length === 0}
                             emptyText="暂无监控数据，请等待数据采集"
@@ -589,7 +742,7 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                     </Col>
                     <Col span={12}>
                         <ChartCard
-                            title="消息输出速率趋势"
+                            title={`消息输出速率趋势${scopeSuffix}`}
                             option={msgRateOutChartOption}
                             isEmpty={metricsHistory.msgRateOut.length === 0}
                             emptyText="暂无监控数据，请等待数据采集"
@@ -601,7 +754,7 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                 <Row gutter={[12, 12]}>
                     <Col span={12}>
                         <ChartCard
-                            title="吞吐量对比"
+                            title={`吞吐量对比${scopeSuffix}`}
                             option={throughputChartOption}
                             isEmpty={metricsHistory.throughputIn.length === 0}
                             emptyText="暂无监控数据，请等待数据采集"

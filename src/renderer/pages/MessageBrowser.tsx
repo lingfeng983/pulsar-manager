@@ -731,8 +731,11 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
 
     return (
         <div className="stack">
-            <Card>
-                <Space wrap size="small" style={{width: '100%', justifyContent: 'space-between'}}>
+            {/* 一个整体：模式切换、该模式的参数区、结果区全在同一张卡里。
+                原先是「工具栏卡 + 结果卡」两张，切换发送/消费/读取时两张卡各自长高、
+                各自换内容，界面上就是所有东西分头跳一次。 */}
+            <Card
+                title={
                     <Segmented
                         value={mode}
                         onChange={value => setMode(value as PanelMode)}
@@ -742,7 +745,9 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                             {value: 'read', label: 'Reader 读取'},
                         ]}
                     />
-                    {mode !== 'send' && (
+                }
+                extra={
+                    mode === 'send' ? undefined : (
                         <Space wrap size="small">
                             <Button
                                 type={isRunning ? 'default' : 'primary'}
@@ -754,25 +759,38 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                                 {isRunning ? '停止' : '开始'}
                             </Button>
                             {mode === 'consume' && (
-                                <Space size={4}>
-                                    <Button
-                                        size="small"
-                                        type="text"
-                                        icon={<ReloadOutlined spin={backlogLoading} />}
-                                        onClick={refreshBacklog}
-                                    >
-                                        积压:{' '}
-                                        {backlog
-                                            ? `${backlog.messageCount} 条 / ${formatBytes(backlog.sizeInBytes)}`
-                                            : '-'}
-                                    </Button>
-                                </Space>
+                                <Button
+                                    size="small"
+                                    type="text"
+                                    icon={<ReloadOutlined spin={backlogLoading} />}
+                                    onClick={refreshBacklog}
+                                >
+                                    积压:{' '}
+                                    {backlog ? `${backlog.messageCount} 条 / ${formatBytes(backlog.sizeInBytes)}` : '-'}
+                                </Button>
                             )}
+                            <Dropdown.Button
+                                size="small"
+                                icon={<DownOutlined />}
+                                onClick={() => handleExportMessages('json')}
+                                menu={{
+                                    items: [
+                                        {key: 'json', label: '导出 JSON'},
+                                        {key: 'csv', label: '导出 CSV'},
+                                    ],
+                                    onClick: ({key}) => handleExportMessages(key as 'json' | 'csv'),
+                                }}
+                                loading={exportLoading}
+                                disabled={messages.length === 0}
+                            >
+                                <DownloadOutlined /> 导出
+                            </Dropdown.Button>
                         </Space>
-                    )}
-                </Space>
+                    )
+                }
+            >
                 {mode !== 'send' && (
-                    <div style={{marginTop: 'var(--spacing-md)'}}>
+                    <div style={{marginBottom: 'var(--spacing-sm)'}}>
                         {streamControls}
                         {mode === 'consume' && !autoAck && (
                             <div className="hint-text" style={{marginTop: 'var(--spacing-sm)'}}>
@@ -781,50 +799,35 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                         )}
                     </div>
                 )}
-            </Card>
 
-            <ErrorBanner error={error} title="操作失败" onClose={() => setError(null)} />
+                <ErrorBanner error={error} title="操作失败" onClose={() => setError(null)} />
 
-            {mode === 'send' ? (
-                <Card title="发送消息">{sendPanel}</Card>
-            ) : (
-                <Card
-                    title={`消息列表 - ${messages.length} 条${isRunning ? '（实时推送中）' : ''}`}
-                    extra={
-                        <Dropdown.Button
-                            size="small"
-                            icon={<DownOutlined />}
-                            onClick={() => handleExportMessages('json')}
-                            menu={{
-                                items: [
-                                    {key: 'json', label: '导出 JSON'},
-                                    {key: 'csv', label: '导出 CSV'},
-                                ],
-                                onClick: ({key}) => handleExportMessages(key as 'json' | 'csv'),
-                            }}
-                            loading={exportLoading}
-                            disabled={messages.length === 0}
+                {mode === 'send' ? (
+                    sendPanel
+                ) : (
+                    <>
+                        <div className="summary-line">
+                            <span>
+                                消息列表 <strong>{messages.length}</strong> 条{isRunning && '（实时推送中）'}
+                            </span>
+                        </div>
+                        <StateBlock
+                            empty={messages.length === 0}
+                            emptyText={isRunning ? '等待消息...' : '点击「开始」接收消息'}
+                            height={160}
                         >
-                            <DownloadOutlined /> 导出
-                        </Dropdown.Button>
-                    }
-                >
-                    <StateBlock
-                        empty={messages.length === 0}
-                        emptyText={isRunning ? '等待消息...' : '点击「开始」接收消息'}
-                        height={160}
-                    >
-                        <Table
-                            dataSource={messages}
-                            columns={columns}
-                            rowKey={(record, index) => `${record.messageId}-${index}`}
-                            pagination={false}
-                            size="small"
-                            scroll={{x: 'max-content'}}
-                        />
-                    </StateBlock>
-                </Card>
-            )}
+                            <Table
+                                dataSource={messages}
+                                columns={columns}
+                                rowKey={(record, index) => `${record.messageId}-${index}`}
+                                pagination={false}
+                                size="small"
+                                scroll={{x: 'max-content'}}
+                            />
+                        </StateBlock>
+                    </>
+                )}
+            </Card>
 
             <Modal
                 title="消息详情"
