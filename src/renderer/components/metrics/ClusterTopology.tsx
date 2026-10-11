@@ -1,5 +1,5 @@
 import React, {useEffect, useRef, useState, useCallback, useMemo} from 'react';
-import {Card, Button, Space, Select, Spin, message, Statistic, Row, Col, Input, Switch, Alert, Tooltip} from 'antd';
+import {Card, Button, Space, Select, Spin, message, Input, Switch, Alert, Tooltip} from 'antd';
 import {
     ReloadOutlined,
     ZoomInOutlined,
@@ -7,9 +7,6 @@ import {
     UndoOutlined,
     FullscreenOutlined,
     CompressOutlined,
-    DatabaseOutlined,
-    MessageOutlined,
-    BranchesOutlined,
 } from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
 import type {EChartsOption} from 'echarts';
@@ -23,6 +20,7 @@ import {useEchartsResize, zoomGraph, resetGraphView} from '../../hooks/useEchart
 import {useElementSize} from '../../hooks/useElementSize';
 import {useCommand} from '../../hooks/useKeybindings';
 import {useTopologyPalette} from '../../utils/topologyColors';
+import {useFontFactor} from '../../utils/fontScale';
 import PageShell from '../common/PageShell';
 import StateBlock from '../common/StateBlock';
 import IconButton from '../common/IconButton';
@@ -68,6 +66,7 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
     // 拓扑请求代次：切换集群后旧请求的晚到响应必须作废
     const topologyRequestRef = useRef(0);
     const palette = useTopologyPalette();
+    const fontScale = useFontFactor();
     const {addTab} = useTabStore();
     // zrender 会把量到的高度写成行内像素并钉住容器，所以尺寸由外层容器量出来反喂给图表。
     const {ref: chartAreaRef, width: chartWidth, height: chartHeight} = useElementSize<HTMLDivElement>();
@@ -242,8 +241,8 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
     );
 
     const chartOption: EChartsOption = useMemo(
-        () => buildTopologyOption({nodes: visibleNodes, edges: visibleEdges, palette, layout}),
-        [visibleNodes, visibleEdges, palette, layout],
+        () => buildTopologyOption({nodes: visibleNodes, edges: visibleEdges, palette, layout, fontScale}),
+        [visibleNodes, visibleEdges, palette, layout, fontScale],
     );
 
     // 节点点击：topic / partition 直接开详情页，之前只 console.log 等于没有交互。
@@ -310,14 +309,6 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
     return (
         <PageShell
             rootRef={chartContainerRef}
-            title={
-                initialClusterId ? `${clusters.find(c => c.id === initialClusterId)?.name || '集群'}拓扑` : '集群拓扑'
-            }
-            subtitle={
-                visibleNodes.length > 0
-                    ? `节点: ${visibleNodes.length}/${rawNodes.length} · 连接: ${visibleEdges.length}`
-                    : undefined
-            }
             style={{
                 overflow: 'hidden',
                 backgroundColor: isFullscreen ? palette.surface : undefined,
@@ -332,10 +323,22 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
                             onChange={value => {
                                 setSelectedClusterId(value);
                             }}
-                            style={{width: 160}}
+                            style={{width: 150}}
                             placeholder="选择集群"
                             options={clusters.map((c: ClusterConfig) => ({
-                                label: `${c.name} ${c.status === 'connected' ? '(在线)' : '(离线)'}`,
+                                // 色点就是状态，"(在线)/(离线)" 与它说的是同一件事，
+                                // 还会把名字挤到截断
+                                label: (
+                                    <Space size={4}>
+                                        <span
+                                            className={`tree-status tree-status-${c.status ?? 'disconnected'}`}
+                                            aria-hidden
+                                        >
+                                            <span className="tree-status-dot" />
+                                        </span>
+                                        <span>{c.name}</span>
+                                    </Space>
+                                ),
                                 value: c.id,
                             }))}
                         />
@@ -345,7 +348,7 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
                         mode="multiple"
                         value={visibleTypes}
                         onChange={value => setVisibleTypes(value)}
-                        style={{minWidth: 200}}
+                        style={{minWidth: 180, maxWidth: 240}}
                         placeholder="节点类型"
                         maxTagCount="responsive"
                         options={ALL_NODE_TYPES.filter(type => type !== 'cluster').map(type => ({
@@ -357,7 +360,7 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
                         allowClear
                         aria-label="按名称或租户筛选节点"
                         placeholder="按名称/租户筛选"
-                        style={{width: 180}}
+                        style={{width: 160}}
                         onSearch={value => setQuery(value)}
                         onChange={event => {
                             if (!event.target.value) {
@@ -369,7 +372,7 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
                         aria-label="拓扑布局"
                         value={layout}
                         onChange={value => setLayout(value)}
-                        style={{width: 170}}
+                        style={{width: 100}}
                         options={LAYOUT_OPTIONS}
                     />
                     <Tooltip title={`分区节点上限 ${MAX_PARTITION_NODES}`}>
@@ -397,52 +400,37 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
                 </>
             }
         >
-            {/* 统计概览 */}
-            <Row gutter={[16, 16]}>
-                <Col span={6}>
-                    <Card>
-                        <Statistic
-                            title="Brokers"
-                            value={stats.brokers}
-                            prefix={<DatabaseOutlined />}
-                            valueStyle={{color: palette.success}}
-                        />
-                    </Card>
-                </Col>
-                <Col span={6}>
-                    <Card>
-                        <Statistic
-                            title="Topics"
-                            value={stats.topics}
-                            prefix={<MessageOutlined />}
-                            valueStyle={{color: palette.warning}}
-                        />
-                    </Card>
-                </Col>
-                <Col span={6}>
-                    <Card>
-                        <Statistic
-                            title="Subscriptions"
-                            value={stats.subscriptions}
-                            prefix={<BranchesOutlined />}
-                            valueStyle={{color: palette.danger}}
-                        />
-                    </Card>
-                </Col>
-                <Col span={6}>
-                    <Card>
-                        <Statistic
-                            title="Partitions"
-                            value={stats.partitions}
-                            prefix={<BranchesOutlined />}
-                            valueStyle={{color: palette.edge}}
-                        />
-                    </Card>
-                </Col>
-            </Row>
+            {/* 规模提示：一行文字点到为止，不再占一整排统计卡（卡片高度会把图挤到半屏） */}
+            <div className="summary-line">
+                <span>
+                    Brokers <strong>{stats.brokers}</strong>
+                </span>
+                <span>
+                    Topics <strong>{stats.topics}</strong>
+                </span>
+                <span>
+                    Subscriptions <strong>{stats.subscriptions}</strong>
+                </span>
+                <span>
+                    分区 <strong>{stats.partitions}</strong>
+                </span>
+                {rawNodes.length > 0 && (
+                    <span>
+                        节点{' '}
+                        <strong>
+                            {visibleNodes.length}/{rawNodes.length}
+                        </strong>
+                    </span>
+                )}
+                {rawNodes.length > 0 && (
+                    <span>
+                        连接 <strong>{visibleEdges.length}</strong>
+                    </span>
+                )}
+            </div>
 
             {ownershipAlert && (
-                <Alert type="warning" showIcon closable message="Topic 归属信息受限" description={ownershipAlert} />
+                <Alert type="warning" showIcon closable message={`Topic 归属信息受限：${ownershipAlert}`} />
             )}
             {truncatedPartitions && (
                 <Alert

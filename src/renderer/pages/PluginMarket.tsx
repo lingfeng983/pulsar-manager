@@ -166,7 +166,7 @@ const PluginMarket: React.FC = () => {
                                 <Text strong>{preset.name}</Text>
                                 {preset.description ? <Text type="secondary"> — {preset.description}</Text> : null}
                                 <div>
-                                    <Text code style={{fontSize: 12}}>
+                                    <Text code style={{fontSize: 'var(--font-size-xs)'}}>
                                         {preset.params.producers} 生产者 / {preset.params.totalMessages} 条 /{' '}
                                         {preset.params.messageSizeBytes} B /{' '}
                                         {preset.params.ratePerSecond > 0
@@ -194,7 +194,7 @@ const PluginMarket: React.FC = () => {
                                 <Text strong>{template.name}</Text>
                                 {template.description ? <Text type="secondary"> — {template.description}</Text> : null}
                                 <div>
-                                    <Text code style={{fontSize: 12}}>
+                                    <Text code style={{fontSize: 'var(--font-size-xs)'}}>
                                         {template.persistent ? 'persistent' : 'non-persistent'} /{' '}
                                         {template.partitions > 0 ? `${template.partitions} 分区` : '非分区'}
                                         {template.namePrefix ? ` / 前缀 ${template.namePrefix}` : ''}
@@ -212,10 +212,7 @@ const PluginMarket: React.FC = () => {
     };
 
     return (
-        <PageShell
-            title="插件市场"
-            subtitle="插件是本地声明式扩展，只贡献数据（压测预设、Topic 创建模板），应用不会加载或执行插件携带的任何代码。"
-        >
+        <PageShell subtitle="插件是本地声明式扩展，只贡献数据（压测预设、Topic 创建模板），应用不会加载或执行插件携带的任何代码。">
             {errors.length > 0 && (
                 <Alert
                     type="warning"
@@ -234,7 +231,7 @@ const PluginMarket: React.FC = () => {
             )}
 
             <Card size="small">
-                <Space wrap size="middle">
+                <Space wrap size="small">
                     <Input.Search
                         aria-label="搜索插件"
                         placeholder="搜索插件名 / 描述"
@@ -300,7 +297,7 @@ const PluginMarket: React.FC = () => {
                     ) : undefined
                 }
             >
-                <Row gutter={[16, 16]}>
+                <Row gutter={[12, 12]}>
                     {visible.map(plugin => (
                         <Col key={plugin.id} xs={24} lg={12} xxl={8}>
                             <Card

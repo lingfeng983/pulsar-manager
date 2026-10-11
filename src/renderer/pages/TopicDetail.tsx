@@ -439,7 +439,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
             title: '操作',
             key: 'action',
             render: (_: any, record: SubscriptionTableItem) => (
-                <Space>
+                <Space size={4}>
                     <Button type="link" size="small" onClick={() => handleResetCursor(record.name)}>
                         重置游标
                     </Button>
@@ -549,7 +549,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
         >
             {/* 顶部指标卡片 */}
             <Card>
-                <Row gutter={[16, 16]}>
+                <Row gutter={[12, 12]}>
                     <Col span={6}>
                         <Statistic
                             title="消息输入速率"
@@ -617,7 +617,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                                 {stats ? (
                                     <div className="stack">
                                         <Card title="存储信息">
-                                            <Row gutter={[16, 16]}>
+                                            <Row gutter={[12, 12]}>
                                                 <Col span={8}>
                                                     <div className="hint-text">总存储大小</div>
                                                     <p className="metric-value">{formatBytes(stats.storageSize)}</p>
@@ -742,7 +742,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                                             {persistent ? '是' : '否'}
                                         </span>
                                     </div>
-                                    <Space>
+                                    <Space size={4}>
                                         <Button
                                             icon={<EditOutlined />}
                                             loading={configLoading}
@@ -958,7 +958,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                             padding: 'var(--spacing-sm) var(--spacing-md)',
                             background: 'var(--color-bg-secondary)',
                             borderRadius: 'var(--radius-md)',
-                            fontSize: 12,
+                            fontSize: 'var(--font-size-xs)',
                             lineHeight: 1.9,
                         }}
                     >

@@ -285,7 +285,7 @@ const BenchmarkModal: React.FC<BenchmarkModalProps> = ({open, onClose}) => {
             onCancel={onClose}
             width={860}
             footer={
-                <Space>
+                <Space size={4}>
                     <Button onClick={onClose}>关闭</Button>
                     {running ? (
                         <Button danger loading={stopping} onClick={() => void handleStop()}>

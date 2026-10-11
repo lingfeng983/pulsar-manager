@@ -54,10 +54,21 @@ interface ResourceTreeNode extends DataNode {
 const SIDEBAR_MIN_WIDTH = 160;
 const SIDEBAR_MAX_WIDTH = 640;
 const SIDEBAR_WIDTH_KEY = 'pulsar-manager.sidebar-width';
+// 折叠态只放一个图标按钮
+const SIDEBAR_COLLAPSED_WIDTH = 40;
 // 节点菜单最长的一支（集群：查看/拓扑/监控/分隔/新建租户/分隔/删除）用于定位时估算高度
 const MAX_MENU_ITEMS = 7;
 
 const clampSidebarWidth = (w: number) => Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, w));
+
+// 状态色点已经表达了在线/警告/离线，文字只留给悬停提示与读屏
+const CLUSTER_STATUS_LABEL: Record<string, string> = {
+    connected: '在线',
+    warning: '警告',
+    disconnected: '离线',
+};
+
+const clusterStatusLabel = (status?: string) => CLUSTER_STATUS_LABEL[status ?? ''] ?? '未知';
 
 /** 该节点是否已在当前树中（即其父分支展开过）。 */
 function containsNodeKey(nodes: DataNode[], key: React.Key): boolean {
@@ -113,22 +124,29 @@ const ResourceTree: React.FC = () => {
 
     // 将集群转换为树节点
     const clusterToTreeData = useMemo(() => {
-        return clusters.map(cluster => ({
-            title: (
-                <Space>
-                    <ClusterOutlined style={{color: 'var(--color-primary)'}} />
-                    <span>{cluster.name}</span>
-                    <span className={`tree-status tree-status-${cluster.status ?? 'disconnected'}`}>
-                        <span className="tree-status-dot" aria-hidden />
-                        {cluster.status === 'connected' ? '在线' : cluster.status === 'warning' ? '警告' : '离线'}
-                    </span>
-                </Space>
-            ),
-            key: `cluster-${cluster.id}`,
-            dataRef: {type: 'cluster' as const, clusterId: cluster.id, cluster},
-            children: [],
-            isLeaf: false,
-        }));
+        return clusters.map(cluster => {
+            const label = clusterStatusLabel(cluster.status);
+            return {
+                title: (
+                    <Space size={4}>
+                        <ClusterOutlined style={{color: 'var(--color-primary)'}} />
+                        <span>{cluster.name}</span>
+                        <span
+                            className={`tree-status tree-status-${cluster.status ?? 'disconnected'}`}
+                            role="img"
+                            aria-label={`集群状态：${label}`}
+                            title={label}
+                        >
+                            <span className="tree-status-dot" aria-hidden />
+                        </span>
+                    </Space>
+                ),
+                key: `cluster-${cluster.id}`,
+                dataRef: {type: 'cluster' as const, clusterId: cluster.id, cluster},
+                children: [],
+                isLeaf: false,
+            };
+        });
     }, [clusters]);
 
     // 加载指定节点的子节点（带缓存）。失败返回 null —— 调用方据此保留原有子树，
@@ -144,7 +162,7 @@ const ResourceTree: React.FC = () => {
                 const tenants = await loadTenants(clusterId);
                 return tenants.map((t: Tenant) => ({
                     title: (
-                        <Space>
+                        <Space size={4}>
                             <FolderOutlined />
                             <span>{t.name}</span>
                         </Space>
@@ -158,7 +176,7 @@ const ResourceTree: React.FC = () => {
                 const namespaces = await loadNamespaces(clusterId, tenant);
                 return namespaces.map((ns: string) => ({
                     title: (
-                        <Space>
+                        <Space size={4}>
                             <DatabaseOutlined />
                             <span>{ns}</span>
                         </Space>
@@ -174,9 +192,9 @@ const ResourceTree: React.FC = () => {
                     const topicName = shortName(topic.name);
                     return {
                         title: (
-                            <Space>
+                            <Space size={4}>
                                 <TableOutlined />
-                                <span style={{fontSize: 12}}>{topicName}</span>
+                                <span style={{fontSize: 'var(--font-size-xs)'}}>{topicName}</span>
                             </Space>
                         ),
                         key: `topic-${clusterId}-${tenant}-${namespace}-${topicName}`,
@@ -834,7 +852,7 @@ const ResourceTree: React.FC = () => {
     return (
         <div
             style={{
-                width: collapsed ? '48px' : sidebarWidth,
+                width: collapsed ? `${SIDEBAR_COLLAPSED_WIDTH}px` : sidebarWidth,
                 backgroundColor: 'var(--color-bg-secondary)',
                 borderRight: '1px solid var(--color-border)',
                 display: 'flex',
@@ -871,7 +889,7 @@ const ResourceTree: React.FC = () => {
                         borderBottom: '1px solid var(--color-border)',
                     }}
                 >
-                    <Space wrap>
+                    <Space size={4} wrap>
                         <Button size="small" icon={<BarChartOutlined />} onClick={handleOpenMetrics} title="监控仪表盘">
                             监控
                         </Button>

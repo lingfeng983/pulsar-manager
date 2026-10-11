@@ -27,6 +27,7 @@ export const APP_CONFIG_DEFAULTS: AppSettings = {
     truncateLength: 50,
     autoRefresh: true,
     refreshIntervalSeconds: 30,
+    fontSize: 'large',
 };
 
 export const AppSettingsSchema = z.object({
@@ -36,6 +37,8 @@ export const AppSettingsSchema = z.object({
     autoRefresh: z.boolean(),
     // 0 表示手动刷新，上限 10 分钟
     refreshIntervalSeconds: z.number().int().min(0).max(600),
+    // 全局字号档位
+    fontSize: z.enum(['small', 'medium', 'large']),
 });
 
 type AppSettingsField = keyof AppSettings;
@@ -52,6 +55,9 @@ function decodeField(field: AppSettingsField, raw: string | undefined): unknown 
         if (raw === 'true') return true;
         if (raw === 'false') return false;
         return undefined;
+    }
+    if (field === 'fontSize') {
+        return raw;
     }
     const value = Number(raw);
     return Number.isFinite(value) ? Math.trunc(value) : undefined;
@@ -131,7 +137,8 @@ const ExportedShortcutsSchema = z.object({
 export const ConfigImportSchema = z.object({
     format: z.literal(EXPORT_FORMAT),
     version: z.literal(EXPORT_VERSION),
-    settings: AppSettingsSchema,
+    // fontSize 是后加的一档：之前导出的文件里没有这个键，缺省时保持当前档位而不是整包报错
+    settings: AppSettingsSchema.extend({fontSize: AppSettingsSchema.shape.fontSize.optional()}),
     clusters: z.array(ExportedClusterSchema).max(200),
     shortcuts: ExportedShortcutsSchema.nullable().optional(),
 });

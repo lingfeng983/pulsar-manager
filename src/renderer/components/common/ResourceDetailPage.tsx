@@ -62,7 +62,7 @@ function ResourceDetailPage<T extends object>({
 }: ResourceDetailPageProps<T>) {
     const overview = (
         <>
-            <Row gutter={[16, 16]}>
+            <Row gutter={[12, 12]}>
                 {stats.map(stat => (
                     <Col key={stat.key} span={8}>
                         <Card>

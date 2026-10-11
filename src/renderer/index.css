@@ -25,20 +25,32 @@
     --radius-md: 8px;
     --radius-lg: 12px;
 
+    /* 间距梯度：整体比常规密度低一档。桌面管理工具一屏要放表格 + 图 + 树，
+       留白按 24/32 铺会把有效内容挤到需要滚动，这里以 4px 为步进收紧。 */
     --spacing-xs: 4px;
-    --spacing-sm: 8px;
-    --spacing-md: 12px;
-    --spacing-lg: 16px;
-    --spacing-xl: 24px;
-    --spacing-xxl: 32px;
+    --spacing-sm: 6px;
+    --spacing-md: 10px;
+    --spacing-lg: 12px;
+    --spacing-xl: 16px;
+    --spacing-xxl: 24px;
 
     --font-family:
         -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
     --font-mono: 'JetBrains Mono', 'Consolas', 'Monaco', monospace;
 
-    --header-height: 48px;
+    /* 字号梯度：large 档（默认）的取值，md 与 renderer/utils/fontScale.ts 的 FONT_BASE_PX 对齐。
+       上限压在 18px：页面标题已经由页签给出，再大就是把正文高度换成留白。 */
+    --font-size-xs: 12px;
+    --font-size-sm: 13px;
+    --font-size-md: 14px;
+    --font-size-lg: 15px;
+    --font-size-xl: 18px;
+
+    /* 顶栏与页签栏的高度跟着字号档位走：切到"小"以后如果还钉死 44/30，
+       缩小的只有字，控件周围反而多出留白。 */
+    --header-height: calc(var(--font-size-md) * 3 + 2px);
     --sidebar-width: 240px;
-    --tab-height: 36px;
+    --tab-height: calc(var(--font-size-md) + 16px);
 }
 
 /* 暗色主题 */
@@ -85,6 +97,25 @@
     --shadow-medium: 0 4px 16px rgba(0, 0, 0, 0.08);
 }
 
+/* 全局字号档位（配置中心 → 界面 → 字号），由 store/settings.ts 写到 <html data-font-size>。
+   large 就是上面 :root 的取值，因此不写 data-font-size 时（首帧）与默认档完全一致。
+   降档时梯度整体收窄，最小一档不再低于 10px，避免中文笔画糊成一团。 */
+[data-font-size='medium'] {
+    --font-size-xs: 11px;
+    --font-size-sm: 12px;
+    --font-size-md: 13px;
+    --font-size-lg: 14px;
+    --font-size-xl: 16px;
+}
+
+[data-font-size='small'] {
+    --font-size-xs: 10px;
+    --font-size-sm: 11px;
+    --font-size-md: 12px;
+    --font-size-lg: 13px;
+    --font-size-xl: 15px;
+}
+
 /* 全局重置和基础样式 */
 * {
     margin: 0;
@@ -102,7 +133,7 @@ body,
 
 body {
     font-family: var(--font-family);
-    font-size: 14px;
+    font-size: var(--font-size-md);
     line-height: 1.4;
     color: var(--color-text-primary);
     background-color: var(--color-bg-base);
@@ -115,7 +146,7 @@ code,
 pre,
 .mono {
     font-family: var(--font-mono);
-    font-size: 13px;
+    font-size: var(--font-size-sm);
     line-height: 1.2;
 }
 
@@ -178,24 +209,54 @@ pre,
 
 /* 12px 说明文字：规范 §1.3.1 字号梯度最小档，页面里成片的 fontSize:12 内联样式归到这里 */
 .hint-text {
-    font-size: 12px;
-    line-height: 20px;
+    font-size: var(--font-size-xs);
+    line-height: calc(var(--font-size-xs) * 1.5);
     color: var(--color-text-secondary);
 }
 
 /* 统计卡下方的补充行 */
 .stat-subline {
-    margin-top: var(--spacing-sm);
-    font-size: 12px;
-    line-height: 20px;
+    margin-top: var(--spacing-xs);
+    font-size: var(--font-size-xs);
+    line-height: calc(var(--font-size-xs) * 1.5);
     color: var(--color-text-secondary);
 }
 
-/* 指标数值：规范 §1.3.1 字号梯度上限 20px，原先各处写 24px 已越界 */
+/* 一行式规模/状态提示：拓扑图与监控页共用。成排的统计卡说的往往就是几个数字，
+   收进一行能把高度还给图表。 */
+.summary-line {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--spacing-xs) var(--spacing-lg);
+    align-items: center;
+    margin-bottom: var(--spacing-xs);
+    font-size: var(--font-size-xs);
+    color: var(--color-text-secondary);
+}
+
+.summary-line strong {
+    font-weight: 600;
+    color: var(--color-text-primary);
+}
+
+/* 图例并入提示行右侧：色点与拓扑节点同形，比矩形 Tag 省一截高度 */
+.legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--spacing-xs);
+}
+
+.legend-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+}
+
+/* 指标数值：字号梯度上限 18px，原先各处写 24px 已越界 */
 .metric-value {
     margin: 0;
-    font-size: 20px;
-    line-height: 28px;
+    font-size: var(--font-size-xl);
+    line-height: calc(var(--font-size-xl) * 1.3);
     font-weight: 600;
     color: var(--color-text-primary);
 }
@@ -204,7 +265,7 @@ pre,
 .stack {
     display: flex;
     flex-direction: column;
-    gap: var(--spacing-lg);
+    gap: var(--spacing-md);
 }
 
 /* 快捷键配置：存在冲突绑定的行 */
@@ -212,7 +273,8 @@ pre,
     background-color: color-mix(in srgb, var(--color-danger) 8%, transparent);
 }
 
-/* ===== 页面骨架（规范 §2.3：内容区统一内边距 16px、统一标题基线）===== */
+/* ===== 页面骨架（规范 §2.3：内容区统一内边距、统一标题基线）=====
+   内边距取 12px：桌面工具的有效面积优先，页签栏已经承担了视觉分隔。 */
 .page-shell {
     display: flex;
     flex-direction: column;
@@ -224,37 +286,39 @@ pre,
 .page-header {
     display: flex;
     flex-wrap: wrap;
-    gap: var(--spacing-sm);
-    align-items: flex-start;
+    gap: var(--spacing-xs) var(--spacing-sm);
+    align-items: center;
     justify-content: space-between;
-    margin-bottom: var(--spacing-lg);
+    margin-bottom: var(--spacing-md);
 }
 
 .page-heading {
     display: flex;
     flex-direction: column;
-    gap: var(--spacing-xs);
+    gap: 0;
     min-width: 0;
 }
 
 .page-title {
-    font-size: 20px;
-    font-weight: 600;
-    line-height: 28px;
+    font-size: var(--font-size-xl);
     color: var(--color-text-primary);
+    font-weight: 600;
+    line-height: calc(var(--font-size-xl) * 1.3);
 }
 
 .page-subtitle {
-    font-size: 14px;
-    line-height: 22px;
+    font-size: var(--font-size-sm);
+    line-height: calc(var(--font-size-sm) * 1.5);
     color: var(--color-text-secondary);
 }
 
 .page-actions {
     display: flex;
     flex-wrap: wrap;
-    gap: var(--spacing-sm);
+    gap: var(--spacing-xs);
     align-items: center;
+    /* 页签已给出页面名的页面无需渲染标题，此时操作区仍靠右 */
+    margin-left: auto;
 }
 
 /* 页面正文：卡片/区块之间的纵向节奏统一由 gap 提供，页面不再各写 margin。
@@ -263,23 +327,23 @@ pre,
 .page-body {
     display: flex;
     flex-direction: column;
-    gap: var(--spacing-lg);
+    gap: var(--spacing-md);
     flex: 1 1 auto;
 }
 
 /* 图表卡片的固定高度：四张趋势/分布卡共用，避免每页手写 height 内联样式 */
 .chart-frame {
-    height: 300px;
+    height: 260px;
 }
 
 /* ===== 三态占位（规范 §2.3：加载 / 空数据 / 异常全局统一）===== */
 .state-block {
     display: flex;
     flex-direction: column;
-    gap: var(--spacing-sm);
+    gap: var(--spacing-xs);
     align-items: center;
     justify-content: center;
-    padding: var(--spacing-xxl) var(--spacing-lg);
+    padding: var(--spacing-xl) var(--spacing-lg);
     text-align: center;
 }
 
@@ -309,16 +373,12 @@ pre,
     margin-left: var(--spacing-sm);
 }
 
-/* 资源树的集群状态：色点 + 文字。
-   原先是实心色块配写死的 #fff——暗色主题下离线态拿 --color-text-secondary（浅灰）
-   当底色，白字对比度约 1.2:1 基本读不出来。文字用主文本色而不是 secondary，
-   因为 secondary 在浅色主题只有 3.2:1，撑不住 12px 字号。 */
+/* 资源树的集群状态：只留色点。"在线/离线"文字与色点说的是同一件事，
+   并排出现等于把侧栏每一行都拉长一截；语义由 title 与 aria-label 保留。
+   色点用主题色而非写死的 #fff，暗色下三态都能与侧栏背景拉开对比。 */
 .tree-status {
     display: inline-flex;
     align-items: center;
-    gap: var(--spacing-xs);
-    font-size: 12px;
-    color: var(--color-text-primary);
 }
 
 .tree-status-dot {
@@ -353,8 +413,8 @@ pre,
     align-items: center;
     gap: var(--spacing-sm);
     padding: 4px 12px;
-    font-size: 14px;
-    line-height: 22px;
+    font-size: var(--font-size-md);
+    line-height: calc(var(--font-size-md) * 1.571);
     color: var(--color-text-primary);
     cursor: pointer;
     outline: none;
@@ -386,6 +446,12 @@ pre,
     color: var(--color-text-secondary);
     cursor: not-allowed;
     opacity: 0.5;
+}
+
+/* Tag 没有可用的紧凑尺寸 token（组件 token 表里不暴露横向内边距），直接收 CSS。
+   状态标签在表格/详情里成排出现，8px 的左右留白乘以行数就是白丢的宽度。 */
+.ant-tag {
+    padding-inline: var(--spacing-xs);
 }
 
 /* 图表高度链：antd Spin 嵌套使用时把 style 落在圆点上，外层容器拿不到样式，

@@ -494,7 +494,7 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
             onCancel={handleCancel}
             width={680}
             footer={
-                <Space>
+                <Space size={4}>
                     {currentStep > 0 && <Button onClick={prevStep}>上一步</Button>}
                     {currentStep < steps.length - 1 ? (
                         <Button type="primary" onClick={nextStep}>

@@ -485,7 +485,9 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
             dataIndex: 'messageId',
             key: 'messageId',
             width: 190,
-            render: (text: string) => <code style={{fontSize: 11, color: 'var(--color-text-secondary)'}}>{text}</code>,
+            render: (text: string) => (
+                <code style={{fontSize: 'var(--font-size-xs)', color: 'var(--color-text-secondary)'}}>{text}</code>
+            ),
         },
         {title: 'Producer', dataIndex: 'producerName', key: 'producerName', width: 120},
         {
@@ -539,7 +541,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                                 maxHeight: isExpanded ? 200 : 'auto',
                                 overflow: 'auto',
                                 fontFamily: 'monospace',
-                                fontSize: 12,
+                                fontSize: 'var(--font-size-xs)',
                                 wordBreak: 'break-all',
                                 color: 'var(--color-text-secondary)',
                             }}
@@ -575,7 +577,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
     const fieldLabel = {marginRight: 'var(--spacing-sm)', fontWeight: 500} as const;
 
     const sendPanel = (
-        <Space direction="vertical" style={{width: '100%'}} size="middle">
+        <Space direction="vertical" style={{width: '100%'}} size="small">
             <div>
                 <div className="field-label" style={{marginBottom: 'var(--spacing-sm)'}}>
                     消息内容
@@ -602,7 +604,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                     placeholder='{"env":"test","trace":"abc"}'
                 />
             </div>
-            <Space>
+            <Space size={4}>
                 <Button
                     type="primary"
                     icon={<SendOutlined />}
@@ -619,7 +621,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
 
     const streamControls =
         mode === 'consume' ? (
-            <Space wrap size="middle">
+            <Space wrap size="small">
                 <div>
                     <label style={fieldLabel}>订阅:</label>
                     <AutoComplete
@@ -682,7 +684,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                 </Tooltip>
             </Space>
         ) : (
-            <Space wrap size="middle">
+            <Space wrap size="small">
                 <div>
                     <label style={fieldLabel}>起始位置:</label>
                     <Select
@@ -730,7 +732,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
     return (
         <div className="stack">
             <Card>
-                <Space wrap size="middle" style={{width: '100%', justifyContent: 'space-between'}}>
+                <Space wrap size="small" style={{width: '100%', justifyContent: 'space-between'}}>
                     <Segmented
                         value={mode}
                         onChange={value => setMode(value as PanelMode)}
@@ -741,7 +743,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                         ]}
                     />
                     {mode !== 'send' && (
-                        <Space wrap size="middle">
+                        <Space wrap size="small">
                             <Button
                                 type={isRunning ? 'default' : 'primary'}
                                 icon={isRunning ? <PauseCircleOutlined /> : <PlayCircleOutlined />}

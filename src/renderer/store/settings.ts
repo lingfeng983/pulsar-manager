@@ -1,5 +1,5 @@
 import {create} from 'zustand';
-import type {AppSettings} from '../types';
+import type {AppSettings, FontSizeLevel} from '../types';
 
 // 默认值与主进程 app-config 里的 APP_CONFIG_DEFAULTS 必须一致：
 // 这里只是 IPC 失败时的兜底显示，真正生效的取值始终由主进程读库给出。
@@ -7,7 +7,15 @@ export const DEFAULT_SETTINGS: AppSettings = {
     truncateLength: 50,
     autoRefresh: true,
     refreshIntervalSeconds: 30,
+    fontSize: 'large',
 };
+
+// 字号档位写成 <html data-font-size>，index.css 里三档 --font-size-* 随之切换。
+// 和主题一样：zustand 在 set() 内同步通知订阅者，且订阅早于组件挂载，
+// 所以页面 render 阶段读 CSS 变量时拿到的已经是新档位的值。
+function applyFontSize(level: FontSizeLevel): void {
+    document.documentElement.setAttribute('data-font-size', level);
+}
 
 interface SettingsState {
     settings: AppSettings;
@@ -61,6 +69,9 @@ export const useSettingsStore = create<SettingsState>(set => ({
         }
     },
 }));
+
+applyFontSize(useSettingsStore.getState().settings.fontSize);
+useSettingsStore.subscribe(state => applyFontSize(state.settings.fontSize));
 
 export function loadAppSettings(): void {
     void useSettingsStore.getState().load();

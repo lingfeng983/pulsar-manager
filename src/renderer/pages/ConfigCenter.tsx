@@ -22,6 +22,7 @@ import {useThemeStore} from '../store/theme';
 import {useClusterStore} from '../store/cluster';
 import {useShortcutStore} from '../store/shortcuts';
 import {downloadBlob} from '../utils/download';
+import {FONT_SIZE_OPTIONS} from '../utils/fontScale';
 import PageShell from '../components/common/PageShell';
 import StateBlock from '../components/common/StateBlock';
 import {useConfirmDanger} from '../components/common/dangerConfirm';
@@ -191,11 +192,11 @@ const ConfigCenter: React.FC = () => {
     };
 
     return (
-        <PageShell title="配置中心" subtitle="这里改的是应用自身的设置，全部落在本机 SQLite，改完立即生效。">
-            <Row gutter={[16, 16]}>
+        <PageShell subtitle="这里改的是应用自身的设置，全部落在本机 SQLite，改完立即生效。">
+            <Row gutter={[12, 12]}>
                 <Col span={12}>
                     <Card title="界面" size="small">
-                        <Space direction="vertical" size={12} style={{width: '100%'}}>
+                        <Space direction="vertical" size={8} style={{width: '100%'}}>
                             <div>
                                 <Text>主题</Text>
                                 <div style={{marginTop: 4}}>
@@ -211,6 +212,28 @@ const ConfigCenter: React.FC = () => {
                                         <Radio.Button value="eyeCare">护眼</Radio.Button>
                                     </Radio.Group>
                                 </div>
+                            </div>
+                            <div>
+                                <Text>字号</Text>
+                                <div style={{marginTop: 4}}>
+                                    <Radio.Group
+                                        aria-label="界面字号"
+                                        value={settings.fontSize}
+                                        onChange={event => void patch({fontSize: event.target.value})}
+                                        optionType="button"
+                                        buttonStyle="solid"
+                                        size="small"
+                                    >
+                                        {FONT_SIZE_OPTIONS.map(option => (
+                                            <Radio.Button key={option.value} value={option.value}>
+                                                {option.label}
+                                            </Radio.Button>
+                                        ))}
+                                    </Radio.Group>
+                                </div>
+                                <Text className="hint-text">
+                                    整界面文字一起缩放：表格、菜单、侧边栏与图表字号同时变化，切档立即生效
+                                </Text>
                             </div>
                             <div>
                                 <Text>消息正文截断长度（20 ~ 500 字符）</Text>
@@ -238,9 +261,9 @@ const ConfigCenter: React.FC = () => {
 
                 <Col span={12}>
                     <Card title="监控刷新" size="small">
-                        <Space direction="vertical" size={12} style={{width: '100%'}}>
+                        <Space direction="vertical" size={8} style={{width: '100%'}}>
                             <div>
-                                <Space>
+                                <Space size={4}>
                                     <Text>自动刷新</Text>
                                     <Switch
                                         aria-label="自动刷新监控"
@@ -301,16 +324,13 @@ const ConfigCenter: React.FC = () => {
                                     清空操作日志
                                 </Button>
                             </Space>
+                            {/* 单行提示：带 description 的两段式 Alert 会占掉一整屏高度的三分之一 */}
                             <Alert
                                 type="info"
                                 showIcon
-                                message="导出文件不含任何凭据"
-                                description={
-                                    <span>
-                                        集群的 Token / TLS 证书、SSH
-                                        的密码与私钥都以加密形式存在本机，不会写进导出文件。
-                                        导入后这些集群需要在集群配置里重新填一次凭据。导入只做新增：同名集群会被跳过，不会覆盖已有配置。
-                                    </span>
+                                message={
+                                    '导出文件不含任何凭据：Token / TLS 证书、SSH 的密码与私钥都以加密形式存在本机，不会写进导出文件，' +
+                                    '导入后需在集群配置里重新填一次凭据。导入只做新增，同名集群会被跳过。'
                                 }
                             />
                         </Space>

@@ -128,7 +128,7 @@ const UpdateModal: React.FC<{open: boolean; onClose: () => void}> = ({open, onCl
 
     return (
         <Modal title="软件更新" open={open} onCancel={onClose} footer={<Button onClick={onClose}>关闭</Button>}>
-            <Space direction="vertical" style={{width: '100%'}} size="middle">
+            <Space direction="vertical" style={{width: '100%'}} size="small">
                 {error && (
                     <Alert
                         type="error"
@@ -171,7 +171,7 @@ const UpdateModal: React.FC<{open: boolean; onClose: () => void}> = ({open, onCl
                 )}
 
                 {result?.hasUpdate && !downloading && !downloaded && result.downloadUrl && (
-                    <Space>
+                    <Space size={4}>
                         <Typography.Text>
                             安装包: {result.fileName}
                             {result.size ? `（${formatBytes(result.size)}）` : ''}
@@ -186,7 +186,7 @@ const UpdateModal: React.FC<{open: boolean; onClose: () => void}> = ({open, onCl
                     <Space direction="vertical" style={{width: '100%'}} size={4}>
                         <Progress percent={percent} status="active" />
                         {progress && progress.total <= 0 && (
-                            <Typography.Text type="secondary" style={{fontSize: 12}}>
+                            <Typography.Text type="secondary" style={{fontSize: 'var(--font-size-xs)'}}>
                                 已下载 {formatBytes(progress.received)}（服务端未报告总大小）
                             </Typography.Text>
                         )}
@@ -231,7 +231,7 @@ const UpdateModal: React.FC<{open: boolean; onClose: () => void}> = ({open, onCl
                                     保存
                                 </Button>
                             </Space.Compact>
-                            <Typography.Text type="secondary" style={{fontSize: 12}}>
+                            <Typography.Text type="secondary" style={{fontSize: 'var(--font-size-xs)'}}>
                                 令牌在 Gitee「设置 → 私人令牌」创建，仅需只读仓库权限；本机加密保存，不会上传。
                             </Typography.Text>
                         </Space>

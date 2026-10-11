@@ -65,7 +65,7 @@ const HomePage: React.FC = () => {
             dataIndex: 'name',
             key: 'name',
             render: (text: string) => (
-                <Space>
+                <Space size={4}>
                     <ClusterOutlined style={{color: 'var(--color-primary)'}} />
                     <span className="field-label">{text}</span>
                 </Space>
@@ -91,6 +91,7 @@ const HomePage: React.FC = () => {
                     color: 'default',
                     text: '未知',
                 };
+                // 表格里没有别的状态图标，这里保留文字；色块 Tag 只做强调
                 return <Tag color={color}>{text}</Tag>;
             },
         },
@@ -134,7 +135,7 @@ const HomePage: React.FC = () => {
                         checked={viewMode === 'topology'}
                         onChange={checked => setViewMode(checked ? 'topology' : 'list')}
                     />
-                    <span>{viewMode === 'list' ? '列表视图' : '拓扑视图'}</span>
+                    <span className="hint-text">{viewMode === 'list' ? '列表视图' : '拓扑视图'}</span>
                     <Button type="primary" icon={<PlusOutlined />} onClick={handleAddCluster}>
                         添加集群
                     </Button>
@@ -161,7 +162,7 @@ const HomePage: React.FC = () => {
                             dataSource={clusters}
                             rowKey="id"
                             pagination={false}
-                            size="middle"
+                            size="small"
                             scroll={{x: 'max-content'}}
                         />
                     </StateBlock>

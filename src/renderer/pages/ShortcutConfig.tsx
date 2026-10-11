@@ -208,13 +208,14 @@ const ShortcutConfig: React.FC = () => {
 
     return (
         <PageShell
-            title={
-                <Space size="small">
-                    <span>快捷键配置</span>
-                    <Tag>{platform === 'mac' ? 'macOS' : 'Windows / Linux'}</Tag>
-                </Space>
+            subtitle={
+                <>
+                    两套平台映射相互独立保存；点击「编辑」后按下任意组合键即可绑定，Esc 取消。
+                    <Tag style={{marginLeft: 'var(--spacing-sm)'}}>
+                        {platform === 'mac' ? 'macOS' : 'Windows / Linux'}
+                    </Tag>
+                </>
             }
-            subtitle="两套平台映射相互独立保存；点击「编辑」后按下任意组合键即可绑定，Esc 取消。"
             actions={
                 <>
                     <Space size={4}>

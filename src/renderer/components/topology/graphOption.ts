@@ -72,14 +72,84 @@ function clamp(min: number, max: number, value: number): number {
     return Math.max(min, Math.min(max, value));
 }
 
+const LABEL_DARK = '#1d2129';
+const LABEL_LIGHT = '#ffffff';
+/** 圆内标签的字号区间：太小读不出，太大放不下名字。 */
+const LABEL_FONT_MIN = 9;
+const LABEL_FONT_MAX = 13;
+
+function parseHexColor(color: string): [number, number, number] | null {
+    const match = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(color.trim());
+    if (!match) {
+        return null;
+    }
+    const hex =
+        match[1].length === 3
+            ? match[1]
+                  .split('')
+                  .map(ch => ch + ch)
+                  .join('')
+            : match[1];
+    return [0, 2, 4].map(i => parseInt(hex.slice(i, i + 2), 16)) as [number, number, number];
+}
+
+function relativeLuminance([r, g, b]: [number, number, number]): number {
+    const channel = (v: number) => {
+        const s = v / 255;
+        return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+    };
+    return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
+}
+
+/**
+ * 标签挪到圆内后只能压在节点的填充色上，主题文字色在这里完全不适用
+ * （暗色主题的浅文字压在亮绿气泡上等于隐形），所以在白/近黑里挑对比度高的那个。
+ */
+function labelColorOn(fill: string): string {
+    const rgb = parseHexColor(fill);
+    if (!rgb) {
+        return LABEL_DARK;
+    }
+    const l = relativeLuminance(rgb);
+    const againstWhite = 1.05 / (l + 0.05);
+    const againstDark = (l + 0.05) / (relativeLuminance(parseHexColor(LABEL_DARK)!) + 0.05);
+    return againstWhite >= againstDark ? LABEL_LIGHT : LABEL_DARK;
+}
+
+// 中日韩全角字按一个字号宽算，拉丁字符约 0.62。
+const charRatio = (ch: string) => (ch.codePointAt(0)! > 0x2e7f ? 1 : 0.62);
+
+/** 名字放不下时按像素宽度截断（含省略号），完整名称 tooltip 里有。 */
+function fitLabel(name: string, maxWidth: number, fontSize: number): string {
+    const budget = maxWidth / fontSize;
+    const total = Array.from(name).reduce((sum, ch) => sum + charRatio(ch), 0);
+    if (total <= budget) {
+        return name;
+    }
+    const ellipsis = 0.9;
+    let used = 0;
+    let out = '';
+    for (const ch of Array.from(name)) {
+        const w = charRatio(ch);
+        if (used + w + ellipsis > budget) {
+            break;
+        }
+        used += w;
+        out += ch;
+    }
+    return `${out}…`;
+}
+
 export function buildTopologyOption(params: {
     nodes: TopologyGraphNode[];
     edges: TopologyGraphEdge[];
     palette: TopologyPalette;
     layout: TopologyLayout;
     showLegend?: boolean;
+    /** 全局字号档位相对默认档的比例（见 utils/fontScale）：canvas 文字不受 CSS 变量影响。 */
+    fontScale?: number;
 }): EChartsOption {
-    const {nodes, edges, palette, layout, showLegend = true} = params;
+    const {nodes, edges, palette, layout, showLegend = true, fontScale = 1} = params;
     const nodeById = new Map(nodes.map(node => [node.id, node]));
 
     // 分类表固定为完整类型表、不随数据增删：两张拓扑图都用合并式 setOption
@@ -92,18 +162,23 @@ export function buildTopologyOption(params: {
         itemStyle: {color: colorForType(type, palette)},
     }));
     // 节点越多越小、斥力越大，否则上百个节点会糊成一团。
-    const baseSize = clamp(14, 40, 50 - nodes.length / 10);
+    // 下限比标签外置时高一些：名字现在压在圆里，圆太小就只剩省略号。
+    const baseSize = clamp(16, 42, 52 - nodes.length / 10);
     const repulsion = clamp(120, 600, 260 + nodes.length * 4);
 
     const graphNodes = nodes.map(node => {
         const category = categoryIndex.get(node.type) ?? 0;
         const offlineCluster = node.type === 'cluster' && node.status !== 'connected';
         const color = offlineCluster ? palette.danger : colorForType(node.type, palette);
+        const nodeSize = baseSize * SIZE_MULTIPLIER[node.type];
+        const symbolSize = nodeSize * fontScale;
+        const fontSize = Math.round(clamp(LABEL_FONT_MIN, LABEL_FONT_MAX, nodeSize * 0.24) * fontScale);
+        const labelText = fitLabel(node.name, symbolSize * 0.86, fontSize);
         return {
             id: node.id,
             name: node.name,
             category,
-            symbolSize: baseSize * SIZE_MULTIPLIER[node.type],
+            symbolSize,
             value: node.count,
             itemStyle: {
                 color,
@@ -112,9 +187,17 @@ export function buildTopologyOption(params: {
                 shadowBlur: 12,
                 shadowColor: 'rgba(0, 0, 0, 0.25)',
             },
+            label: {
+                show: true,
+                position: 'inside' as const,
+                formatter: () => labelText,
+                fontSize,
+                color: labelColorOn(color),
+                fontWeight: 500 as const,
+            },
             emphasis: {
                 itemStyle: {borderWidth: 4, shadowBlur: 20, shadowColor: color},
-                label: {fontSize: 14, fontWeight: 600 as const},
+                label: {fontWeight: 600 as const},
             },
         };
     });
@@ -138,7 +221,7 @@ export function buildTopologyOption(params: {
             borderColor: palette.border,
             borderWidth: 1,
             padding: [10, 14],
-            textStyle: {color: palette.text, fontSize: 13},
+            textStyle: {color: palette.text, fontSize: Math.round(13 * fontScale)},
             formatter: (params: any) => {
                 if (params.dataType !== 'node') {
                     return `${params.data?.source ?? ''} → ${params.data?.target ?? ''}`;
@@ -196,7 +279,7 @@ export function buildTopologyOption(params: {
                   borderRadius: 4,
                   // 力导节点会漂出布局框，图例必须压在它们上面才读得清。
                   z: 10,
-                  textStyle: {fontSize: 13, color: palette.label},
+                  textStyle: {fontSize: Math.round(13 * fontScale), color: palette.label},
               }
             : undefined,
         animation: true,
@@ -208,15 +291,17 @@ export function buildTopologyOption(params: {
                 type: 'graph',
                 layout,
                 top: showLegend ? 56 : 24,
-                bottom: 44,
+                bottom: 24,
                 roam: true,
                 draggable: true,
+                // 兜底：每个节点都会带自己的 inside 标签（文字色按气泡底色挑过对比度），
+                // 这里只保证万一有节点漏了设置，文字也不会压在同类色上看不见。
                 label: {
                     show: true,
-                    position: 'bottom',
+                    position: 'inside',
                     formatter: '{b}',
-                    fontSize: 12,
-                    color: palette.label,
+                    fontSize: Math.round(LABEL_FONT_MIN * fontScale),
+                    color: LABEL_DARK,
                     fontWeight: 500,
                 },
                 edgeSymbol: ['circle', 'arrow'],

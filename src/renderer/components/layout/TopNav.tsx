@@ -360,7 +360,10 @@ const TopNav: React.FC = () => {
                 key: 'shortcuts',
                 label: (
                     <span>
-                        快捷键设置 <Tag style={{fontSize: 10}}>{formatBinding(shortcutBinding, platform)}</Tag>
+                        快捷键设置{' '}
+                        <Tag style={{fontSize: 'calc(var(--font-size-xs) - 2px)'}}>
+                            {formatBinding(shortcutBinding, platform)}
+                        </Tag>
                     </span>
                 ),
             },
@@ -396,12 +399,12 @@ const TopNav: React.FC = () => {
                     alignItems: 'center',
                     gap: 'var(--spacing-sm)',
                     fontWeight: 600,
-                    fontSize: '16px',
+                    fontSize: 'var(--font-size-lg)',
                     color: 'var(--color-primary)',
-                    minWidth: '200px',
+                    minWidth: '170px',
                 }}
             >
-                <span style={{fontSize: '20px'}}>⚡</span>
+                <span style={{fontSize: 'var(--font-size-xl)'}}>⚡</span>
                 <span>Pulsar Manager</span>
             </div>
 
@@ -415,7 +418,7 @@ const TopNav: React.FC = () => {
                 onSelect={handleSearchSelect}
                 notFoundContent={searchLoading ? '搜索中...' : '未找到匹配结果'}
                 style={{
-                    width: '320px',
+                    width: '280px',
                     borderRadius: 'var(--radius-md)',
                 }}
                 options={searchResults.map(result => ({
@@ -432,7 +435,7 @@ const TopNav: React.FC = () => {
             {/* 右侧工具区 */}
             <div style={{flex: 1}} />
 
-            <Space size="small">
+            <Space size={4}>
                 {/* 快速压测 */}
                 <Tooltip title="向指定 Topic 并发写入，实时看吞吐与发送确认延迟">
                     <Button icon={<ThunderboltOutlined />} size="small" onClick={() => setBenchmarkOpen(true)}>
@@ -472,7 +475,7 @@ const TopNav: React.FC = () => {
                 ]}
             >
                 <div style={{textAlign: 'center'}}>
-                    <div style={{fontSize: 48, marginBottom: 'var(--spacing-lg)'}}>⚡</div>
+                    <div style={{fontSize: 32, marginBottom: 'var(--spacing-sm)'}}>⚡</div>
                     <h3 style={{marginBottom: 'var(--spacing-sm)'}}>Pulsar Manager</h3>
                     <p className="hint-text">版本 {appVersion}</p>
                     <div style={{marginTop: 'var(--spacing-xl)', textAlign: 'left'}}>

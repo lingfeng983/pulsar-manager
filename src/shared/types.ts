@@ -451,6 +451,11 @@ export interface OperationLog {
 
 // ========== 应用配置（配置中心） ==========
 
+// 界面字号三档；large 就是改版以来的默认尺寸。实际取值写在 index.css 的
+// --font-size-*（DOM 文字）和 renderer/utils/fontScale.ts 的基准表（antd 与图表文字），
+// 两处必须一致，否则界面与图表各按一套比例缩放。
+export type FontSizeLevel = 'small' | 'medium' | 'large';
+
 // 界面与刷新相关的可持久化设置。每一项都必须被真实消费：
 // truncateLength 用于消息列表正文截断，autoRefresh / refreshIntervalSeconds
 // 是监控页的刷新节奏。加了字段不接线，就是又一个死设置。
@@ -458,6 +463,7 @@ export interface AppSettings {
     truncateLength: number;
     autoRefresh: boolean;
     refreshIntervalSeconds: number;
+    fontSize: FontSizeLevel;
 }
 
 export interface ExportedSshConfig {

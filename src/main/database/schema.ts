@@ -75,5 +75,6 @@ INSERT OR IGNORE INTO user_settings (key, value, updated_at) VALUES
     ('theme', 'light', datetime('now')),
     ('truncateLength', '50', datetime('now')),
     ('autoRefresh', 'true', datetime('now')),
-    ('refreshIntervalSeconds', '30', datetime('now'));
+    ('refreshIntervalSeconds', '30', datetime('now')),
+    ('fontSize', 'large', datetime('now'));
 `;

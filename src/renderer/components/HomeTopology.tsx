@@ -1,15 +1,6 @@
 import React, {useEffect, useRef, useState, useCallback, useMemo} from 'react';
-import {Card, Space, Spin, Alert, Statistic, Row, Col, Tag} from 'antd';
-import {
-    ReloadOutlined,
-    ZoomInOutlined,
-    ZoomOutOutlined,
-    FullscreenOutlined,
-    CompressOutlined,
-    ClusterOutlined,
-    DatabaseOutlined,
-    MessageOutlined,
-} from '@ant-design/icons';
+import {Card, Space, Spin, Alert} from 'antd';
+import {ReloadOutlined, ZoomInOutlined, ZoomOutOutlined, FullscreenOutlined, CompressOutlined} from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
 import {useClusterStore} from '../store/cluster';
 import {useTabStore} from '../store/tabs';
@@ -19,6 +10,7 @@ import {useElementSize} from '../hooks/useElementSize';
 import {shortName} from '../utils/format';
 import {topicTab, topologyTab} from '../utils/tabIds';
 import {useTopologyPalette} from '../utils/topologyColors';
+import {useFontFactor} from '../utils/fontScale';
 import StateBlock from './common/StateBlock';
 import IconButton from './common/IconButton';
 import {
@@ -171,6 +163,7 @@ const HomeTopology: React.FC = () => {
     // 拓扑加载代次：集群列表变化后，旧一轮的晚到响应必须作废
     const homeTopologyRequestRef = useRef(0);
     const palette = useTopologyPalette();
+    const fontScale = useFontFactor();
     const {addTab} = useTabStore();
 
     const {ref: chartRef, isFullscreen, toggle: toggleFullscreen} = useFullscreen<HTMLDivElement>();
@@ -182,8 +175,8 @@ const HomeTopology: React.FC = () => {
 
     // 缓存 ECharts 配置
     const chartOption = useMemo(
-        () => buildTopologyOption({nodes, edges, palette, layout, showLegend: false}),
-        [nodes, edges, palette, layout],
+        () => buildTopologyOption({nodes, edges, palette, layout, showLegend: false, fontScale}),
+        [nodes, edges, palette, layout, fontScale],
     );
 
     // 清理图表实例
@@ -346,7 +339,7 @@ const HomeTopology: React.FC = () => {
     return (
         <Card
             extra={
-                <Space>
+                <Space size={4}>
                     <IconButton size="small" icon={<ZoomOutOutlined />} label="缩小拓扑图" onClick={handleZoomOut} />
                     <IconButton size="small" icon={<ZoomInOutlined />} label="放大拓扑图" onClick={handleZoomIn} />
                     <IconButton
@@ -368,33 +361,31 @@ const HomeTopology: React.FC = () => {
             styles={{body: {flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden'}}}
         >
             <Spin spinning={loading} tip="正在加载拓扑数据..." wrapperClassName="chart-spin">
-                {/* 统计信息 */}
-                <Row gutter={[16, 16]} style={{marginBottom: 'var(--spacing-lg)'}}>
-                    <Col span={8}>
-                        <Statistic
-                            title="集群数"
-                            value={stats.clusters}
-                            prefix={<ClusterOutlined />}
-                            valueStyle={{color: palette.primary}}
-                        />
-                    </Col>
-                    <Col span={8}>
-                        <Statistic
-                            title="Brokers"
-                            value={stats.brokers}
-                            prefix={<DatabaseOutlined />}
-                            valueStyle={{color: palette.success}}
-                        />
-                    </Col>
-                    <Col span={8}>
-                        <Statistic
-                            title="Topics"
-                            value={stats.topics}
-                            prefix={<MessageOutlined />}
-                            valueStyle={{color: palette.warning}}
-                        />
-                    </Col>
-                </Row>
+                {/* 规模提示与图例同一行：色点与拓扑节点同形，底部那条图例块整个省掉，
+                    高度全部让给图 */}
+                <div className="summary-line">
+                    <span>
+                        集群 <strong>{stats.clusters}</strong>
+                    </span>
+                    <span>
+                        Brokers <strong>{stats.brokers}</strong>
+                    </span>
+                    <span>
+                        Topics <strong>{stats.topics}</strong>
+                    </span>
+                    <span className="legend-item" style={{marginLeft: 'auto'}}>
+                        <span className="legend-dot" style={{background: palette.primary}} aria-hidden />
+                        集群
+                    </span>
+                    <span className="legend-item">
+                        <span className="legend-dot" style={{background: palette.success}} aria-hidden />
+                        Broker
+                    </span>
+                    <span className="legend-item">
+                        <span className="legend-dot" style={{background: palette.warning}} aria-hidden />
+                        Topic
+                    </span>
+                </div>
 
                 {/* 错误提示 */}
                 {error && (
@@ -404,7 +395,7 @@ const HomeTopology: React.FC = () => {
                         showIcon
                         closable
                         onClose={() => setError(null)}
-                        style={{marginBottom: 'var(--spacing-lg)'}}
+                        style={{marginBottom: 'var(--spacing-sm)'}}
                     />
                 )}
 
@@ -423,45 +414,6 @@ const HomeTopology: React.FC = () => {
                                 onEvents={{click: handleChartClick}}
                             />
                         )}
-                    </div>
-                </div>
-
-                {/* 图例说明 */}
-                <div
-                    style={{
-                        marginTop: 'var(--spacing-lg)',
-                        paddingTop: 'var(--spacing-lg)',
-                        borderTop: '1px solid var(--color-border)',
-                    }}
-                >
-                    <div style={{display: 'flex', gap: 'var(--spacing-xl)', flexWrap: 'wrap', alignItems: 'center'}}>
-                        <Space size={16}>
-                            <Tag color={palette.primary}>集群</Tag>
-                            <Tag color={palette.success}>Broker</Tag>
-                            <Tag color={palette.warning}>Topic</Tag>
-                        </Space>
-                        <Space size={8}>
-                            <span
-                                style={{
-                                    display: 'inline-block',
-                                    width: 12,
-                                    height: 12,
-                                    borderRadius: '50%',
-                                    backgroundColor: palette.primary,
-                                }}
-                            />
-                            <span style={{fontSize: 12, color: palette.label}}>在线</span>
-                            <span
-                                style={{
-                                    display: 'inline-block',
-                                    width: 12,
-                                    height: 12,
-                                    borderRadius: '50%',
-                                    backgroundColor: palette.danger,
-                                }}
-                            />
-                            <span style={{fontSize: 12, color: palette.label}}>离线</span>
-                        </Space>
                     </div>
                 </div>
             </Spin>

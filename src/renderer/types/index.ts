@@ -35,6 +35,7 @@ export type {
     LoadTestLatency,
     LoadTestPhase,
     LoadTestCompression,
+    FontSizeLevel,
     AppSettings,
     ConfigBundle,
     ConfigImportResult,

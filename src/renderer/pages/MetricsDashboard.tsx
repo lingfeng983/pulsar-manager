@@ -1,5 +1,5 @@
 import React, {useState, useEffect, useCallback, useRef, useMemo, useContext} from 'react';
-import {Card, Row, Col, Select, Button, Statistic, Progress, Tag, DatePicker, message} from 'antd';
+import {Card, Row, Col, Select, Button, Statistic, Progress, DatePicker, message} from 'antd';
 import {ReloadOutlined} from '@ant-design/icons';
 import type {EChartsOption} from 'echarts';
 import dayjs from 'dayjs';
@@ -7,6 +7,7 @@ import {useClusterStore} from '../store/cluster';
 import {useSettingsStore} from '../store/settings';
 import {formatThroughput, toKilobytesPerSecond} from '../utils/format';
 import {useTopologyPalette, type TopologyPalette} from '../utils/topologyColors';
+import {useFontFactor} from '../utils/fontScale';
 import {useCommand, PaneActiveContext} from '../hooks/useKeybindings';
 import PageShell from '../components/common/PageShell';
 import StateBlock from '../components/common/StateBlock';
@@ -51,22 +52,23 @@ const EMPTY_HISTORY: MultiMetricsHistory = {
 
 // 三套主题共用的 ECharts 基色：文字/坐标轴/分割线/tooltip 全部从 CSS 变量读，
 // 否则暗色主题下轴标签是默认深灰，整张图糊成一片。
-const seriesAxes = (p: TopologyPalette) => ({
-    axisLabel: {color: p.label},
+// scale 是全局字号档位相对默认档的比例：canvas 文字读不到 CSS 变量，只能乘进来。
+const seriesAxes = (p: TopologyPalette, scale: number) => ({
+    axisLabel: {color: p.label, fontSize: Math.round(12 * scale)},
     axisLine: {lineStyle: {color: p.border}},
     splitLine: {lineStyle: {color: p.border}},
 });
 
-const seriesTooltip = (p: TopologyPalette) => ({
+const seriesTooltip = (p: TopologyPalette, scale: number) => ({
     backgroundColor: p.surface,
     borderColor: p.border,
-    textStyle: {color: p.text},
+    textStyle: {color: p.text, fontSize: Math.round(14 * scale)},
 });
 
-const seriesTitle = (p: TopologyPalette, text: string) => ({
+const seriesTitle = (p: TopologyPalette, text: string, scale: number) => ({
     text,
     left: 'center' as const,
-    textStyle: {fontSize: 14, fontWeight: 500 as const, color: p.text},
+    textStyle: {fontSize: Math.round(14 * scale), fontWeight: 500 as const, color: p.text},
 });
 
 // 时序折线图配置
@@ -75,49 +77,64 @@ const createTimeSeriesOption = (
     data: MetricsData[],
     color: string,
     palette: TopologyPalette,
-    unit: string = '',
-): EChartsOption => ({
-    title: seriesTitle(palette, title),
-    tooltip: {
-        trigger: 'axis',
-        ...seriesTooltip(palette),
-        formatter: (params: any) => {
-            const point = params[0];
-            return `${dayjs(point.value[0]).format('HH:mm:ss')}<br/>${point.value[1].toFixed(2)} ${unit}`;
+    unit: string,
+    scale: number,
+): EChartsOption => {
+    const axes = seriesAxes(palette, scale);
+    return {
+        title: seriesTitle(palette, title, scale),
+        tooltip: {
+            trigger: 'axis',
+            ...seriesTooltip(palette, scale),
+            formatter: (params: any) => {
+                const point = params[0];
+                return `${dayjs(point.value[0]).format('HH:mm:ss')}<br/>${point.value[1].toFixed(2)} ${unit}`;
+            },
         },
-    },
-    grid: {left: '3%', right: '4%', bottom: '3%', top: '40px', containLabel: true},
-    xAxis: {
-        type: 'time',
-        ...seriesAxes(palette),
-        axisLabel: {
-            ...seriesAxes(palette).axisLabel,
-            formatter: (value: number) => dayjs(value).format('HH:mm:ss'),
+        grid: {left: '3%', right: '4%', bottom: '3%', top: '40px', containLabel: true},
+        xAxis: {
+            type: 'time',
+            ...axes,
+            axisLabel: {
+                ...axes.axisLabel,
+                formatter: (value: number) => dayjs(value).format('HH:mm:ss'),
+            },
         },
-    },
-    yAxis: {type: 'value', name: unit, nameTextStyle: {color: palette.label}, ...seriesAxes(palette)},
-    series: [
-        {
-            type: 'line',
-            smooth: true,
-            symbol: 'none',
-            lineStyle: {width: 2, color},
-            areaStyle: {color: `${color}20`},
-            data: data.map(d => [d.timestamp, d.value]),
+        yAxis: {
+            type: 'value',
+            name: unit,
+            nameTextStyle: {color: palette.label, fontSize: Math.round(12 * scale)},
+            ...axes,
         },
-    ],
-});
+        series: [
+            {
+                type: 'line',
+                smooth: true,
+                symbol: 'none',
+                lineStyle: {width: 2, color},
+                areaStyle: {color: `${color}20`},
+                data: data.map(d => [d.timestamp, d.value]),
+            },
+        ],
+    };
+};
 
 // 吞吐量柱状图配置
 const createThroughputBarOption = (
     data: {time: string; in: number; out: number}[],
     palette: TopologyPalette,
+    scale: number,
 ): EChartsOption => ({
-    tooltip: {trigger: 'axis', ...seriesTooltip(palette)},
-    legend: {data: ['输入', '输出'], top: 0, textStyle: {color: palette.label}},
+    tooltip: {trigger: 'axis', ...seriesTooltip(palette, scale)},
+    legend: {data: ['输入', '输出'], top: 0, textStyle: {color: palette.label, fontSize: Math.round(12 * scale)}},
     grid: {left: '3%', right: '4%', bottom: '3%', top: '40px', containLabel: true},
-    xAxis: {type: 'category', data: data.map(d => d.time), ...seriesAxes(palette)},
-    yAxis: {type: 'value', name: 'KB/s', nameTextStyle: {color: palette.label}, ...seriesAxes(palette)},
+    xAxis: {type: 'category', data: data.map(d => d.time), ...seriesAxes(palette, scale)},
+    yAxis: {
+        type: 'value',
+        name: 'KB/s',
+        nameTextStyle: {color: palette.label, fontSize: Math.round(12 * scale)},
+        ...seriesAxes(palette, scale),
+    },
     series: [
         {
             name: '输入',
@@ -139,17 +156,18 @@ const createPieOption = (
     data: {name: string; value: number}[],
     title: string,
     palette: TopologyPalette,
+    scale: number,
 ): EChartsOption => ({
-    title: seriesTitle(palette, title),
+    title: seriesTitle(palette, title, scale),
     tooltip: {
         trigger: 'item',
         formatter: '{a} <br/>{b}: {c} ({d}%)',
-        ...seriesTooltip(palette),
+        ...seriesTooltip(palette, scale),
     },
     legend: {
         orient: 'vertical',
         left: 'left',
-        textStyle: {color: palette.label},
+        textStyle: {color: palette.label, fontSize: Math.round(12 * scale)},
     },
     series: [
         {
@@ -166,6 +184,7 @@ const createPieOption = (
                 show: true,
                 formatter: '{b}: {c}',
                 color: palette.label,
+                fontSize: Math.round(12 * scale),
             },
             data,
         },
@@ -176,6 +195,7 @@ const createPieOption = (
 // 全局监控页签，此时回落到自动选一个已连接集群。
 const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
     const palette = useTopologyPalette();
+    const fontScale = useFontFactor();
     const [loading, setLoading] = useState(false);
     const [selectedCluster, setSelectedCluster] = useState<string>(clusterId ?? '');
     const [stats, setStats] = useState<AggregatedStats | null>(null);
@@ -349,13 +369,13 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
     // 使用 useMemo 缓存图表配置
     const msgRateInChartOption = useMemo(() => {
         const filteredData = filterMetricsByDateRange(metricsHistory.msgRateIn, dateRange);
-        return createTimeSeriesOption('', filteredData, palette.primary, palette, 'msg/s');
-    }, [metricsHistory.msgRateIn, dateRange, filterMetricsByDateRange, palette]);
+        return createTimeSeriesOption('', filteredData, palette.primary, palette, 'msg/s', fontScale);
+    }, [metricsHistory.msgRateIn, dateRange, filterMetricsByDateRange, palette, fontScale]);
 
     const msgRateOutChartOption = useMemo(() => {
         const filteredData = filterMetricsByDateRange(metricsHistory.msgRateOut, dateRange);
-        return createTimeSeriesOption('', filteredData, palette.success, palette, 'msg/s');
-    }, [metricsHistory.msgRateOut, dateRange, filterMetricsByDateRange, palette]);
+        return createTimeSeriesOption('', filteredData, palette.success, palette, 'msg/s', fontScale);
+    }, [metricsHistory.msgRateOut, dateRange, filterMetricsByDateRange, palette, fontScale]);
 
     // 生成吞吐量柱状图数据（使用真实历史数据 + 日期过滤）
     const throughputData = useMemo(() => {
@@ -378,8 +398,8 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
 
     // 吞吐量柱状图配置
     const throughputChartOption = useMemo(
-        () => createThroughputBarOption(throughputData, palette),
-        [throughputData, palette],
+        () => createThroughputBarOption(throughputData, palette, fontScale),
+        [throughputData, palette, fontScale],
     );
 
     // 资源分布数据
@@ -395,8 +415,8 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
 
     // 资源分布饼图配置
     const resourceChartOption = useMemo(
-        () => createPieOption(resourceData, '集群资源', palette),
-        [resourceData, palette],
+        () => createPieOption(resourceData, '集群资源', palette, fontScale),
+        [resourceData, palette, fontScale],
     );
 
     // 保留窗口的起点：只存 60 个采样点，更早的时间在图上永远不会有数据。
@@ -412,14 +432,13 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
 
     return (
         <PageShell
-            title="监控仪表盘"
             actions={
                 <>
                     <Select
                         aria-label="监控目标集群"
                         value={selectedCluster}
                         onChange={setSelectedCluster}
-                        style={{width: 200}}
+                        style={{width: 160}}
                         placeholder="选择集群"
                         disabled={!!clusterId}
                         options={clusters.map(c => ({label: c.name, value: c.id}))}
@@ -429,7 +448,7 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                         onChange={dates => setDateRange(dates as [dayjs.Dayjs, dayjs.Dayjs] | null)}
                         showTime
                         format="YYYY-MM-DD HH:mm"
-                        style={{width: 280}}
+                        style={{width: 250}}
                         placeholder={['开始时间', '结束时间']}
                         disabledDate={current =>
                             current.isBefore(retainedStart, 'day') || current.isAfter(dayjs(), 'day')
@@ -447,7 +466,7 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                                 message.error(`刷新间隔保存失败：${result.error}`);
                             }
                         }}
-                        style={{width: 120}}
+                        style={{width: 100}}
                         options={[
                             {label: '实时 5s', value: 5},
                             {label: '10秒', value: 10},
@@ -471,7 +490,7 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                 emptyText="暂无集群配置，请先在首页添加并连接集群"
             >
                 {/* 集群统计卡片 */}
-                <Row gutter={[16, 16]}>
+                <Row gutter={[12, 12]}>
                     <Col span={6}>
                         <Card>
                             <Statistic
@@ -540,49 +559,26 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                     </Col>
                 </Row>
 
-                {/* Broker 和连接统计 */}
-                <Row gutter={[16, 16]}>
-                    <Col span={8}>
-                        <Card>
-                            <Statistic
-                                title="活跃 Brokers"
-                                value={brokers.length}
-                                suffix="个"
-                                valueStyle={{color: 'var(--color-primary)'}}
-                            />
-                            <div style={{marginTop: 'var(--spacing-sm)'}}>
-                                {brokers.map((broker, idx) => (
-                                    <Tag key={idx} color="blue">
-                                        {broker}
-                                    </Tag>
-                                ))}
-                            </div>
-                        </Card>
-                    </Col>
-                    <Col span={8}>
-                        <Card>
-                            <Statistic
-                                title="生产者"
-                                value={stats?.totalProducers || 0}
-                                suffix="个"
-                                valueStyle={{color: 'var(--color-success)'}}
-                            />
-                        </Card>
-                    </Col>
-                    <Col span={8}>
-                        <Card>
-                            <Statistic
-                                title="消费者"
-                                value={stats?.totalConsumers || 0}
-                                suffix="个"
-                                valueStyle={{color: 'var(--color-warning)'}}
-                            />
-                        </Card>
-                    </Col>
-                </Row>
+                {/* Broker 与连接计数：三张统计卡说的就是三个数字，收进一行把高度留给趋势图 */}
+                <div className="summary-line">
+                    <span>
+                        活跃 Brokers <strong>{brokers.length}</strong>
+                    </span>
+                    {brokers.map((broker, idx) => (
+                        <span key={idx} className="mono">
+                            {broker}
+                        </span>
+                    ))}
+                    <span>
+                        生产者 <strong>{stats?.totalProducers || 0}</strong>
+                    </span>
+                    <span>
+                        消费者 <strong>{stats?.totalConsumers || 0}</strong>
+                    </span>
+                </div>
 
                 {/* 消息速率趋势 */}
-                <Row gutter={[16, 16]}>
+                <Row gutter={[12, 12]}>
                     <Col span={12}>
                         <ChartCard
                             title="消息输入速率趋势"
@@ -602,7 +598,7 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                 </Row>
 
                 {/* 吞吐量和资源分布 */}
-                <Row gutter={[16, 16]}>
+                <Row gutter={[12, 12]}>
                     <Col span={12}>
                         <ChartCard
                             title="吞吐量对比"
