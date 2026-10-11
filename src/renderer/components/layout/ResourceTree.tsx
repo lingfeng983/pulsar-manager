@@ -119,20 +119,8 @@ const ResourceTree: React.FC = () => {
                 <Space>
                     <ClusterOutlined style={{color: 'var(--color-primary)'}} />
                     <span>{cluster.name}</span>
-                    <span
-                        style={{
-                            fontSize: 10,
-                            padding: '0 4px',
-                            borderRadius: 4,
-                            backgroundColor:
-                                cluster.status === 'connected'
-                                    ? 'var(--color-success)'
-                                    : cluster.status === 'warning'
-                                      ? 'var(--color-warning)'
-                                      : 'var(--color-text-secondary)',
-                            color: '#fff',
-                        }}
-                    >
+                    <span className={`tree-status tree-status-${cluster.status ?? 'disconnected'}`}>
+                        <span className="tree-status-dot" aria-hidden />
                         {cluster.status === 'connected' ? '在线' : cluster.status === 'warning' ? '警告' : '离线'}
                     </span>
                 </Space>
