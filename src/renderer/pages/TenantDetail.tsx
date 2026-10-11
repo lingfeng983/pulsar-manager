@@ -4,6 +4,7 @@ import {FolderOutlined, DatabaseOutlined, TagOutlined, ArrowRightOutlined} from 
 import {useTabStore} from '../store/tabs';
 import {loadNamespaces} from '../hooks/resourceCache';
 import {shortName} from '../utils/format';
+import {namespaceTab} from '../utils/tabIds';
 
 interface TenantDetailProps {
     clusterId: string;
@@ -66,12 +67,7 @@ const TenantDetail: React.FC<TenantDetailProps> = ({clusterId, tenant}) => {
     }, [fetchTenantInfo]);
 
     const handleNamespaceClick = (namespace: string) => {
-        addTab({
-            id: `namespace-${clusterId}-${tenant}-${namespace}`,
-            title: `${tenant} / ${namespace}`,
-            type: 'namespace',
-            data: {clusterId, tenant, namespace},
-        });
+        addTab(namespaceTab(clusterId, tenant, namespace));
     };
 
     const namespaceColumns = [

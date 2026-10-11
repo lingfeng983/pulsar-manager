@@ -34,6 +34,7 @@ import {
 import type {TopicConfigPatch, TopicStats} from '../types';
 import {useTabStore} from '../store/tabs';
 import {formatBytes, formatMessageRate, formatThroughput} from '../utils/format';
+import {topicTabId} from '../utils/tabIds';
 import {invalidateTopics, invalidateTopicStats} from '../hooks/resourceCache';
 import MessageBrowser from './MessageBrowser';
 import {useCommand} from '../hooks/useKeybindings';
@@ -77,7 +78,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
     const [configLoading, setConfigLoading] = useState(false);
 
     const {removeTab} = useTabStore();
-    const tabId = `topic-${clusterId}-${tenant}-${namespace}-${topic}`;
+    const tabId = topicTabId({clusterId, tenant, namespace, topic, persistent});
 
     useCommand('browseMessages', () => setActiveTab('messages'));
     // Topic 完整 URI，供配置页展示

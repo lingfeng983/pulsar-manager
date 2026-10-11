@@ -30,6 +30,7 @@ import {
     type ResourceChangeTarget,
 } from '../../hooks/resourceCache';
 import {shortName} from '../../utils/format';
+import {topicTab, tenantTab, namespaceTab, topologyTab, metricsTab} from '../../utils/tabIds';
 import {useCommand} from '../../hooks/useKeybindings';
 import TenantFormModal from '../tenant/TenantFormModal';
 import TopicFormModal from '../topic/TopicFormModal';
@@ -83,6 +84,8 @@ const ResourceTree: React.FC = () => {
     treeDataRef.current = treeData;
     const expandedKeysRef = useRef<React.Key[]>([]);
     expandedKeysRef.current = expandedKeys;
+    // 每个节点 key 的加载代次，用于丢弃迟到的旧响应
+    const reloadEpochRef = useRef(new Map<string, number>());
     const [contextMenu, setContextMenu] = useState<{x: number; y: number; node: ResourceTreeNode | null} | null>(null);
     const {clusters, fetchClusters, setActiveCluster, deleteClusterAsync, expandedClusterId} = useClusterStore();
     const {addTab} = useTabStore();
@@ -132,8 +135,9 @@ const ResourceTree: React.FC = () => {
         }));
     }, [clusters]);
 
-    // 加载指定节点的子节点（带缓存）
-    const loadTreeNodeData = useCallback(async (node: ResourceTreeNode): Promise<DataNode[]> => {
+    // 加载指定节点的子节点（带缓存）。失败返回 null —— 调用方据此保留原有子树，
+    // 返回 [] 会把"请求失败"渲染成"这个分支本来就是空的"。
+    const loadTreeNodeData = useCallback(async (node: ResourceTreeNode): Promise<DataNode[] | null> => {
         const dataRef = node.dataRef;
         if (!dataRef) return [];
 
@@ -195,22 +199,51 @@ const ResourceTree: React.FC = () => {
         } catch (error) {
             console.error('Failed to load tree node data:', error);
             message.error('加载资源失败');
+            return null;
         }
 
+        // 未知节点类型：确实没有子节点，按空处理而不是失败
         return [];
     }, []);
 
+    // 重载某个节点后，用新列表替换旧列表；同名节点已经加载的下级子树必须原样保留。
+    // 否则"刷新"会按展开顺序连带重读父层（集群→租户），新拉出来的租户节点 children
+    // 为空，把用户已经展开的命名空间/topic 分支整个打回空壳。
+    const mergeChildNodes = useCallback(
+        (prevChildren: DataNode[] | undefined, nextChildren: DataNode[]): DataNode[] => {
+            if (!prevChildren || prevChildren.length === 0) {
+                return nextChildren;
+            }
+            const prevByKey = new Map(prevChildren.map(n => [n.key, n]));
+            return nextChildren.map(n => {
+                const prevNode = prevByKey.get(n.key);
+                return prevNode && prevNode.children && prevNode.children.length > 0
+                    ? {...n, children: prevNode.children}
+                    : n;
+            });
+        },
+        [],
+    );
+
     // 变更后重新读取某个节点的子节点。handleLoadData 会跳过"已有子节点"的节点，
     // 所以增删改之后必须走这个强制重载，否则树会一直显示旧列表。
+    // 每个节点各记一个代次：连续两次增删（例如建完立刻删）时，先发出的慢响应
+    // 回来不能把后一次的结果盖掉。
     const reloadNodeChildren = useCallback(
         async (node: ResourceTreeNode) => {
             if (!node.dataRef) return;
+            const key = String(node.key);
+            const epoch = (reloadEpochRef.current.get(key) ?? 0) + 1;
+            reloadEpochRef.current.set(key, epoch);
             const children = await loadTreeNodeData(node);
+            if (children === null || reloadEpochRef.current.get(key) !== epoch) {
+                return;
+            }
             setTreeData(prev => {
                 const update = (nodes: DataNode[]): DataNode[] =>
                     nodes.map(n => {
                         if (n.key === node.key) {
-                            return {...n, children};
+                            return {...n, children: mergeChildNodes(n.children, children)};
                         }
                         if (n.children) {
                             return {...n, children: update(n.children)};
@@ -220,7 +253,7 @@ const ResourceTree: React.FC = () => {
                 return update(prev);
             });
         },
-        [loadTreeNodeData],
+        [loadTreeNodeData, mergeChildNodes],
     );
 
     // 增删改之后要重载的是"父节点"，这里按 key 约定合成父节点，
@@ -244,20 +277,22 @@ const ResourceTree: React.FC = () => {
     // 数据只清缓存，而本组件把子节点存在自己的 treeData 里，不重读就永远显示旧列表。
     // 只有已在树里的分支才值得重载，未展开的节点交给下一次 handleLoadData。
     useEffect(() => {
-        const nodeForTarget = (target: Exclude<ResourceChangeTarget, {kind: 'all'}>): ResourceTreeNode | null => {
-            if (target.kind === 'tenants') {
-                return clusterNode(target.clusterId);
+        // 树里只有集群/租户/命名空间/topic 四层，统计类失效（topicStats）没有对应分支，
+        // 显式返回 null 而不是落进兜底分支错重载命名空间。
+        const nodeForTarget = (target: ResourceChangeTarget): ResourceTreeNode | null => {
+            switch (target.kind) {
+                case 'tenants':
+                    return clusterNode(target.clusterId);
+                case 'namespaces':
+                    return tenantNode(target.clusterId, target.tenant);
+                case 'topics':
+                    return namespaceNode(target.clusterId, target.tenant, target.namespace);
+                default:
+                    return null;
             }
-            if (target.kind === 'namespaces') {
-                return tenantNode(target.clusterId, target.tenant);
-            }
-            return namespaceNode(target.clusterId, target.tenant, target.namespace);
         };
 
         return onResourceCacheInvalidated(target => {
-            if (target.kind === 'all') {
-                return;
-            }
             const node = nodeForTarget(target);
             if (node && containsNodeKey(treeDataRef.current, node.key)) {
                 void reloadNodeChildren(node);
@@ -269,12 +304,17 @@ const ResourceTree: React.FC = () => {
     // topic 子树全部丢掉，任何一次集群状态刷新都让展开的分支被打回空壳。
     // 这里只增删集群根节点、更新其标题与状态徽标，展开节点的 children 原样保留。
     useEffect(() => {
-        setTreeData(prev => {
-            const existingByKey = new Map(prev.map(n => [n.key, n]));
-            return clusterToTreeData.map(next => {
-                const existing = existingByKey.get(next.key);
-                return existing ? {...next, children: existing.children} : next;
-            });
+        const existingByKey = new Map(treeDataRef.current.map(n => [n.key, n]));
+        const next = clusterToTreeData.map(entry => {
+            const existing = existingByKey.get(entry.key);
+            return existing ? {...entry, children: existing.children} : entry;
+        });
+        setTreeData(next);
+        // 集群被删掉后，展开列表里会留下它的 key（以及它下面的租户/命名空间）；
+        // 本地的 expandedKeys 不会自己收缩，顺手把树里已经不存在的 key 丢掉。
+        setExpandedKeys(keys => {
+            const kept = keys.filter(key => containsNodeKey(next, key));
+            return kept.length === keys.length ? keys : kept;
         });
     }, [clusterToTreeData]);
 
@@ -302,7 +342,13 @@ const ResourceTree: React.FC = () => {
             // 检查是否已有子节点
             if ((node?.children?.length ?? 0) > 0) return;
 
+            const key = String(node.key);
+            const epoch = (reloadEpochRef.current.get(key) ?? 0) + 1;
+            reloadEpochRef.current.set(key, epoch);
             const children = await loadTreeNodeData(node);
+            if (children === null || reloadEpochRef.current.get(key) !== epoch) {
+                return;
+            }
             setTreeData(prev => {
                 const updateNode = (nodes: DataNode[]): DataNode[] => {
                     return nodes.map(n => {
@@ -332,31 +378,19 @@ const ResourceTree: React.FC = () => {
             if (dataRef?.type === 'cluster') {
                 setActiveCluster(dataRef.clusterId ?? null);
             } else if (dataRef?.type === 'topic') {
-                const clusterId = dataRef.clusterId ?? '';
-                const tenant = dataRef.tenant ?? '';
-                const namespace = dataRef.namespace ?? '';
-                const topic = dataRef.topic ?? '';
-                const persistent = dataRef.persistent;
-                addTab({
-                    id: `topic-${clusterId}-${tenant}-${namespace}-${topic}`,
-                    title: topic,
-                    type: 'topic',
-                    data: {clusterId, tenant, namespace, topic, persistent},
-                });
+                addTab(
+                    topicTab({
+                        clusterId: dataRef.clusterId ?? '',
+                        tenant: dataRef.tenant ?? '',
+                        namespace: dataRef.namespace ?? '',
+                        topic: dataRef.topic ?? '',
+                        persistent: dataRef.persistent,
+                    }),
+                );
             } else if (dataRef?.type === 'tenant') {
-                addTab({
-                    id: `tenant-${dataRef.clusterId}-${dataRef.tenant}`,
-                    title: `${dataRef.tenant}`,
-                    type: 'tenant',
-                    data: dataRef,
-                });
+                addTab(tenantTab(dataRef.clusterId ?? '', dataRef.tenant ?? ''));
             } else if (dataRef?.type === 'namespace') {
-                addTab({
-                    id: `ns-${dataRef.clusterId}-${dataRef.tenant}-${dataRef.namespace}`,
-                    title: `${dataRef.namespace}`,
-                    type: 'namespace',
-                    data: dataRef,
-                });
+                addTab(namespaceTab(dataRef.clusterId ?? '', dataRef.tenant ?? '', dataRef.namespace ?? ''));
             }
         },
         [setActiveCluster, addTab],
@@ -449,51 +483,37 @@ const ResourceTree: React.FC = () => {
             switch (action) {
                 case 'view':
                     if (dataRef?.type === 'topic') {
-                        const clusterId = dataRef.clusterId ?? '';
-                        const tenant = dataRef.tenant ?? '';
-                        const namespace = dataRef.namespace ?? '';
-                        const topic = dataRef.topic ?? '';
-                        const persistent = dataRef.persistent;
-                        addTab({
-                            id: `topic-${clusterId}-${tenant}-${namespace}-${topic}`,
-                            title: topic,
-                            type: 'topic',
-                            data: {clusterId, tenant, namespace, topic, persistent},
-                        });
+                        addTab(
+                            topicTab({
+                                clusterId: dataRef.clusterId ?? '',
+                                tenant: dataRef.tenant ?? '',
+                                namespace: dataRef.namespace ?? '',
+                                topic: dataRef.topic ?? '',
+                                persistent: dataRef.persistent,
+                            }),
+                        );
                     } else if (dataRef?.type === 'cluster') {
                         setActiveCluster(dataRef.clusterId ?? '');
                     }
                     break;
                 case 'topology':
                     if (dataRef?.type === 'cluster') {
-                        addTab({
-                            id: `topology-${dataRef.clusterId}`,
-                            title: `${dataRef.cluster?.name || '集群'}拓扑`,
-                            type: 'topology',
-                            data: {clusterId: dataRef.clusterId},
-                        });
+                        addTab(topologyTab(dataRef.clusterId ?? '', dataRef.cluster?.name));
                     }
                     break;
                 case 'metrics':
                     if (dataRef?.type === 'cluster') {
-                        addTab({
-                            id: `metrics-${dataRef.clusterId}`,
-                            title: `${dataRef.cluster?.name || '集群'}监控`,
-                            type: 'metrics',
-                            data: {clusterId: dataRef.clusterId},
-                        });
+                        addTab(metricsTab(dataRef.clusterId, dataRef.cluster?.name));
                     } else if (dataRef?.type === 'topic') {
-                        const clusterId = dataRef.clusterId ?? '';
-                        const tenant = dataRef.tenant ?? '';
-                        const namespace = dataRef.namespace ?? '';
-                        const topic = dataRef.topic ?? '';
-                        const persistent = dataRef.persistent;
-                        addTab({
-                            id: `topic-${clusterId}-${tenant}-${namespace}-${topic}`,
-                            title: `${topic}`,
-                            type: 'topic',
-                            data: {clusterId, tenant, namespace, topic, persistent},
-                        });
+                        addTab(
+                            topicTab({
+                                clusterId: dataRef.clusterId ?? '',
+                                tenant: dataRef.tenant ?? '',
+                                namespace: dataRef.namespace ?? '',
+                                topic: dataRef.topic ?? '',
+                                persistent: dataRef.persistent,
+                            }),
+                        );
                     }
                     break;
                 case 'delete':
@@ -724,22 +744,14 @@ const ResourceTree: React.FC = () => {
         void handleRefresh();
     });
 
-    // 打开监控仪表盘
+    // 打开监控仪表盘（全局页签：跨集群自动选一个已连接集群）
     const handleOpenMetrics = useCallback(() => {
-        addTab({
-            id: 'metrics',
-            title: '监控仪表盘',
-            type: 'metrics',
-        });
+        addTab(metricsTab());
     }, [addTab]);
 
     // 打开拓扑可视化
     const handleOpenTopology = useCallback(() => {
-        addTab({
-            id: 'topology',
-            title: '集群拓扑',
-            type: 'topology',
-        });
+        addTab({id: 'topology', title: '集群拓扑', type: 'topology'});
     }, [addTab]);
 
     // 左右拖动调整侧边栏宽度

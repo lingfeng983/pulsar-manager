@@ -10,7 +10,7 @@ import ShortcutConfig from '../../pages/ShortcutConfig';
 import ConfigCenter from '../../pages/ConfigCenter';
 import PluginMarket from '../../pages/PluginMarket';
 import ClusterTopology from '../../components/metrics/ClusterTopology';
-import {useCommand} from '../../hooks/useKeybindings';
+import {useCommand, PaneActiveContext} from '../../hooks/useKeybindings';
 
 const TabWorkspace: React.FC = () => {
     const {tabs, activeTabId, setActiveTab, removeTab} = useTabStore();
@@ -104,18 +104,22 @@ const TabWorkspace: React.FC = () => {
 
     useCommand('closeOtherTabs', () => closeOtherTabsThan(activeTabId));
 
-    // 关闭右侧标签页
+    // 关闭右侧标签页（右键命中的页签可能已经被别处关掉，找不到下标就别动）
     const handleCloseTabsToRight = () => {
         const tabIndex = tabs.findIndex(t => t.id === tabContextMenu.tabKey);
+        if (tabIndex < 0) {
+            setTabContextMenu(prev => ({...prev, visible: false}));
+            return;
+        }
         const tabsToClose = tabs.slice(tabIndex + 1).filter(t => t.id !== 'home');
         tabsToClose.forEach(t => removeTab(t.id));
-        setTabContextMenu({...tabContextMenu, visible: false});
+        setTabContextMenu(prev => ({...prev, visible: false}));
     };
 
     // 关闭当前右键命中的标签页（首页不可关闭）
     const handleCloseThisTab = () => {
         const targetKey = tabContextMenu.tabKey;
-        if (targetKey !== 'home') {
+        if (targetKey !== 'home' && tabs.some(t => t.id === targetKey)) {
             removeTab(targetKey);
         }
         setTabContextMenu(prev => ({...prev, visible: false}));
@@ -150,47 +154,46 @@ const TabWorkspace: React.FC = () => {
         return () => document.removeEventListener('keydown', handleKeyDown);
     }, [tabContextMenu.visible]);
 
-    // 根据 tab 类型渲染内容
+    // 按 tab.type 渲染内容。
+    // 不能用 tab.id 判断（`metrics` 是全局监控页签，而 `metrics-<clusterId>` 是某个集群的
+    // 监控页签），否则从资源树右键"查看监控"打开的页签会落到兜底的 TODO 分支上。
     const renderTabContent = (tab: (typeof tabs)[0]) => {
-        if (tab.id === 'home') {
-            return <HomePage />;
+        switch (tab.type) {
+            case 'home':
+                return <HomePage />;
+            case 'metrics':
+                return <MetricsDashboard clusterId={tab.data?.clusterId} />;
+            case 'topology':
+                return <ClusterTopology clusterId={tab.data?.clusterId} />;
+            case 'topic': {
+                const {clusterId, tenant, namespace, topic, persistent} = tab.data || {};
+                return (
+                    <TopicDetail
+                        clusterId={clusterId}
+                        tenant={tenant}
+                        namespace={namespace}
+                        topic={topic}
+                        persistent={persistent}
+                    />
+                );
+            }
+            case 'tenant': {
+                const {clusterId, tenant} = tab.data || {};
+                return <TenantDetail clusterId={clusterId} tenant={tenant} />;
+            }
+            case 'namespace': {
+                const {clusterId, tenant, namespace} = tab.data || {};
+                return <NamespaceDetail clusterId={clusterId} tenant={tenant} namespace={namespace} />;
+            }
+            case 'shortcuts':
+                return <ShortcutConfig />;
+            case 'config-center':
+                return <ConfigCenter />;
+            case 'plugins':
+                return <PluginMarket />;
+            default:
+                return <div>TODO: {tab.title}</div>;
         }
-        if (tab.id === 'metrics') {
-            return <MetricsDashboard />;
-        }
-        if (tab.type === 'topology') {
-            return <ClusterTopology clusterId={tab.data?.clusterId} />;
-        }
-        if (tab.type === 'topic') {
-            const {clusterId, tenant, namespace, topic, persistent} = tab.data || {};
-            return (
-                <TopicDetail
-                    clusterId={clusterId}
-                    tenant={tenant}
-                    namespace={namespace}
-                    topic={topic}
-                    persistent={persistent}
-                />
-            );
-        }
-        if (tab.type === 'tenant') {
-            const {clusterId, tenant} = tab.data || {};
-            return <TenantDetail clusterId={clusterId} tenant={tenant} />;
-        }
-        if (tab.type === 'namespace') {
-            const {clusterId, tenant, namespace} = tab.data || {};
-            return <NamespaceDetail clusterId={clusterId} tenant={tenant} namespace={namespace} />;
-        }
-        if (tab.type === 'shortcuts') {
-            return <ShortcutConfig />;
-        }
-        if (tab.type === 'config-center') {
-            return <ConfigCenter />;
-        }
-        if (tab.type === 'plugins') {
-            return <PluginMarket />;
-        }
-        return <div>TODO: {tab.title}</div>;
     };
 
     return (
@@ -217,7 +220,12 @@ const TabWorkspace: React.FC = () => {
                     key: tab.id,
                     label: <span>{tab.title}</span>,
                     closable: tab.id !== 'home',
-                    children: renderTabContent(tab),
+                    // 非当前页签的处理器不注册快捷键，见 useKeybindings 的 PaneActiveContext。
+                    children: (
+                        <PaneActiveContext.Provider value={tab.id === activeTabId}>
+                            {renderTabContent(tab)}
+                        </PaneActiveContext.Provider>
+                    ),
                 }))}
                 style={{
                     flex: 1,

@@ -19,6 +19,7 @@ import {useTabStore} from '../../store/tabs';
 import {useClusterStore} from '../../store/cluster';
 import {loadTenants, loadNamespaces, loadTopics} from '../../hooks/resourceCache';
 import {shortName} from '../../utils/format';
+import {topicTab, tenantTab, namespaceTab, topologyTab} from '../../utils/tabIds';
 import {downloadBlob} from '../../utils/download';
 import {useCommand} from '../../hooks/useKeybindings';
 import {useShortcutStore, resolveBinding} from '../../store/shortcuts';
@@ -153,19 +154,20 @@ const TopNav: React.FC = () => {
                                     if (full()) {
                                         break;
                                     }
-                                    const nsName = shortName(namespace);
-                                    if (nsName.toLowerCase().includes(lower)) {
+                                    // 主进程已把 "tenant/ns" 剥成裸命名空间名，这里不能再 shortName，
+                                    // 否则多层命名空间（a/b）会被截成 b，取 Topic 时与资源树对不上。
+                                    if (namespace.toLowerCase().includes(lower)) {
                                         results.push({
-                                            key: `namespace-${cluster.id}-${tenant.name}-${nsName}`,
-                                            label: `${cluster.name} / ${tenant.name} / ${nsName}`,
+                                            key: `namespace-${cluster.id}-${tenant.name}-${namespace}`,
+                                            label: `${cluster.name} / ${tenant.name} / ${namespace}`,
                                             type: 'namespace',
-                                            data: {clusterId: cluster.id, tenant: tenant.name, namespace: nsName},
+                                            data: {clusterId: cluster.id, tenant: tenant.name, namespace},
                                         });
                                     }
 
                                     // 搜索 Topic
                                     try {
-                                        const topics = await loadTopics(cluster.id, tenant.name, nsName);
+                                        const topics = await loadTopics(cluster.id, tenant.name, namespace);
                                         if (isStale()) {
                                             return;
                                         }
@@ -176,13 +178,15 @@ const TopNav: React.FC = () => {
                                             const topicName = shortName(topic.name);
                                             if (topicName.toLowerCase().includes(lower)) {
                                                 results.push({
-                                                    key: `topic-${cluster.id}-${tenant.name}-${nsName}-${topicName}`,
-                                                    label: [cluster.name, tenant.name, nsName, topicName].join(' / '),
+                                                    key: `topic-${cluster.id}-${tenant.name}-${namespace}-${topicName}`,
+                                                    label: [cluster.name, tenant.name, namespace, topicName].join(
+                                                        ' / ',
+                                                    ),
                                                     type: 'topic',
                                                     data: {
                                                         clusterId: cluster.id,
                                                         tenant: tenant.name,
-                                                        namespace: nsName,
+                                                        namespace,
                                                         topic: topicName,
                                                         persistent: topic.persistent,
                                                     },
@@ -222,9 +226,12 @@ const TopNav: React.FC = () => {
         if (searchValue.trim()) {
             const timer = setTimeout(() => searchResources(searchValue), 300);
             return () => clearTimeout(timer);
-        } else {
-            setSearchResults([]);
         }
+        // 清空输入也要作废在途请求（含 Escape 与选中结果后的清空），否则晚到的响应当
+        // 前一代次仍被视为"最新"，会把已经清空的下拉重新填回结果。
+        searchRequestRef.current += 1;
+        setSearchLoading(false);
+        setSearchResults([]);
     }, [searchValue, searchResources]);
 
     // 处理搜索结果点击
@@ -233,43 +240,23 @@ const TopNav: React.FC = () => {
         if (!result) return;
 
         switch (result.type) {
-            case 'cluster':
-                addTab({
-                    id: `topology-${result.data?.clusterId}`,
-                    title: `${result.data?.clusterId} - 拓扑`,
-                    type: 'topology',
-                    data: {clusterId: result.data?.clusterId},
-                });
+            case 'cluster': {
+                const clusterId = result.data?.clusterId ?? '';
+                addTab(topologyTab(clusterId, clusters.find(c => c.id === clusterId)?.name));
                 break;
+            }
             case 'tenant':
-                addTab({
-                    id: `tenant-${result.data?.clusterId}-${result.data?.tenant}`,
-                    title: `${result.data?.tenant}`,
-                    type: 'tenant',
-                    data: {clusterId: result.data?.clusterId, tenant: result.data?.tenant},
-                });
+                addTab(tenantTab(result.data?.clusterId ?? '', result.data?.tenant ?? ''));
                 break;
             case 'namespace':
-                addTab({
-                    id: `namespace-${result.data?.clusterId}-${result.data?.tenant}-${result.data?.namespace}`,
-                    title: `${result.data?.namespace}`,
-                    type: 'namespace',
-                    data: {
-                        clusterId: result.data?.clusterId,
-                        tenant: result.data?.tenant,
-                        namespace: result.data?.namespace,
-                    },
-                });
+                addTab(
+                    namespaceTab(result.data?.clusterId ?? '', result.data?.tenant ?? '', result.data?.namespace ?? ''),
+                );
                 break;
             case 'topic': {
                 const {clusterId, tenant, namespace, topic, persistent} = result.data || {};
                 if (clusterId && tenant && namespace && topic) {
-                    addTab({
-                        id: `topic-${clusterId}-${tenant}-${namespace}-${topic}`,
-                        title: topic,
-                        type: 'topic',
-                        data: {clusterId, tenant, namespace, topic, persistent},
-                    });
+                    addTab(topicTab({clusterId, tenant, namespace, topic, persistent}));
                 }
                 break;
             }

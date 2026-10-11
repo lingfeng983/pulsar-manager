@@ -1,6 +1,7 @@
 import {create} from 'zustand';
 import type {ClusterConfig} from '../types';
 import {useTabStore} from './tabs';
+import {invalidateResourceCache} from '../hooks/resourceCache';
 
 interface ClusterState {
     clusters: ClusterConfig[];
@@ -46,9 +47,13 @@ export const useClusterStore = create<ClusterState>((set, get) => ({
         set(state => ({
             clusters: state.clusters.filter(c => c.id !== id),
             activeClusterId: state.activeClusterId === id ? null : state.activeClusterId,
+            expandedClusterId: state.expandedClusterId === id ? null : state.expandedClusterId,
         }));
         // 集群没了，指向它的详情页/监控/拓扑标签全部会变成死链接，一并关掉。
         useTabStore.getState().removeClusterTabs(id);
+        // 树里缓存着这个集群的租户/命名空间/Topic，不整体失效的话重建同名集群会直接
+        // 显示上一个集群的内容（TTL 最长五分钟）。
+        invalidateResourceCache();
     },
     setLoading: loading => set({loading}),
     setError: error => set({error}),

@@ -4,6 +4,7 @@ import {FileTextOutlined, DatabaseOutlined, TagOutlined, ArrowRightOutlined} fro
 import {useTabStore} from '../store/tabs';
 import {loadTopics} from '../hooks/resourceCache';
 import {shortName} from '../utils/format';
+import {topicTab} from '../utils/tabIds';
 
 interface NamespaceDetailProps {
     clusterId: string;
@@ -71,12 +72,7 @@ const NamespaceDetail: React.FC<NamespaceDetailProps> = ({clusterId, tenant, nam
     }, [fetchNamespaceInfo]);
 
     const handleTopicClick = (topic: string, persistent: boolean) => {
-        addTab({
-            id: `topic-${clusterId}-${tenant}-${namespace}-${topic}`,
-            title: topic,
-            type: 'topic',
-            data: {clusterId, tenant, namespace, topic, persistent},
-        });
+        addTab(topicTab({clusterId, tenant, namespace, topic, persistent}));
     };
 
     const topicColumns = [

@@ -164,7 +164,8 @@ export type ResourceChangeTarget =
     | {kind: 'all'}
     | {kind: 'tenants'; clusterId: string}
     | {kind: 'namespaces'; clusterId: string; tenant: string}
-    | {kind: 'topics'; clusterId: string; tenant: string; namespace: string};
+    | {kind: 'topics'; clusterId: string; tenant: string; namespace: string}
+    | {kind: 'topicStats'; clusterId: string; tenant: string; namespace: string; topic: string};
 
 type ResourceChangeListener = (target: ResourceChangeTarget) => void;
 
@@ -217,8 +218,12 @@ export function invalidateTopics(clusterId: string, tenant: string, namespace: s
 
 /** 订阅增删、游标重置、跳过消息等会改变统计的操作后调用。 */
 export function invalidateTopicStats(clusterId: string, tenant: string, namespace: string, topic: string): void {
+    // 与其它 invalidate 一样要推进写入代次：否则失效之前发出的在途统计请求回来时
+    // 仍会被判成"最新"，把刚清掉的旧积压原样写回缓存。
+    writeEpoch += 1;
     const prefix = `topicStats:${clusterId}:${tenant}:${namespace}:${topic}:`;
     // persistent 是 key 的一部分，两种取值都要清掉
     topicStatsCache.delete(`${prefix}true`);
     topicStatsCache.delete(`${prefix}false`);
+    emitChange({kind: 'topicStats', clusterId, tenant, namespace, topic});
 }

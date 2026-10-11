@@ -173,6 +173,11 @@ export async function openPage() {
     const cdp = new Cdp(ws);
     await cdp.send('Runtime.enable');
     await cdp.send('Page.enable');
+    // 窗口被遮挡或最小化时 Chromium 把页面判成 hidden，requestAnimationFrame 会被冻结，
+    // 于是依赖 rAF 的绘制（ECharts 的 lazyUpdate、CSS 动画）在验证时永远不落地——
+    // 表现是"图表容器和 echarts 实例都在、就是没有 canvas"。焦点模拟让页面拿到
+    // visible+focused，rAF 恢复正常。
+    await cdp.send('Emulation.setFocusEmulationEnabled', {enabled: true});
     await cdp.send('Emulation.setDeviceMetricsOverride', {
         width: 1440,
         height: 920,
@@ -209,6 +214,7 @@ async function main() {
             throw new Error(`unknown command ${cmd}`);
         }
     } finally {
+        await cdp.send('Emulation.setFocusEmulationEnabled', {enabled: false}).catch(() => undefined);
         await cdp.send('Emulation.clearDeviceMetricsOverride').catch(() => undefined);
         close();
         process.exit(0);

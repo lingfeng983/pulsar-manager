@@ -31,6 +31,7 @@ import {useClusterStore} from '../../store/cluster';
 import {useTabStore} from '../../store/tabs';
 import type {ClusterConfig, ClusterTopology as ClusterTopologyPayload} from '../../types';
 import {shortName} from '../../utils/format';
+import {topicTab} from '../../utils/tabIds';
 import {useFullscreen} from '../../hooks/useFullscreen';
 import {useEchartsResize, zoomGraph, resetGraphView} from '../../hooks/useEcharts';
 import {useElementSize} from '../../hooks/useElementSize';
@@ -271,18 +272,15 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
                 return;
             }
             const topic = lastSegment(topicFullName);
-            addTab({
-                id: `topic-${node.clusterId}-${node.tenant}-${node.namespace}-${topic}`,
-                title: topic,
-                type: 'topic',
-                data: {
+            addTab(
+                topicTab({
                     clusterId: node.clusterId,
-                    tenant: node.tenant,
-                    namespace: node.namespace,
+                    tenant: node.tenant ?? '',
+                    namespace: node.namespace ?? '',
                     topic,
                     persistent: node.persistent ?? true,
-                },
-            });
+                }),
+            );
         },
         [addTab, rawNodes],
     );

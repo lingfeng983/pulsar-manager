@@ -192,8 +192,10 @@ pre,
 /* content-holder 是 display:block，antd 没给 .ant-tabs-content 定高，
    于是它按内容塌陷，标签页白白丢掉一截视口高度（图表只能退回 min-height）。
    body/#root 都是 overflow:hidden，页面滚动本就由各页根容器负责，
-   所以这里把确定高度传下来，而不是再套一层滚动容器。 */
-.ant-tabs-content-holder > .ant-tabs-content,
-.ant-tabs-content > .ant-tabs-tabpane {
+   所以这里把确定高度传下来，而不是再套一层滚动容器。
+   只作用于主工作区页签：详情页内嵌的 Tabs（Topic 概览/消息/订阅）不是撑满高度的
+   容器，被这条规则按 100% 钉住后内容会溢出到看不见。 */
+.main-workspace-tabs .ant-tabs-content-holder > .ant-tabs-content,
+.main-workspace-tabs .ant-tabs-content-holder > .ant-tabs-content > .ant-tabs-tabpane {
     height: 100%;
 }

@@ -13,26 +13,47 @@ type EchartsLike =
 
 // 容器尺寸变化（侧栏折叠、标签页切换）不会触发 window resize，
 // 因此同时监听 ResizeObserver 和 window resize。
+//
+// 这里不能只在 mount 时读一次 containerRef.current：拓扑图这类容器是在
+// "暂无集群"分支之后才挂载的，首次 effect 时 ref 还是 null，等节点真的出现时
+// 依赖（ref 对象本身）没变、effect 不会重跑，监听就永远没挂上。改为每次渲染后
+// 比对一次当前节点，只有节点真的换了才重新连接。
 export function useEchartsResize(containerRef: RefObject<HTMLElement | null>, getChart: () => EchartsLike): void {
     const getChartRef = useRef(getChart);
     getChartRef.current = getChart;
+    const observerRef = useRef<ResizeObserver | null>(null);
+    const observedElRef = useRef<HTMLElement | null>(null);
 
     useEffect(() => {
         const handleResize = () => {
             getChartRef.current()?.resize();
         };
 
-        const observer = new ResizeObserver(handleResize);
-        if (containerRef.current) {
-            observer.observe(containerRef.current);
+        const el = containerRef.current;
+        if (el && observedElRef.current !== el) {
+            observerRef.current?.disconnect();
+            const observer = new ResizeObserver(handleResize);
+            observer.observe(el);
+            observerRef.current = observer;
+            observedElRef.current = el;
         }
-        window.addEventListener('resize', handleResize);
+    });
 
-        return () => {
-            observer.disconnect();
-            window.removeEventListener('resize', handleResize);
+    useEffect(() => {
+        const handleWindowResize = () => {
+            getChartRef.current()?.resize();
         };
-    }, [containerRef]);
+        window.addEventListener('resize', handleWindowResize);
+        return () => window.removeEventListener('resize', handleWindowResize);
+    }, []);
+
+    useEffect(
+        () => () => {
+            observerRef.current?.disconnect();
+            observedElRef.current = null;
+        },
+        [],
+    );
 }
 
 // graphRoam action 注册时 update 是 'none'，dispatchAction 只改 model 不重绘。

@@ -179,10 +179,12 @@ const createPieOption = (
     ],
 });
 
-const MetricsDashboard: React.FC = () => {
+// clusterId 由工作区页签传入（`metrics-<clusterId>`）；不带则是资源树工具栏的
+// 全局监控页签，此时回落到自动选一个已连接集群。
+const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
     const palette = useTopologyPalette();
     const [loading, setLoading] = useState(false);
-    const [selectedCluster, setSelectedCluster] = useState<string>('');
+    const [selectedCluster, setSelectedCluster] = useState<string>(clusterId ?? '');
     const [stats, setStats] = useState<AggregatedStats | null>(null);
     const [brokers, setBrokers] = useState<string[]>([]);
     // 刷新节奏是应用级设置（配置中心可改），页面上的选择器直接读写它：
@@ -224,14 +226,16 @@ const MetricsDashboard: React.FC = () => {
         fetchClusters();
     }, [fetchClusters]);
 
-    // 设置默认集群（优先选择已连接的集群）
+    // 设置默认集群（优先选择已连接的集群）。页签指定了集群就不插手，否则用户从
+    // 某集群的监控页签切一下集群，页面会自己跳回"第一个已连接集群"。
     useEffect(() => {
-        if (clusters.length > 0 && !selectedCluster) {
-            // 优先选择已连接的集群
-            const connectedCluster = clusters.find(c => c.status === 'connected');
-            setSelectedCluster(connectedCluster?.id || clusters[0].id);
+        if (clusterId || clusters.length === 0 || selectedCluster) {
+            return;
         }
-    }, [clusters, selectedCluster]);
+        // 优先选择已连接的集群
+        const connectedCluster = clusters.find(c => c.status === 'connected');
+        setSelectedCluster(connectedCluster?.id || clusters[0].id);
+    }, [clusters, selectedCluster, clusterId]);
 
     // 跟踪峰值消息速率（用于进度条动态分母）
     useEffect(() => {
@@ -440,6 +444,7 @@ const MetricsDashboard: React.FC = () => {
                         onChange={setSelectedCluster}
                         style={{width: 200}}
                         placeholder="选择集群"
+                        disabled={!!clusterId}
                         options={clusters.map(c => ({label: c.name, value: c.id}))}
                     />
                     <RangePicker

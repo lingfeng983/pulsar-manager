@@ -17,6 +17,7 @@ import {useFullscreen} from '../hooks/useFullscreen';
 import {useEchartsResize, zoomGraph} from '../hooks/useEcharts';
 import {useElementSize} from '../hooks/useElementSize';
 import {shortName} from '../utils/format';
+import {topicTab, topologyTab} from '../utils/tabIds';
 import {useTopologyPalette} from '../utils/topologyColors';
 import {
     buildTopologyOption,
@@ -310,27 +311,19 @@ const HomeTopology: React.FC = () => {
             }
             if (node.type === 'topic' && node.topicPath) {
                 const topic = lastSegment(node.topicPath);
-                addTab({
-                    id: `topic-${node.clusterId}-${node.tenant}-${node.namespace}-${topic}`,
-                    title: topic,
-                    type: 'topic',
-                    data: {
+                addTab(
+                    topicTab({
                         clusterId: node.clusterId,
-                        tenant: node.tenant,
-                        namespace: node.namespace,
+                        tenant: node.tenant ?? '',
+                        namespace: node.namespace ?? '',
                         topic,
                         persistent: node.persistent ?? true,
-                    },
-                });
+                    }),
+                );
                 return;
             }
             if (node.type === 'cluster') {
-                addTab({
-                    id: `topology-${node.clusterId}`,
-                    title: `${node.clusterName || '集群'}拓扑`,
-                    type: 'topology',
-                    data: {clusterId: node.clusterId},
-                });
+                addTab(topologyTab(node.clusterId, node.clusterName));
             }
         },
         [addTab, nodes],

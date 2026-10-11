@@ -1,10 +1,8 @@
 // 快捷键命令注册表。
 //
-// 这里刻意分成两层：
-//   1. COMMAND_CATALOG —— 用户可绑定的全量命令（配置页展示这些行）。
-//   2. runtime registry —— 当前挂载的组件实际注册的处理器。
-// 只有注册了处理器的命令才会在按键时产生动作，配置页据此区分"可用"与
-// "所在页面未就绪"，避免出现按了没反应的假绑定。
+// COMMAND_CATALOG 是用户可绑定的全量命令（配置页展示这些行），runtime registry
+// 是当前挂载页面上实际注册的处理器；派发时未注册的命令直接跳过，因此不会出现
+// "按了没反应还把按键吞掉"的假绑定。
 
 export type ShortcutGroup = '全局通用' | 'Tab操作' | '集群操作' | '消息调试' | '拓扑画布' | '监控';
 
@@ -32,6 +30,12 @@ export interface CommandMeta {
     group: ShortcutGroup;
     /** 出厂默认绑定，null 表示该平台上默认不占用按键。 */
     defaults: {windows: string | null; mac: string | null};
+    /**
+     * 焦点在输入框/文本域里时是否仍然生效。默认 false —— 否则在消息正文里打字
+     * 按 Ctrl+W 会直接关掉页签、Ctrl+K 会把焦点抢到搜索框。
+     * 只有"在编辑器里按下去本身就是这层意思"的命令才配 true。
+     */
+    allowInEditable?: boolean;
 }
 
 export const GROUP_ORDER: ShortcutGroup[] = ['全局通用', 'Tab操作', '集群操作', '消息调试', '拓扑画布', '监控'];
@@ -102,12 +106,14 @@ export const COMMAND_CATALOG: CommandMeta[] = [
         name: '刷新消息列表',
         group: '消息调试',
         defaults: {windows: 'Ctrl+Shift+r', mac: 'Cmd+Shift+r'},
+        allowInEditable: true,
     },
     {
         id: 'sendMessage',
         name: '发送消息',
         group: '消息调试',
         defaults: {windows: 'Ctrl+Enter', mac: 'Cmd+Enter'},
+        allowInEditable: true,
     },
     {
         id: 'topologyZoomIn',
@@ -166,10 +172,6 @@ export function registerCommand(id: CommandId, handler: CommandHandler): () => v
             handlers.delete(id);
         }
     };
-}
-
-export function hasCommandHandler(id: CommandId): boolean {
-    return (handlers.get(id)?.size ?? 0) > 0;
 }
 
 export function runCommand(id: CommandId): boolean {

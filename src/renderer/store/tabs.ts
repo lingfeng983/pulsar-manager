@@ -10,7 +10,6 @@ export interface TabItem {
 interface TabState {
     tabs: TabItem[];
     activeTabId: string;
-    setTabs: (tabs: TabItem[]) => void;
     addTab: (tab: TabItem) => void;
     removeTab: (id: string) => void;
     removeClusterTabs: (clusterId: string) => void;
@@ -20,13 +19,15 @@ interface TabState {
 export const useTabStore = create<TabState>(set => ({
     tabs: [{id: 'home', title: '首页', type: 'home'}],
     activeTabId: 'home',
-    setTabs: tabs => set({tabs}),
     addTab: tab =>
         set(state => {
-            // 检查是否已存在相同标签
-            const exists = state.tabs.find(t => t.id === tab.id);
-            if (exists) {
-                return {tabs: state.tabs, activeTabId: tab.id};
+            // 命中已存在的页签：标题与 data 用最新一次调用覆盖（同一资源的入口不止一个，
+            // 参数可能更完整），但绝不能把页签重新挂载成第二个实例。
+            if (state.tabs.some(t => t.id === tab.id)) {
+                return {
+                    tabs: state.tabs.map(t => (t.id === tab.id ? {...t, ...tab, data: {...t.data, ...tab.data}} : t)),
+                    activeTabId: tab.id,
+                };
             }
             return {tabs: [...state.tabs, tab], activeTabId: tab.id};
         }),
