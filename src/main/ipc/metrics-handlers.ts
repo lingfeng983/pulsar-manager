@@ -1,4 +1,4 @@
-import {z, registerClientHandler, ClusterIdSchema, NamespacePathSchema, markClusterStatus} from './_shared';
+import {z, registerClientHandler, ClusterIdSchema, markClusterStatus} from './_shared';
 
 const ClusterOnlySchema = z.object({clusterId: ClusterIdSchema});
 
@@ -40,14 +40,6 @@ export function registerMetricsHandlers() {
         ClusterOnlySchema,
         ([clusterId]) => ({clusterId}),
         client => client.getBrokers(),
-    );
-
-    // 获取命名空间统计
-    registerClientHandler(
-        'metrics:getNamespaceStats',
-        NamespacePathSchema,
-        ([clusterId, tenant, namespace]) => ({clusterId, tenant, namespace}),
-        (client, {tenant, namespace}) => client.getNamespaceStats(tenant, namespace),
     );
 
     // ========== 拓扑 ==========

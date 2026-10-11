@@ -22,6 +22,7 @@ import {
     type SSHTunnelRecord,
 } from '../database/sqlite';
 import {encrypt, decrypt} from '../services/encryption';
+import {SERVICE_URL_PATTERN, WEB_URL_PATTERN} from '../services/app-config';
 import {PulsarAdminClient, clientManager} from '../services/pulsar-admin';
 import {condenseErrorText} from '../services/http-client';
 import {sshTunnelManager, type TunnelEndpoints, type TunnelTargets} from '../services/ssh-tunnel';
@@ -62,6 +63,10 @@ export type {SSHTunnelRecord, TunnelTargets};
 // Zod schemas for validation
 export const ClusterIdSchema = z.string().min(1).uuid();
 
+// 隧道 id 一律限成 uuid：它是 ssh_tunnels 的主键。空串或垃圾 id 不查表的话会以
+// "新建"的名义落进一堆重复隧道。
+export const TunnelIdSchema = z.string().uuid().optional().nullable();
+
 export const SshInlineSchema = z.object({
     host: z.string().min(1).max(253),
     port: z.number().int().min(1).max(65535).optional(),
@@ -82,43 +87,73 @@ export const SshInlineSchema = z.object({
 });
 
 export const SSHConfigSchema = SshInlineSchema.extend({
-    id: ClusterIdSchema.optional(),
+    id: TunnelIdSchema,
 });
 
-export const ClusterConfigSchema = z
-    .object({
-        name: z.string().min(1),
-        serviceUrl: z.string().min(1),
-        webServiceUrl: z.string().optional().nullable(),
-        authPlugin: z.string().optional().nullable(),
-        authParams: z.string().optional().nullable(),
-        tlsEnabled: z.boolean().optional().nullable(),
-        tlsTrustCerts: z.string().optional().nullable(),
-        useSshTunnel: z.boolean().optional().nullable(),
-        sshConfigId: z.string().optional().nullable(),
-        ssh: SshInlineSchema.optional().nullable(),
-        adminApiTimeout: z.number().optional().nullable(),
-    })
-    // 勾选了隧道就必须有可用的隧道配置：要么这次填了新参数，要么已经有落库的
-    // sshConfigId。缺了它会在连接阶段才报"隧道配置不存在"，用户看不到原因。
-    .refine(config => !config.useSshTunnel || !!config.ssh?.host || !!config.sshConfigId, {
-        message: 'SSH 隧道需要主机与用户名',
-    });
+// 集群表单从打开起就带着 ssh 的半成品默认值（只有 port/authType）。没勾隧道时
+// 拿完整 SSH 校验去卡它，"测试连接"就会抛一整段 zod JSON。未勾选直接丢掉这段。
+function stripUnusedSsh<T extends z.ZodTypeAny>(schema: T) {
+    return z.preprocess(value => {
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+            const record = value as Record<string, unknown>;
+            if (!record.useSshTunnel && 'ssh' in record) {
+                const rest = {...record};
+                delete rest.ssh;
+                return rest;
+            }
+        }
+        return value;
+    }, schema);
+}
+
+// webServiceUrl 允许留空（集群可能没有暴露 admin），空串按"没填"处理；
+// 一旦填了就必须是 http/https，避免拿 file:// 之类的地址去做 admin 请求。
+const optionalWebUrl = z
+    .string()
+    .optional()
+    .nullable()
+    .refine(value => !value || WEB_URL_PATTERN.test(value), {message: '需为 http:// 或 https:// 地址'});
+
+export const ClusterConfigSchema = stripUnusedSsh(
+    z
+        .object({
+            name: z.string().min(1),
+            serviceUrl: z.string().regex(SERVICE_URL_PATTERN, '需为 pulsar://、pulsar+ssl:// 或 ssl:// 地址'),
+            webServiceUrl: optionalWebUrl,
+            authPlugin: z.string().optional().nullable(),
+            authParams: z.string().optional().nullable(),
+            tlsEnabled: z.boolean().optional().nullable(),
+            tlsTrustCerts: z.string().optional().nullable(),
+            useSshTunnel: z.boolean().optional().nullable(),
+            sshConfigId: TunnelIdSchema,
+            ssh: SshInlineSchema.optional().nullable(),
+            adminApiTimeout: z.number().optional().nullable(),
+        })
+        // 勾选了隧道就必须有可用的隧道配置：要么这次填了新参数，要么已经有落库的
+        // sshConfigId。缺了它会在连接阶段才报"隧道配置不存在"，用户看不到原因。
+        .refine(config => !config.useSshTunnel || !!config.ssh?.host || !!config.sshConfigId, {
+            message: 'SSH 隧道需要主机与用户名',
+        }),
+);
 
 // 测试连接与真实请求走同一套地址解析：勾选隧道时先建隧道再打本地端口，
 // 否则"测试通过但保存后连不上"的情况永远对不上号。
-export const ClusterTestSchema = z.object({
-    serviceUrl: z.string().min(1),
-    webServiceUrl: z.string().optional().nullable(),
-    authPlugin: z.string().optional().nullable(),
-    authParams: z.string().optional().nullable(),
-    adminApiTimeout: z.number().optional().nullable(),
-    tlsEnabled: z.boolean().optional().nullable(),
-    tlsTrustCerts: z.string().optional().nullable(),
-    useSshTunnel: z.boolean().optional().nullable(),
-    sshConfigId: z.string().optional().nullable(),
-    ssh: SshInlineSchema.optional().nullable(),
-});
+// id 是"这次测试代表哪台已保存集群"（编辑弹窗本来就带着它），只用于隧道归属校验。
+export const ClusterTestSchema = stripUnusedSsh(
+    z.object({
+        id: ClusterIdSchema.optional().nullable(),
+        serviceUrl: z.string().regex(SERVICE_URL_PATTERN, '需为 pulsar://、pulsar+ssl:// 或 ssl:// 地址'),
+        webServiceUrl: optionalWebUrl,
+        authPlugin: z.string().optional().nullable(),
+        authParams: z.string().optional().nullable(),
+        adminApiTimeout: z.number().optional().nullable(),
+        tlsEnabled: z.boolean().optional().nullable(),
+        tlsTrustCerts: z.string().optional().nullable(),
+        useSshTunnel: z.boolean().optional().nullable(),
+        sshConfigId: TunnelIdSchema,
+        ssh: SshInlineSchema.optional().nullable(),
+    }),
+);
 
 // 通用验证 schema
 export const TenantSchema = z
@@ -422,7 +457,19 @@ export function normalizeCluster(cluster: any, tunnel?: SSHTunnelRecord) {
 
 // 格式化错误信息（只返回错误消息，不包含堆栈，避免泄露敏感信息）
 export function formatError(error: unknown): string {
-    const message = error instanceof Error ? error.message : typeof error === 'string' ? error : JSON.stringify(error);
+    let message: string;
+    if (error instanceof z.ZodError) {
+        // zod 的 issue 列表是一整段 JSON，渲染层直接进 toast 完全读不懂；
+        // 取第一条的字段路径 + 期望，够说清楚是哪里不合法。
+        const issue = error.issues[0];
+        message = issue ? `字段 ${issue.path.join('.') || '未知字段'} 不合法：${issue.message}` : '输入校验失败';
+    } else if (error instanceof Error) {
+        message = error.message;
+    } else if (typeof error === 'string') {
+        message = error;
+    } else {
+        message = JSON.stringify(error);
+    }
     // 渲染层把这段文本直接塞进 toast，broker 的 500 响应带完整 Java 堆栈时会撑爆提示。
     return condenseErrorText(message) || message;
 }
@@ -504,15 +551,40 @@ export function tunnelVerifyHost(
     return parseUrl(source.web_service_url).host || parseUrl(source.service_url).host || targets.remoteHost;
 }
 
+// 隧道行是集群表单内联录入的私有配置：拿着别的集群的 id 过来，会把那台集群的
+// SSH 主机与凭据整行换掉。ownerClusterId 表示"这次操作代表哪个集群"，只有它自己
+// 名下的行才允许改写。
+function requireOwnedTunnel(sshConfigId: string, ownerClusterId?: string | null): SSHTunnelRecord {
+    const existing = getSSHTunnelById(sshConfigId);
+    if (!existing) {
+        throw new Error('未找到对应的 SSH 隧道配置，请在集群设置里重新填写');
+    }
+    const owner = getAllClusters().find(
+        cluster => cluster.ssh_config_id === existing.id && cluster.id !== ownerClusterId,
+    );
+    if (owner) {
+        throw new Error(`该 SSH 隧道配置已被集群「${owner.name}」使用，请重新填写一份隧道参数`);
+    }
+    return existing;
+}
+
+/**
+ * 勾选了隧道但这次没有重填参数：沿用已落库的那一行（校验存在与归属），不写任何数据。
+ */
+export function reuseSshConfig(sshConfigId: string, ownerClusterId?: string | null): string {
+    return requireOwnedTunnel(sshConfigId, ownerClusterId).id;
+}
+
 /**
  * 把表单里的隧道参数落库：有 sshConfigId 就覆盖那一行，否则新建。
  * 凭据留空表示沿用已保存的值（凭据从不下发到渲染进程）。返回落库后的行 id。
  */
-export function persistSshConfig(ssh: z.infer<typeof SshInlineSchema>, sshConfigId?: string | null): string {
-    const existing = sshConfigId ? getSSHTunnelById(sshConfigId) : undefined;
-    if (sshConfigId && !existing) {
-        throw new Error('未找到对应的 SSH 隧道配置，请在集群设置里重新填写');
-    }
+export function persistSshConfig(
+    ssh: z.infer<typeof SshInlineSchema>,
+    sshConfigId?: string | null,
+    ownerClusterId?: string | null,
+): string {
+    const existing = sshConfigId ? requireOwnedTunnel(sshConfigId, ownerClusterId) : undefined;
     if (!existing) {
         const id = uuidv4();
         insertSSHTunnel({
@@ -566,11 +638,15 @@ export function persistSshConfig(ssh: z.infer<typeof SshInlineSchema>, sshConfig
  */
 export async function establishTunnel(
     clusterLike: {service_url: string; web_service_url?: string | null},
-    options: {sshConfigId?: string | null; ssh?: z.infer<typeof SshInlineSchema> | null},
+    options: {
+        sshConfigId?: string | null;
+        ssh?: z.infer<typeof SshInlineSchema> | null;
+        ownerClusterId?: string | null;
+    },
 ): Promise<TunnelResolution> {
     let tunnelId: string;
     if (options.ssh) {
-        tunnelId = persistSshConfig(options.ssh, options.sshConfigId);
+        tunnelId = persistSshConfig(options.ssh, options.sshConfigId, options.ownerClusterId);
         await sshTunnelManager.invalidate(tunnelId);
     } else {
         if (!options.sshConfigId) {

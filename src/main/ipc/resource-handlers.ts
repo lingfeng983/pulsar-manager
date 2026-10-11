@@ -220,7 +220,8 @@ export function registerResourceHandlers() {
             client.deleteSubscription(tenant, namespace, topic, subscription, persistent),
     );
 
-    registerClientHandler(
+    // 游标一跳，未消费的消息就可能永远读不到了，这两条必须进审计
+    registerMutationHandler(
         'resources:resetCursor',
         ResetCursorSchema,
         ([clusterId, tenant, namespace, topic, subscription, position, timestamp, persistent]) => ({
@@ -232,6 +233,13 @@ export function registerResourceHandlers() {
             position,
             timestamp,
             persistent: persistent ?? true,
+        }),
+        ({tenant, namespace, topic, subscription, position, timestamp}) => ({
+            action: 'update',
+            resource_type: 'subscription',
+            resource_id: `${tenant}/${namespace}/${topic}/${subscription}`,
+            resource_name: `${tenant}/${namespace}/${topic}/${subscription}`,
+            details: `reset cursor to ${position}${position === 'timestamp' ? ` @${timestamp}` : ''}`,
         }),
         async (client, {tenant, namespace, topic, subscription, position, timestamp, persistent}) => {
             if (position === 'earliest') {
@@ -248,7 +256,7 @@ export function registerResourceHandlers() {
         },
     );
 
-    registerClientHandler(
+    registerMutationHandler(
         'resources:skipMessages',
         SkipMessagesSchema,
         ([clusterId, tenant, namespace, topic, subscription, count, persistent]) => ({
@@ -259,6 +267,13 @@ export function registerResourceHandlers() {
             subscription,
             count,
             persistent: persistent ?? true,
+        }),
+        ({tenant, namespace, topic, subscription, count}) => ({
+            action: 'update',
+            resource_type: 'subscription',
+            resource_id: `${tenant}/${namespace}/${topic}/${subscription}`,
+            resource_name: `${tenant}/${namespace}/${topic}/${subscription}`,
+            details: `skipped ${count} messages`,
         }),
         (client, {tenant, namespace, topic, subscription, count, persistent}) =>
             client.skipMessages(tenant, namespace, topic, subscription, count, persistent),

@@ -5,6 +5,7 @@ import {
     setSetting,
     SSHConfigSchema,
     ClusterIdSchema,
+    z,
     ensureDbInitialized,
     formatError,
     registerRawHandler,
@@ -25,6 +26,16 @@ function isAllowedSettingsKey(key: unknown): key is string {
 
 function tunnelStatus(id: string): 'connected' | 'disconnected' {
     return sshTunnelManager.endpoints(id) ? 'connected' : 'disconnected';
+}
+
+const ThemeSchema = z.enum(['light', 'dark', 'eyeCare']);
+
+// 一次最多取 1000 条：日志表没有上限地把整张表读进内存再序列化给渲染进程，
+// 是把自己主进程卡死的最快方式
+const LOG_LIMIT_MAX = 1000;
+
+function normalizeLogLimit(limit: unknown): number {
+    return typeof limit === 'number' && Number.isInteger(limit) && limit > 0 ? Math.min(limit, LOG_LIMIT_MAX) : 50;
 }
 
 export function registerSystemHandlers() {
@@ -107,13 +118,16 @@ export function registerSystemHandlers() {
 
     // ========== 主题 ==========
 
+    // 主题只有这三种：写进 user_settings 的 theme 会在启动时决定 data-theme，
+    // 放开任意字符串等于让渲染层把一个不存在的主题名写进库（界面从此没有配色表）。
     registerRawHandler('theme:set', async theme => {
         try {
             ensureDbInitialized();
-            if (typeof theme !== 'string') {
+            const parsed = ThemeSchema.safeParse(theme);
+            if (!parsed.success) {
                 return {success: false, error: 'Invalid theme'};
             }
-            setSetting('theme', theme);
+            setSetting('theme', parsed.data);
             return {success: true};
         } catch (error) {
             log.error('theme:set failed', formatError(error));
@@ -124,11 +138,15 @@ export function registerSystemHandlers() {
     registerRawHandler('theme:get', async () => {
         try {
             ensureDbInitialized();
-            const theme = getSetting('theme') || 'light';
-            return {success: true, data: theme};
+            const stored = getSetting('theme');
+            // 库里的值不认（老版本写过的别名、被外部改坏）就回 light，
+            // 但仍然报成功——读不到自己的设置不是用户的错，不该弹错误条
+            const parsed = ThemeSchema.safeParse(stored);
+            return {success: true, data: parsed.success ? parsed.data : 'light'};
         } catch (error) {
-            log.error('theme:get failed, falling back to light', formatError(error));
-            return {success: true, data: 'light'};
+            // 回 success:true 会把"数据库读挂了"伪装成"用户用的是浅色主题"
+            log.error('theme:get failed', formatError(error));
+            return {success: false, error: formatError(error)};
         }
     });
 
@@ -171,8 +189,7 @@ export function registerSystemHandlers() {
         try {
             ensureDbInitialized();
             const {getRecentOperationLogs} = await import('../database/sqlite.js');
-            const safeLimit = typeof limit === 'number' && limit > 0 ? Math.floor(limit) : 50;
-            const logs = getRecentOperationLogs(safeLimit);
+            const logs = getRecentOperationLogs(normalizeLogLimit(limit));
             return {success: true, data: logs};
         } catch (error) {
             log.error('logs:getRecent failed', formatError(error));

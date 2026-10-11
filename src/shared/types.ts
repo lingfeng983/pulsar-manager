@@ -250,18 +250,6 @@ export interface AggregatedStats {
     totalBacklog: number;
 }
 
-export interface NamespaceStats {
-    topicCount: number;
-    subscriptionCount: number;
-    producerCount: number;
-    consumerCount: number;
-    totalMsgRateIn: number;
-    totalMsgRateOut: number;
-    totalThroughputIn: number;
-    totalThroughputOut: number;
-    totalBacklog: number;
-}
-
 // ========== 消息 ==========
 
 // 收发全部走原生 pulsar-client：admin REST 上没有 send / peek 路由。

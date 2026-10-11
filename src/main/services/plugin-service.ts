@@ -76,6 +76,14 @@ function ensurePluginsDir(): string {
     return dir;
 }
 
+// 把外部传入的相对路径钉在插件目录里：越界的一律返回 null，由调用方按"没装"处理。
+// 校验放在服务层而不是只放 IPC，是因为卸载走的是递归删除。
+function insidePluginsDir(dir: string, relative: string): string | null {
+    const target = path.resolve(dir, relative);
+    const root = path.resolve(dir) + path.sep;
+    return target.startsWith(root) ? target : null;
+}
+
 /** 解析并校验一份插件 JSON；返回 manifest 或人话形式的失败原因。 */
 export function parsePluginManifest(raw: string): {manifest: PluginManifest} | {error: string} {
     let json: unknown;
@@ -223,14 +231,14 @@ export function installPluginFromText(raw: string): PluginEntry {
 
 export function uninstallPlugin(id: string): void {
     const dir = getPluginsDir();
-    const flat = path.join(dir, `${id}.json`);
-    const nested = path.join(dir, id);
+    const flat = insidePluginsDir(dir, `${id}.json`);
+    const nested = insidePluginsDir(dir, id);
     let removed = false;
-    if (fs.existsSync(flat)) {
+    if (flat && fs.existsSync(flat)) {
         fs.rmSync(flat);
         removed = true;
     }
-    if (fs.existsSync(nested)) {
+    if (nested && fs.existsSync(nested)) {
         fs.rmSync(nested, {recursive: true, force: true});
         removed = true;
     }

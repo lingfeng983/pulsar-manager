@@ -17,7 +17,6 @@ import type {
     LoadTestProgress,
     MessageBatch,
     MessageSendParams,
-    NamespaceStats,
     OperationLog,
     PluginEntry,
     PluginListResult,
@@ -205,8 +204,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     metrics: {
         getAggregatedStats: (clusterId: string) => ipcRenderer.invoke('metrics:getAggregatedStats', clusterId),
         getBrokers: (clusterId: string) => ipcRenderer.invoke('metrics:getBrokers', clusterId),
-        getNamespaceStats: (clusterId: string, tenant: string, namespace: string) =>
-            ipcRenderer.invoke('metrics:getNamespaceStats', clusterId, tenant, namespace),
     },
 
     // 拓扑
@@ -266,7 +263,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         tokenStatus: () => ipcRenderer.invoke('update:tokenStatus'),
         setToken: (token: string) => ipcRenderer.invoke('update:setToken', token),
         check: () => ipcRenderer.invoke('update:check'),
-        download: (url: string, fileName: string) => ipcRenderer.invoke('update:download', url, fileName),
+        download: (url: string) => ipcRenderer.invoke('update:download', url),
         install: () => ipcRenderer.invoke('update:install'),
         onProgress: (
             callback: (progress: {received: number; total: number; done?: boolean; error?: string}) => void,
@@ -422,11 +419,6 @@ declare global {
             metrics: {
                 getAggregatedStats: (clusterId: string) => Promise<APIResponse<AggregatedStats>>;
                 getBrokers: (clusterId: string) => Promise<APIResponse<BrokerInfo>>;
-                getNamespaceStats: (
-                    clusterId: string,
-                    tenant: string,
-                    namespace: string,
-                ) => Promise<APIResponse<NamespaceStats>>;
             };
             topology: {
                 getClusterTopology: (
@@ -485,7 +477,7 @@ declare global {
                         size?: number;
                     }>
                 >;
-                download: (url: string, fileName: string) => Promise<APIResponse<{file: string}>>;
+                download: (url: string) => Promise<APIResponse<{file: string}>>;
                 install: () => Promise<APIResponse<void>>;
                 onProgress: (
                     callback: (progress: {received: number; total: number; done?: boolean; error?: string}) => void,

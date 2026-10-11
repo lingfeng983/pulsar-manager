@@ -13,8 +13,15 @@ import {createLogger} from '../utils/logger';
 
 const log = createLogger('IPC');
 
-const PluginIdSchema = z.object({id: z.string().min(1).max(80)});
-const PluginToggleSchema = z.object({id: z.string().min(1).max(80), enabled: z.boolean()});
+// 与插件清单里的 id 同一条规则：卸载会拿它拼文件路径并递归删除目录，
+// 放宽成"任意 80 字符以内"就等于把 ../../ 递进 rmSync。
+const PluginIdSchema = z.object({
+    id: z.string().regex(/^[a-z0-9][a-z0-9._-]{1,63}$/, 'id 需为 2~64 位小写字母、数字、点、下划线或连字符'),
+});
+const PluginToggleSchema = z.object({
+    id: PluginIdSchema.shape.id,
+    enabled: z.boolean(),
+});
 const PluginTextSchema = z.object({text: z.string().min(1).max(200000)});
 
 function requireObject<T>(schema: z.ZodType<T>, params: unknown, what: string): T {

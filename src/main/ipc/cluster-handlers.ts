@@ -16,6 +16,7 @@ import {
     ClusterConfigSchema,
     ClusterTestSchema,
     ClusterIdSchema,
+    SshInlineSchema,
     encrypt,
     encryptSensitiveFields,
     normalizeCluster,
@@ -23,6 +24,7 @@ import {
     registerRawHandler,
     ensureDbInitialized,
     persistSshConfig,
+    reuseSshConfig,
     establishTunnel,
     rewriteUrl,
     tunnelVerifyHost,
@@ -48,6 +50,24 @@ function parseSshConfig(config: unknown): z.infer<typeof ClusterConfigSchema> {
 
 type ClusterDraft = z.infer<typeof ClusterTestSchema>;
 
+// 隧道落库的三种情形：这次重填了参数（覆盖或新建）、只带了已保存的 id（沿用）、
+// 什么都没有（schema 已拦，这里只是不再对 ssh 做非空断言）。
+function resolveTunnelId(
+    config: {useSshTunnel?: boolean | null; ssh?: z.infer<typeof SshInlineSchema> | null; sshConfigId?: string | null},
+    ownerClusterId: string | null,
+): string | null {
+    if (!config.useSshTunnel) {
+        return null;
+    }
+    if (config.ssh) {
+        return persistSshConfig(config.ssh, config.sshConfigId, ownerClusterId);
+    }
+    if (config.sshConfigId) {
+        return reuseSshConfig(config.sshConfigId, ownerClusterId);
+    }
+    throw new Error('SSH 隧道需要主机与用户名');
+}
+
 // 测试连接与真实请求共用同一套地址解析：勾选隧道时先建隧道，再把地址换成
 // 本地转发端点，否则"测试通过但保存后连不上"永远对不上号。
 async function resolveTestTarget(
@@ -64,7 +84,7 @@ async function resolveTestTarget(
     }
     const resolved = await establishTunnel(
         {service_url: input.serviceUrl, web_service_url: input.webServiceUrl},
-        {sshConfigId: input.sshConfigId, ssh: input.ssh},
+        {sshConfigId: input.sshConfigId, ssh: input.ssh, ownerClusterId: input.id},
     );
     return {
         serviceUrl: rewriteUrl(input.serviceUrl, resolved.endpoints.localBrokerPort),
@@ -77,6 +97,23 @@ async function resolveTestTarget(
         ),
         sshConfigId: resolved.tunnelId,
     };
+}
+
+// 只为这次测试建立的隧道：用户点完"测试连接"就取消弹窗的话，本地监听端口和
+// SSH 长连接会一直留着（下一次启动还得换端口）。没有任何已保存集群引用它时才拆，
+// 正在被集群使用的转发不能动——真实请求虽然会按需重建，但没必要为此掐断在线链路。
+async function releaseTestOnlyTunnel(tunnelId?: string): Promise<void> {
+    if (!tunnelId) {
+        return;
+    }
+    if (getAllClusters().some(cluster => cluster.ssh_config_id === tunnelId)) {
+        return;
+    }
+    try {
+        await sshTunnelManager.disconnect(tunnelId);
+    } catch (error) {
+        log.warn('test tunnel cleanup failed', error instanceof Error ? error.message : String(error));
+    }
 }
 
 export function registerClusterHandlers() {
@@ -103,7 +140,7 @@ export function registerClusterHandlers() {
 
             const id = uuidv4();
             const encrypted = encryptSensitiveFields(validated);
-            const sshConfigId = validated.useSshTunnel ? persistSshConfig(validated.ssh!, validated.sshConfigId) : null;
+            const sshConfigId = resolveTunnelId(validated, id);
 
             // 集群记录、隧道记录与操作日志必须一起提交，避免出现只写了一半的状态
             runInTransaction(() => {
@@ -153,8 +190,17 @@ export function registerClusterHandlers() {
             }
 
             const validated = parseSshConfig(config);
+            // 表单没带隧道 id 时回落到该集群已保存的那条：编辑弹窗只回填非敏感字段，
+            // 用户没重填隧道参数就不该新建第二条
             const sshConfigId = validated.useSshTunnel
-                ? persistSshConfig(validated.ssh!, validated.sshConfigId || existing.ssh_config_id)
+                ? resolveTunnelId(
+                      {
+                          useSshTunnel: true,
+                          ssh: validated.ssh,
+                          sshConfigId: validated.sshConfigId || existing.ssh_config_id,
+                      },
+                      id,
+                  )
                 : existing.ssh_config_id;
 
             // 凭据不会下发到渲染进程，所以表单提交空值意味着"保持不变"，
@@ -251,9 +297,10 @@ export function registerClusterHandlers() {
     });
 
     registerRawHandler('cluster:testConnection', async config => {
+        let target: Awaited<ReturnType<typeof resolveTestTarget>> | null = null;
         try {
             const validated = ClusterTestSchema.parse(config);
-            const target = await resolveTestTarget(validated);
+            target = await resolveTestTarget(validated);
 
             // 创建临时客户端测试连接
             const client = new PulsarAdminClient({
@@ -269,10 +316,14 @@ export function registerClusterHandlers() {
                 tlsVerifyHost: target.tlsVerifyHost,
             });
 
-            const result = await client.testConnection();
-
-            // 清理临时客户端
-            client.destroy();
+            let result: {connected: boolean; version?: string};
+            try {
+                result = await client.testConnection();
+            } finally {
+                // 测试失败时也要释放临时客户端：原来 destroy 排在 await 之后，
+                // 抛异常就永远走不到
+                client.destroy();
+            }
 
             if (!result.connected) {
                 return {
@@ -289,6 +340,8 @@ export function registerClusterHandlers() {
         } catch (error) {
             log.error('cluster:testConnection failed', formatError(error));
             return {success: false, error: formatError(error)};
+        } finally {
+            await releaseTestOnlyTunnel(target?.sshConfigId);
         }
     });
 }

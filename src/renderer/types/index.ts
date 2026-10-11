@@ -18,7 +18,6 @@ export type {
     ConsumerStats,
     BrokerInfo,
     AggregatedStats,
-    NamespaceStats,
     Message,
     TopicPathParams,
     SubscriptionPathParams,

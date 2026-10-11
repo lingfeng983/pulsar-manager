@@ -27,8 +27,6 @@ function readToken(): string | undefined {
     }
 }
 
-let lastCheckedDownloadUrl: string | undefined;
-
 export function registerUpdateHandlers() {
     registerRawHandler('update:tokenStatus', async () => {
         try {
@@ -62,7 +60,6 @@ export function registerUpdateHandlers() {
         try {
             ensureDbInitialized();
             const result = await checkForUpdate(readToken());
-            lastCheckedDownloadUrl = result.downloadUrl;
             return {success: true, data: result};
         } catch (error) {
             const status = (error as {response?: {status?: number}})?.response?.status;
@@ -78,12 +75,13 @@ export function registerUpdateHandlers() {
         }
     });
 
-    registerRawHandler('update:download', async (url, fileName) => {
-        if (typeof url !== 'string' || typeof fileName !== 'string') {
+    registerRawHandler('update:download', async url => {
+        if (typeof url !== 'string') {
             return {success: false, error: '参数无效'};
         }
         try {
-            const file = await downloadUpdate(url, fileName, lastCheckedDownloadUrl);
+            // 文件名与校验和都取主进程里最近一次检查的结果，渲染层只提供它看到的 URL
+            const file = await downloadUpdate(url);
             return {success: true, data: {file}};
         } catch (error) {
             // 进度事件里已经推过错误，这里只回状态

@@ -79,14 +79,21 @@ const UpdateModal: React.FC<{open: boolean; onClose: () => void}> = ({open, onCl
     };
 
     const handleDownload = async () => {
-        if (!result?.downloadUrl || !result.fileName) return;
+        if (!result?.downloadUrl) return;
         setDownloading(true);
         setError(null);
         setProgress({received: 0, total: result.size || 0});
-        const response = await window.electronAPI.update.download(result.downloadUrl, result.fileName);
-        if (!response.success) {
+        try {
+            const response = await window.electronAPI.update.download(result.downloadUrl);
+            if (!response.success) {
+                setDownloading(false);
+                setError(response.error || '下载失败');
+            }
+        } catch (e) {
             setDownloading(false);
-            setError(response.error || '下载失败');
+            setError(String(e));
+        } finally {
+            setProgress(null);
         }
     };
 
@@ -157,7 +164,16 @@ const UpdateModal: React.FC<{open: boolean; onClose: () => void}> = ({open, onCl
                     </Space>
                 )}
 
-                {downloading && <Progress percent={percent} status="active" />}
+                {downloading && (
+                    <Space direction="vertical" style={{width: '100%'}} size={4}>
+                        <Progress percent={percent} status="active" />
+                        {progress && progress.total <= 0 && (
+                            <Typography.Text type="secondary" style={{fontSize: 12}}>
+                                已下载 {formatBytes(progress.received)}（服务端未报告总大小）
+                            </Typography.Text>
+                        )}
+                    </Space>
+                )}
 
                 {downloaded && (
                     <Alert

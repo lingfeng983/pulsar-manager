@@ -87,8 +87,10 @@ export function resetAppSettings(): AppSettings {
 export const EXPORT_FORMAT = 'pulsar-manager-config';
 export const EXPORT_VERSION = 1;
 
-const SERVICE_URL_PATTERN = /^(pulsar|pulsar\+ssl|ssl):\/\/[^\s]+$/;
-const WEB_URL_PATTERN = /^https?:\/\/[^\s]+$/;
+// 集群地址的协议白名单。导入文件与 IPC 边界共用同一份：界面上有同样的校验，
+// 但渲染层不可信，只靠表单校验挡不住直接调 IPC 的请求。
+export const SERVICE_URL_PATTERN = /^(pulsar|pulsar\+ssl|ssl):\/\/[^\s]+$/;
+export const WEB_URL_PATTERN = /^https?:\/\/[^\s]+$/;
 
 // 导出的集群**刻意不含任何凭据**：auth_params / 私钥 / 密码在库里是加密存的，
 // 导出文件却是要拷来拷去的明文，所以这里只留"是否配置过"的信息，

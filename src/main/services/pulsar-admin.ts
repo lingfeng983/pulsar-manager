@@ -264,10 +264,6 @@ export class PulsarAdminClient {
         return this.metricsAPI.getAggregatedStats();
     }
 
-    async getNamespaceStats(tenant: string, namespace: string) {
-        return this.metricsAPI.getNamespaceStats(tenant, namespace);
-    }
-
     // ========== 拓扑相关 ==========
 
     async getClusterTopology(limits?: TopologyLimits) {

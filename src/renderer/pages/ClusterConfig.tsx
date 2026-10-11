@@ -66,8 +66,8 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
             } else {
                 form.resetFields();
                 form.setFieldsValue({
-                    serviceUrl: 'pulsar://192.168.222.121:6650',
-                    webServiceUrl: 'http://192.168.222.121:8080',
+                    serviceUrl: 'pulsar://localhost:6650',
+                    webServiceUrl: 'http://localhost:8080',
                     adminApiTimeout: 5000,
                     tlsEnabled: false,
                     useSshTunnel: false,
@@ -94,11 +94,13 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
 
         try {
             const response = await window.electronAPI.cluster.testConnection(values);
+            // 失败时主进程同样回传它建立/落库的隧道 id：连不上不代表隧道没建，
+            // 不接住这条 id，保存时会再落一条重复的隧道配置。
+            if (response.data?.sshConfigId) {
+                form.setFieldValue('sshConfigId', response.data.sshConfigId);
+            }
             if (response.success && response.data) {
                 setTestResult(response.data);
-                if (response.data.sshConfigId) {
-                    form.setFieldValue('sshConfigId', response.data.sshConfigId);
-                }
                 message.success('连接成功！');
             } else {
                 setTestResult({connected: false});
@@ -188,6 +190,12 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
     };
 
     const handleCancel = () => {
+        // 「测试 SSH 隧道」建立的转发是真实占着本地端口的活动连接，弹窗关掉不等于
+        // 断开；只有编辑已有集群且隧道就是它自己那条时才留着（保存后还要用）。
+        const testTunnelId = form.getFieldValue('sshConfigId');
+        if (typeof testTunnelId === 'string' && testTunnelId && testTunnelId !== editingCluster?.sshConfigId) {
+            void window.electronAPI.ssh.disconnect(testTunnelId).catch(() => {});
+        }
         form.resetFields();
         setCurrentStep(0);
         setTestResult(null);
