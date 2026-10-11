@@ -1,5 +1,5 @@
-import React, {useEffect, useState, useCallback} from 'react';
-import {Card, Row, Col, Statistic, Table, Tag, Button, Space, Switch, Spin, Alert, Modal} from 'antd';
+import React, {useEffect, useRef, useState, useCallback} from 'react';
+import {Card, Row, Col, Statistic, Table, Tag, Button, Space, Switch, Spin, Alert, Modal, message} from 'antd';
 import {
     ClusterOutlined,
     DatabaseOutlined,
@@ -8,6 +8,8 @@ import {
     BarChartOutlined,
     AppstoreOutlined,
     ReloadOutlined,
+    CloudDownloadOutlined,
+    CloudUploadOutlined,
 } from '@ant-design/icons';
 import {useClusterStore} from '../store/cluster';
 import ClusterConfigModal from './ClusterConfig';
@@ -33,6 +35,8 @@ const HomePage: React.FC = () => {
     const [editingCluster, setEditingCluster] = useState<ClusterConfig | null>(null);
     const [globalStats, setGlobalStats] = useState<GlobalStats | null>(null);
     const [statsLoading, setStatsLoading] = useState(false);
+    // 集群集合一变就会重跑聚合，旧一轮的晚到响应不能覆盖新一轮的结果
+    const statsRequestRef = useRef(0);
 
     const {clusters, loading, error, fetchClusters, deleteClusterAsync, setActiveCluster, setExpandedCluster} =
         useClusterStore();
@@ -48,6 +52,7 @@ const HomePage: React.FC = () => {
             return;
         }
 
+        const requestId = ++statsRequestRef.current;
         setStatsLoading(true);
         try {
             // 获取所有已连接集群的统计并聚合
@@ -92,6 +97,9 @@ const HomePage: React.FC = () => {
             });
 
             const brokerCounts = await Promise.all(brokerPromises);
+            if (requestId !== statsRequestRef.current) {
+                return;
+            }
             aggregated.totalBrokers = brokerCounts.reduce((sum, count) => sum + count, 0);
 
             // 聚合其他统计
@@ -112,7 +120,9 @@ const HomePage: React.FC = () => {
         } catch (error) {
             console.error('Failed to load global stats:', error);
         } finally {
-            setStatsLoading(false);
+            if (requestId === statsRequestRef.current) {
+                setStatsLoading(false);
+            }
         }
     }, [clusters]);
 
@@ -147,7 +157,13 @@ const HomePage: React.FC = () => {
             okType: 'danger',
             cancelText: '取消',
             onOk: async () => {
-                await deleteClusterAsync(cluster.id);
+                const ok = await deleteClusterAsync(cluster.id);
+                if (!ok) {
+                    // 抛错才能让 antd 保持弹窗打开；直接 resolve 会在删除失败时
+                    // 静默关掉对话框，用户只看到集群还在列表里。
+                    message.error('删除失败，详情见页面顶部提示');
+                    throw new Error('delete cluster failed');
+                }
             },
         });
     };
@@ -270,7 +286,7 @@ const HomePage: React.FC = () => {
                 <>
                     {/* 全局指标卡片 */}
                     <Row gutter={16} style={{marginBottom: 'var(--spacing-lg)'}}>
-                        <Col span={6}>
+                        <Col span={8}>
                             <Card>
                                 <Statistic
                                     title="集群总数"
@@ -282,7 +298,7 @@ const HomePage: React.FC = () => {
                         </Col>
                         {clusters.some(c => c.status === 'connected') ? (
                             <>
-                                <Col span={6}>
+                                <Col span={8}>
                                     <Card>
                                         <Spin spinning={statsLoading}>
                                             <Statistic
@@ -294,7 +310,7 @@ const HomePage: React.FC = () => {
                                         </Spin>
                                     </Card>
                                 </Col>
-                                <Col span={6}>
+                                <Col span={8}>
                                     <Card>
                                         <Spin spinning={statsLoading}>
                                             <Statistic
@@ -310,18 +326,19 @@ const HomePage: React.FC = () => {
                                                     color: 'var(--color-text-secondary)',
                                                 }}
                                             >
-                                                分区: {globalStats?.totalPartitions || 0}
+                                                分区: {globalStats?.totalPartitions || 0}｜订阅:{' '}
+                                                {globalStats?.totalSubscriptions || 0}
                                             </div>
                                         </Spin>
                                     </Card>
                                 </Col>
-                                <Col span={6}>
+                                <Col span={8}>
                                     <Card>
                                         <Spin spinning={statsLoading}>
                                             <Statistic
-                                                title="总 TPS"
+                                                title="消息输入速率"
                                                 value={globalStats?.totalMsgRateIn || 0}
-                                                prefix={<MessageOutlined />}
+                                                prefix={<CloudDownloadOutlined />}
                                                 valueStyle={{color: 'var(--color-primary)'}}
                                                 precision={2}
                                                 suffix="msg/s"
@@ -329,9 +346,35 @@ const HomePage: React.FC = () => {
                                         </Spin>
                                     </Card>
                                 </Col>
+                                <Col span={8}>
+                                    <Card>
+                                        <Spin spinning={statsLoading}>
+                                            <Statistic
+                                                title="消息输出速率"
+                                                value={globalStats?.totalMsgRateOut || 0}
+                                                prefix={<CloudUploadOutlined />}
+                                                valueStyle={{color: 'var(--color-warning)'}}
+                                                precision={2}
+                                                suffix="msg/s"
+                                            />
+                                        </Spin>
+                                    </Card>
+                                </Col>
+                                <Col span={8}>
+                                    <Card>
+                                        <Spin spinning={statsLoading}>
+                                            <Statistic
+                                                title="积压消息"
+                                                value={globalStats?.totalBacklog || 0}
+                                                prefix={<MessageOutlined />}
+                                                valueStyle={{color: 'var(--color-text-primary)'}}
+                                            />
+                                        </Spin>
+                                    </Card>
+                                </Col>
                             </>
                         ) : (
-                            <Col span={18}>
+                            <Col span={16}>
                                 <Card>
                                     <div
                                         style={{

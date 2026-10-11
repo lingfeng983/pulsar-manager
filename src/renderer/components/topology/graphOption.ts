@@ -82,14 +82,15 @@ export function buildTopologyOption(params: {
     const {nodes, edges, palette, layout, showLegend = true} = params;
     const nodeById = new Map(nodes.map(node => [node.id, node]));
 
-    const present = new Set(nodes.map(node => node.type));
-    const categoryTypes = CATEGORY_ORDER.filter(type => present.has(type));
-    const categoryIndex = new Map(categoryTypes.map((type, index) => [type, index]));
-    const categories = categoryTypes.map(type => ({
+    // 分类表固定为完整类型表、不随数据增删：两张拓扑图都用合并式 setOption
+    // （notMerge=false，为的是保住用户拖动过的节点位置），而合并是按位覆盖数组的，
+    // 一旦某个类型的节点全部消失、catgories 数组变短，旧的多余分类会被留在图上，
+    // 切主题时那几项的颜色就再也刷不掉。定长数组让每次合并都是干净的按位覆盖。
+    const categoryIndex = new Map(CATEGORY_ORDER.map((type, index) => [type, index]));
+    const categories = CATEGORY_ORDER.map(type => ({
         name: NODE_TYPE_LABELS[type],
         itemStyle: {color: colorForType(type, palette)},
     }));
-
     // 节点越多越小、斥力越大，否则上百个节点会糊成一团。
     const baseSize = clamp(14, 40, 50 - nodes.length / 10);
     const repulsion = clamp(120, 600, 260 + nodes.length * 4);
@@ -168,7 +169,15 @@ export function buildTopologyOption(params: {
                     rows.push(`<div style="color:${palette.label}">${node.topicPath}</div>`);
                 }
                 if (node.count !== undefined) {
-                    rows.push(`<div>数量/速率: ${node.count}</div>`);
+                    // 同一个 count 字段在不同节点上含义不同：集群/Broker 是关联 Topic 个数，
+                    // topic 是消息速率。混在一句"数量/速率"里两种单位都说不清。
+                    if (node.type === 'topic') {
+                        rows.push(`<div>输入速率: ${node.count} msg/s</div>`);
+                    } else if (node.type === 'cluster' || node.type === 'broker') {
+                        rows.push(`<div>关联 Topic: ${node.count} 个</div>`);
+                    } else {
+                        rows.push(`<div>数量: ${node.count}</div>`);
+                    }
                 }
                 return rows.join('');
             },

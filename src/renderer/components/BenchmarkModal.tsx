@@ -23,7 +23,7 @@ import {useClusterStore} from '../store/cluster';
 import {usePluginStore, type PresetOption} from '../store/plugins';
 import {loadNamespaces, loadTenants, loadTopics} from '../hooks/resourceCache';
 import type {LoadTestCompression, LoadTestParams, LoadTestPhase, LoadTestProgress, Topic} from '../types';
-import {shortName} from '../utils/format';
+import {formatBytes, formatThroughputAuto, shortName} from '../utils/format';
 
 const COMPRESSION_OPTIONS: {value: LoadTestCompression; label: string}[] = [
     {value: 'None', label: '不压缩'},
@@ -39,13 +39,6 @@ const PHASE_TAG: Record<LoadTestPhase, {color: string; text: string}> = {
     stopped: {color: 'warning', text: '已停止'},
     error: {color: 'error', text: '出错'},
 };
-
-// 消息大小按 10 的档位显示，输入框收的仍是字节数
-function formatBytes(bytes: number): string {
-    if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
-    if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${bytes} B`;
-}
 
 function formatElapsed(ms: number): string {
     if (ms < 1000) return `${ms} ms`;
@@ -93,6 +86,7 @@ const BenchmarkModal: React.FC<BenchmarkModalProps> = ({open, onClose}) => {
     const [topics, setTopics] = useState<Topic[]>([]);
     const [loadingOptions, setLoadingOptions] = useState(false);
     const [starting, setStarting] = useState(false);
+    const [stopping, setStopping] = useState(false);
     const [progress, setProgress] = useState<LoadTestProgress | null>(null);
 
     const runIdRef = useRef<string | null>(null);
@@ -229,6 +223,9 @@ const BenchmarkModal: React.FC<BenchmarkModalProps> = ({open, onClose}) => {
             }
             runIdRef.current = response.data?.runId ?? null;
             message.success(`压测已启动：${response.data?.topic}`);
+            // 启动这一次点击到此结束：按钮的 loading 不能挂到进度事件上，
+            // 万一事件没送达，按钮会一直转圈点不动。
+            setStarting(false);
         } catch (error) {
             message.error(`压测启动失败：${(error as Error).message}`);
             setStarting(false);
@@ -241,8 +238,19 @@ const BenchmarkModal: React.FC<BenchmarkModalProps> = ({open, onClose}) => {
             setStarting(false);
             return;
         }
-        // 运行可能已经自行结束，这里不等它——终态由进度通道送达
-        void window.electronAPI.benchmark.stop(runId).catch(() => undefined);
+        // 等停止结果：原来 fire-and-forget 加静默 catch，停止失败时界面已经切回
+        // "运行中"，用户完全不知道这次点击落空了。
+        setStopping(true);
+        try {
+            const response = await window.electronAPI.benchmark.stop(runId);
+            if (!response.success) {
+                message.error(response.error || '停止压测失败');
+            }
+        } catch (error) {
+            message.error(`停止压测失败：${(error as Error).message}`);
+        } finally {
+            setStopping(false);
+        }
     }, []);
 
     // 套用后把实际写进表单的数字摊开显示，用户不必逐个字段核对
@@ -280,7 +288,7 @@ const BenchmarkModal: React.FC<BenchmarkModalProps> = ({open, onClose}) => {
                 <Space>
                     <Button onClick={onClose}>关闭</Button>
                     {running ? (
-                        <Button danger onClick={handleStop}>
+                        <Button danger loading={stopping} onClick={() => void handleStop()}>
                             停止
                         </Button>
                     ) : (
@@ -511,7 +519,9 @@ const BenchmarkModal: React.FC<BenchmarkModalProps> = ({open, onClose}) => {
                     />
                     <Descriptions size="small" column={3} style={{marginTop: 12}} bordered>
                         <Descriptions.Item label="吞吐">{progress.msgPerSec.toLocaleString()} 条/秒</Descriptions.Item>
-                        <Descriptions.Item label="带宽">{progress.mbPerSec} MB/秒</Descriptions.Item>
+                        <Descriptions.Item label="带宽">
+                            {formatThroughputAuto(progress.mbPerSec * 1024 * 1024)}
+                        </Descriptions.Item>
                         <Descriptions.Item label="耗时">{formatElapsed(progress.elapsedMs)}</Descriptions.Item>
                         <Descriptions.Item label="数据量">{formatBytes(progress.bytesSent)}</Descriptions.Item>
                         <Descriptions.Item label="已消费">{progress.consumed.toLocaleString()} 条</Descriptions.Item>

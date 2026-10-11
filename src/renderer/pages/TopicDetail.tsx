@@ -1,4 +1,4 @@
-import React, {useState, useEffect, useCallback, useRef} from 'react';
+import React, {useState, useEffect, useCallback, useRef, useContext} from 'react';
 import {
     Card,
     Tabs,
@@ -37,7 +37,7 @@ import {formatBytes, formatMessageRate, formatThroughput} from '../utils/format'
 import {topicTabId} from '../utils/tabIds';
 import {invalidateTopics, invalidateTopicStats} from '../hooks/resourceCache';
 import MessageBrowser from './MessageBrowser';
-import {useCommand} from '../hooks/useKeybindings';
+import {useCommand, PaneActiveContext} from '../hooks/useKeybindings';
 
 interface TopicDetailProps {
     clusterId: string;
@@ -64,6 +64,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
     const [deletingInProgress, setDeletingInProgress] = useState(false);
     const [createModalOpen, setCreateModalOpen] = useState(false);
     const [createForm] = Form.useForm();
+    const [creatingInProgress, setCreatingInProgress] = useState(false);
     const [resetCursorModalOpen, setResetCursorModalOpen] = useState(false);
     const [resettingSubscription, setResettingSubscription] = useState<string | null>(null);
     const [resettingInProgress, setResettingInProgress] = useState(false);
@@ -76,9 +77,13 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
     const [editConfigModalOpen, setEditConfigModalOpen] = useState(false);
     const [editConfigForm] = Form.useForm();
     const [configLoading, setConfigLoading] = useState(false);
+    const [savingInProgress, setSavingInProgress] = useState(false);
 
     const {removeTab} = useTabStore();
     const tabId = topicTabId({clusterId, tenant, namespace, topic, persistent});
+    // 外层页签被切走时 antd 只是 display:none，组件仍然挂载，15s 轮询会在后台
+    // 一直打 IPC。这里跟随页签激活态，非当前页签不启动轮询。
+    const paneActive = useContext(PaneActiveContext);
 
     useCommand('browseMessages', () => setActiveTab('messages'));
     // Topic 完整 URI，供配置页展示
@@ -128,6 +133,9 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
     }, [clusterId, tenant, namespace, topic, persistent]);
 
     useEffect(() => {
+        if (!paneActive) {
+            return;
+        }
         fetchTopicStats();
         const interval = setInterval(() => {
             // 窗口最小化/隐藏时不轮询；回到可见时由 visibilitychange 补一次
@@ -147,7 +155,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
             // 不清零 requestIdRef：归零后新请求会复用旧编号，
             // 失效前发出的在途响应就能冒充最新结果落进 state
         };
-    }, [fetchTopicStats]);
+    }, [fetchTopicStats, paneActive]);
 
     // 删除订阅
     const handleDeleteSubscription = async () => {
@@ -183,8 +191,15 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
 
     // 创建订阅
     const handleCreateSubscription = async () => {
+        let values: {name: string; initialPosition?: 'Earliest' | 'Latest'};
         try {
-            const values = await createForm.validateFields();
+            values = await createForm.validateFields();
+        } catch {
+            // 校验失败时 antd 抛出 errorFields，字段上已有红字提示，不该再弹"创建失败"
+            return;
+        }
+        setCreatingInProgress(true);
+        try {
             const response = await window.electronAPI.resources.createSubscription(
                 clusterId,
                 tenant,
@@ -205,6 +220,8 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
             }
         } catch {
             message.error('创建失败');
+        } finally {
+            setCreatingInProgress(false);
         }
     };
 
@@ -338,6 +355,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                 return;
             }
 
+            setSavingInProgress(true);
             const response = await window.electronAPI.resources.updateTopicConfig(
                 clusterId,
                 tenant,
@@ -361,6 +379,8 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
             // 校验失败时 antd 会抛 errorInfo，不应笼统报"更新失败"
             if (error?.errorFields) return;
             message.error(error?.message || '更新失败');
+        } finally {
+            setSavingInProgress(false);
         }
     };
 
@@ -466,12 +486,6 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
             key: 'producerName',
         },
         {
-            title: '状态',
-            dataIndex: 'connected',
-            key: 'connected',
-            render: (value: boolean) => <Tag color={value ? 'success' : 'error'}>{value ? '在线' : '离线'}</Tag>,
-        },
-        {
             title: '输入速率',
             dataIndex: 'msgRateIn',
             key: 'msgRateIn',
@@ -501,12 +515,6 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
             title: '所属订阅',
             dataIndex: 'subscription',
             key: 'subscription',
-        },
-        {
-            title: '状态',
-            dataIndex: 'connected',
-            key: 'connected',
-            render: (value: boolean) => <Tag color={value ? 'success' : 'error'}>{value ? '在线' : '离线'}</Tag>,
         },
         {
             title: '输出速率',
@@ -579,7 +587,9 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                     <Col span={6}>
                         <Statistic
                             title="总积压"
-                            value={stats?.backlogSize || 0}
+                            // broker 给的是字节数，直接渲染会是一长串数字（如 10485760）；
+                            // 与页面其他地方统一用人类可读单位。
+                            value={formatBytes(stats?.backlogSize ?? 0)}
                             prefix={<DatabaseOutlined />}
                             valueStyle={{
                                 color:
@@ -764,6 +774,9 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                                     namespace={namespace}
                                     topic={topic}
                                     persistent={persistent}
+                                    // 内层页签是 display:none 而非卸载，会话得靠这个标记停掉，
+                                    // 否则切到概览后消息浏览器还在后台收消息。
+                                    active={activeTab === 'messages'}
                                 />
                             ),
                         },
@@ -860,7 +873,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                     >
                         取消
                     </Button>,
-                    <Button key="submit" type="primary" onClick={handleCreateSubscription}>
+                    <Button key="submit" type="primary" loading={creatingInProgress} onClick={handleCreateSubscription}>
                         创建
                     </Button>,
                 ]}
@@ -972,12 +985,12 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
             >
                 <Form layout="vertical">
                     <Form.Item label="跳过消息数量">
-                        <Input
-                            type="number"
+                        <InputNumber
                             placeholder="输入要跳过的消息数量"
-                            value={skipCount}
-                            onChange={e => setSkipCount(e.target.value ? parseInt(e.target.value, 10) : 0)}
+                            value={skipCount > 0 ? skipCount : null}
+                            onChange={value => setSkipCount(typeof value === 'number' ? Math.floor(value) : 0)}
                             min={1}
+                            style={{width: '100%'}}
                         />
                     </Form.Item>
                     <p style={{color: 'var(--color-text-secondary)', fontSize: 12, marginTop: 8}}>
@@ -1004,7 +1017,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                     >
                         取消
                     </Button>,
-                    <Button key="submit" type="primary" onClick={handleSaveConfig}>
+                    <Button key="submit" type="primary" loading={savingInProgress} onClick={handleSaveConfig}>
                         保存配置
                     </Button>,
                 ]}

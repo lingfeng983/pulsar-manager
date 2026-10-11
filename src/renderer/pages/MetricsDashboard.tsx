@@ -1,4 +1,4 @@
-import React, {useState, useEffect, useCallback, useRef, useMemo} from 'react';
+import React, {useState, useEffect, useCallback, useRef, useMemo, useContext} from 'react';
 import {
     Card,
     Row,
@@ -25,7 +25,7 @@ import {useSettingsStore} from '../store/settings';
 import {formatThroughput, toKilobytesPerSecond} from '../utils/format';
 import {useTopologyPalette, type TopologyPalette} from '../utils/topologyColors';
 import {useFullscreen} from '../hooks/useFullscreen';
-import {useCommand} from '../hooks/useKeybindings';
+import {useCommand, PaneActiveContext} from '../hooks/useKeybindings';
 
 const {RangePicker} = DatePicker;
 const {Text} = Typography;
@@ -203,11 +203,16 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
     });
     const [error, setError] = useState<string | null>(null);
     const [peakMsgRate, setPeakMsgRate] = useState(0);
-    const chartRef = useRef<ReactECharts>(null);
+    // 每张图各持一个 ref：原来四张图共用一个，点任意一张卡片的"全屏"都会把整页放大。
+    const msgRateInRef = useRef<ReactECharts>(null);
+    const msgRateOutRef = useRef<ReactECharts>(null);
+    const throughputRef = useRef<ReactECharts>(null);
+    const resourceRef = useRef<ReactECharts>(null);
     const intervalRef = useRef<NodeJS.Timeout | null>(null);
-    const lastFetchRef = useRef<number>(0);
     // 单调递增的请求代次：切换集群后，旧集群的晚到响应不能覆盖新集群的数据
     const loadRequestRef = useRef(0);
+    // 外层页签切走后组件仍挂载（display:none），定时器得跟着激活态停掉
+    const paneActive = useContext(PaneActiveContext);
 
     const EMPTY_HISTORY: MultiMetricsHistory = {
         msgRateIn: [],
@@ -217,7 +222,16 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
         backlog: [],
     };
 
-    const {ref: chartContainerRef, toggle: toggleFullscreen} = useFullscreen<HTMLDivElement>();
+    // 全屏切换后容器尺寸变了，ECharts 不会自己重算画布，必须显式 resize
+    const resizeCharts = useCallback(() => {
+        for (const chart of [msgRateInRef, msgRateOutRef, throughputRef, resourceRef]) {
+            chart.current?.getEchartsInstance().resize();
+        }
+    }, []);
+    const inChartFullscreen = useFullscreen<HTMLDivElement>(resizeCharts);
+    const outChartFullscreen = useFullscreen<HTMLDivElement>(resizeCharts);
+    const throughputFullscreen = useFullscreen<HTMLDivElement>(resizeCharts);
+    const resourceFullscreen = useFullscreen<HTMLDivElement>(resizeCharts);
 
     const {clusters, fetchClusters} = useClusterStore();
 
@@ -252,97 +266,89 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
             const [start, end] = range;
             return data.filter(d => {
                 const timestamp = dayjs(d.timestamp);
-                return timestamp.isAfter(start) && timestamp.isBefore(end);
+                // 端点必须是闭区间：RangePicker 的结束时间默认就是"现在"，
+                // 用 isBefore 会把刚采到的最新一点排除掉，图上永远少一根柱子。
+                return !timestamp.isBefore(start) && !timestamp.isAfter(end);
             });
         },
         [],
     );
 
     // 加载聚合统计
-    const loadAggregatedStats = useCallback(
-        async (force: boolean = false) => {
-            if (!selectedCluster) return;
+    const loadAggregatedStats = useCallback(async () => {
+        if (!selectedCluster) return;
 
-            // 防抖：距离上次请求小于 2 秒则忽略（除非强制刷新）
-            const now = Date.now();
-            if (!force && now - lastFetchRef.current < 2000) {
+        const requestId = ++loadRequestRef.current;
+        const isStale = () => requestId !== loadRequestRef.current;
+
+        setLoading(true);
+        setError(null);
+        try {
+            // 获取聚合统计
+            const statsResponse = await window.electronAPI.metrics.getAggregatedStats(selectedCluster);
+            if (isStale()) {
                 return;
             }
-            lastFetchRef.current = now;
+            if (statsResponse.success && statsResponse.data) {
+                setStats(statsResponse.data);
 
-            const requestId = ++loadRequestRef.current;
-            const isStale = () => requestId !== loadRequestRef.current;
-
-            setLoading(true);
-            setError(null);
-            try {
-                // 获取聚合统计
-                const statsResponse = await window.electronAPI.metrics.getAggregatedStats(selectedCluster);
-                if (isStale()) {
-                    return;
-                }
-                if (statsResponse.success && statsResponse.data) {
-                    setStats(statsResponse.data);
-
-                    // 添加到历史记录（多维度数据）
-                    const now = Date.now();
-                    setMetricsHistory(prev => {
-                        const maxPoints = 60;
-                        return {
-                            msgRateIn: [
-                                ...prev.msgRateIn,
-                                {timestamp: now, value: statsResponse.data!.totalMsgRateIn},
-                            ].slice(-maxPoints),
-                            msgRateOut: [
-                                ...prev.msgRateOut,
-                                {timestamp: now, value: statsResponse.data!.totalMsgRateOut},
-                            ].slice(-maxPoints),
-                            throughputIn: [
-                                ...prev.throughputIn,
-                                {timestamp: now, value: statsResponse.data!.totalThroughputIn},
-                            ].slice(-maxPoints),
-                            throughputOut: [
-                                ...prev.throughputOut,
-                                {timestamp: now, value: statsResponse.data!.totalThroughputOut},
-                            ].slice(-maxPoints),
-                            backlog: [...prev.backlog, {timestamp: now, value: statsResponse.data!.totalBacklog}].slice(
-                                -maxPoints,
-                            ),
-                        };
-                    });
-                } else {
-                    setError(statsResponse.error || '获取统计数据失败');
-                }
-
-                // 获取 Broker 信息
-                const brokersResponse = await window.electronAPI.metrics.getBrokers(selectedCluster);
-                if (isStale()) {
-                    return;
-                }
-                if (brokersResponse.success && brokersResponse.data) {
-                    setBrokers(brokersResponse.data.activeBrokers || []);
-                } else if (!brokersResponse.success) {
-                    console.warn('获取 Broker 信息失败:', brokersResponse.error);
-                }
-            } catch (error) {
-                if (isStale()) {
-                    return;
-                }
-                console.error('Failed to load aggregated stats:', error);
-                setError('网络错误，请检查连接');
-            } finally {
-                if (!isStale()) {
-                    setLoading(false);
-                }
+                // 添加到历史记录（多维度数据）
+                const now = Date.now();
+                setMetricsHistory(prev => {
+                    const maxPoints = 60;
+                    return {
+                        msgRateIn: [
+                            ...prev.msgRateIn,
+                            {timestamp: now, value: statsResponse.data!.totalMsgRateIn},
+                        ].slice(-maxPoints),
+                        msgRateOut: [
+                            ...prev.msgRateOut,
+                            {timestamp: now, value: statsResponse.data!.totalMsgRateOut},
+                        ].slice(-maxPoints),
+                        throughputIn: [
+                            ...prev.throughputIn,
+                            {timestamp: now, value: statsResponse.data!.totalThroughputIn},
+                        ].slice(-maxPoints),
+                        throughputOut: [
+                            ...prev.throughputOut,
+                            {timestamp: now, value: statsResponse.data!.totalThroughputOut},
+                        ].slice(-maxPoints),
+                        backlog: [...prev.backlog, {timestamp: now, value: statsResponse.data!.totalBacklog}].slice(
+                            -maxPoints,
+                        ),
+                    };
+                });
+            } else {
+                setError(statsResponse.error || '获取统计数据失败');
             }
-        },
-        [selectedCluster],
-    );
+
+            // 获取 Broker 信息
+            const brokersResponse = await window.electronAPI.metrics.getBrokers(selectedCluster);
+            if (isStale()) {
+                return;
+            }
+            if (brokersResponse.success && brokersResponse.data) {
+                setBrokers(brokersResponse.data.activeBrokers || []);
+            } else if (!brokersResponse.success) {
+                // 只写 console 的话界面上的"活跃 Brokers 0 个"看起来像集群真的没有 broker
+                setError(brokersResponse.error || '获取 Broker 信息失败');
+            }
+        } catch (error) {
+            if (isStale()) {
+                return;
+            }
+            console.error('Failed to load aggregated stats:', error);
+            setError('网络错误，请检查连接');
+        } finally {
+            if (!isStale()) {
+                setLoading(false);
+            }
+        }
+    }, [selectedCluster]);
 
     // 切换集群：作废在途请求并清空上一个集群的统计、历史与峰值
     useEffect(() => {
         loadRequestRef.current += 1;
-        lastFetchRef.current = 0;
         setStats(null);
         setBrokers([]);
         setMetricsHistory(EMPTY_HISTORY);
@@ -353,19 +359,22 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
     }, [selectedCluster]);
 
     useCommand('refreshMetrics', () => {
-        void loadAggregatedStats(true);
+        void loadAggregatedStats();
     });
 
     // 初始加载和定时刷新
     const hasConnectedCluster = clusters.some(c => c.status === 'connected');
     useEffect(() => {
+        if (!paneActive) {
+            return;
+        }
         // 只有有已连接集群时才加载和刷新
         if (selectedCluster && hasConnectedCluster) {
-            loadAggregatedStats(true);
+            loadAggregatedStats();
         }
 
         if (refreshInterval > 0 && hasConnectedCluster) {
-            intervalRef.current = setInterval(() => loadAggregatedStats(true), refreshInterval * 1000);
+            intervalRef.current = setInterval(() => loadAggregatedStats(), refreshInterval * 1000);
         }
 
         return () => {
@@ -373,7 +382,7 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                 clearInterval(intervalRef.current);
             }
         };
-    }, [selectedCluster, loadAggregatedStats, refreshInterval, hasConnectedCluster]);
+    }, [selectedCluster, loadAggregatedStats, refreshInterval, hasConnectedCluster, paneActive]);
 
     // 使用 useMemo 缓存图表配置
     const msgRateInChartOption = useMemo(() => {
@@ -393,11 +402,15 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
 
         if (filteredIn.length === 0) return [];
 
-        return filteredIn.map((d, i) => ({
+        // 按时间戳配对，而不是按下标：两条序列各由过滤得到，一旦点位不齐
+        // 下标对齐就会把某个时刻的入向配到另一时刻的出向，柱子高矮全错。
+        const outByTimestamp = new Map(filteredOut.map(d => [d.timestamp, d.value]));
+
+        return filteredIn.map(d => ({
             time: dayjs(d.timestamp).format('HH:mm'),
             // 源数据单位是字节/秒，图表轴标注的是 KB/s，这里必须换算
             in: toKilobytesPerSecond(d.value),
-            out: toKilobytesPerSecond(filteredOut[i]?.value || 0),
+            out: toKilobytesPerSecond(outByTimestamp.get(d.timestamp) ?? 0),
         }));
     }, [metricsHistory.throughputIn, metricsHistory.throughputOut, dateRange, filterMetricsByDateRange]);
 
@@ -424,8 +437,19 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
         [resourceData, palette],
     );
 
+    // 保留窗口的起点：只存 60 个采样点，更早的时间在图上永远不会有数据。
+    // 把 RangePicker 限制在这个窗口内，避免用户选到一段必然为空的区间。
+    const retainedStart = useMemo(() => {
+        const first = metricsHistory.msgRateIn[0]?.timestamp;
+        if (first) {
+            return dayjs(first);
+        }
+        const step = autoRefresh ? refreshIntervalSeconds : 5;
+        return dayjs().subtract(60 * step, 'second');
+    }, [metricsHistory.msgRateIn, autoRefresh, refreshIntervalSeconds]);
+
     return (
-        <div ref={chartContainerRef} style={{padding: 'var(--spacing-lg)', height: '100%', overflow: 'auto'}}>
+        <div style={{padding: 'var(--spacing-lg)', height: '100%', overflow: 'auto'}}>
             {/* 页面标题和工具栏 */}
             <div
                 style={{
@@ -454,6 +478,9 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                         format="YYYY-MM-DD HH:mm"
                         style={{width: 280}}
                         placeholder={['开始时间', '结束时间']}
+                        disabledDate={current =>
+                            current.isBefore(retainedStart, 'day') || current.isAfter(dayjs(), 'day')
+                        }
                     />
                     <Select
                         value={refreshInterval}
@@ -476,7 +503,7 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                             {label: '手动', value: 0},
                         ]}
                     />
-                    <Button icon={<ReloadOutlined />} onClick={() => loadAggregatedStats(true)} loading={loading}>
+                    <Button icon={<ReloadOutlined />} onClick={() => loadAggregatedStats()} loading={loading}>
                         刷新
                     </Button>
                 </Space>
@@ -625,8 +652,15 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                     <Row gutter={16} style={{marginBottom: 'var(--spacing-lg)'}}>
                         <Col span={12}>
                             <Card
+                                ref={inChartFullscreen.ref}
                                 title="消息输入速率趋势"
-                                extra={<Button type="text" icon={<FullscreenOutlined />} onClick={toggleFullscreen} />}
+                                extra={
+                                    <Button
+                                        type="text"
+                                        icon={<FullscreenOutlined />}
+                                        onClick={inChartFullscreen.toggle}
+                                    />
+                                }
                             >
                                 {metricsHistory.msgRateIn.length === 0 ? (
                                     <Empty
@@ -639,14 +673,25 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                                         }}
                                     />
                                 ) : (
-                                    <ReactECharts ref={chartRef} option={msgRateInChartOption} style={{height: 300}} />
+                                    <ReactECharts
+                                        ref={msgRateInRef}
+                                        option={msgRateInChartOption}
+                                        style={{height: 300}}
+                                    />
                                 )}
                             </Card>
                         </Col>
                         <Col span={12}>
                             <Card
+                                ref={outChartFullscreen.ref}
                                 title="消息输出速率趋势"
-                                extra={<Button type="text" icon={<FullscreenOutlined />} onClick={toggleFullscreen} />}
+                                extra={
+                                    <Button
+                                        type="text"
+                                        icon={<FullscreenOutlined />}
+                                        onClick={outChartFullscreen.toggle}
+                                    />
+                                }
                             >
                                 {metricsHistory.msgRateOut.length === 0 ? (
                                     <Empty
@@ -659,7 +704,11 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                                         }}
                                     />
                                 ) : (
-                                    <ReactECharts option={msgRateOutChartOption} style={{height: 300}} />
+                                    <ReactECharts
+                                        ref={msgRateOutRef}
+                                        option={msgRateOutChartOption}
+                                        style={{height: 300}}
+                                    />
                                 )}
                             </Card>
                         </Col>
@@ -668,7 +717,17 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                     {/* 吞吐量和资源分布 */}
                     <Row gutter={16}>
                         <Col span={12}>
-                            <Card title="吞吐量对比">
+                            <Card
+                                ref={throughputFullscreen.ref}
+                                title="吞吐量对比"
+                                extra={
+                                    <Button
+                                        type="text"
+                                        icon={<FullscreenOutlined />}
+                                        onClick={throughputFullscreen.toggle}
+                                    />
+                                }
+                            >
                                 {metricsHistory.throughputIn.length === 0 ? (
                                     <Empty
                                         description="暂无监控数据，请等待数据采集"
@@ -680,12 +739,26 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                                         }}
                                     />
                                 ) : (
-                                    <ReactECharts option={throughputChartOption} style={{height: 300}} />
+                                    <ReactECharts
+                                        ref={throughputRef}
+                                        option={throughputChartOption}
+                                        style={{height: 300}}
+                                    />
                                 )}
                             </Card>
                         </Col>
                         <Col span={12}>
-                            <Card title="资源分布">
+                            <Card
+                                ref={resourceFullscreen.ref}
+                                title="资源分布"
+                                extra={
+                                    <Button
+                                        type="text"
+                                        icon={<FullscreenOutlined />}
+                                        onClick={resourceFullscreen.toggle}
+                                    />
+                                }
+                            >
                                 {!stats ? (
                                     <Empty
                                         description="暂无监控数据，请等待数据采集"
@@ -697,7 +770,11 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                                         }}
                                     />
                                 ) : (
-                                    <ReactECharts option={resourceChartOption} style={{height: 300}} />
+                                    <ReactECharts
+                                        ref={resourceRef}
+                                        option={resourceChartOption}
+                                        style={{height: 300}}
+                                    />
                                 )}
                             </Card>
                         </Col>

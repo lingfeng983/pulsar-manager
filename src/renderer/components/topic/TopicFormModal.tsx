@@ -1,4 +1,4 @@
-import React, {useCallback, useState} from 'react';
+import React, {useCallback, useEffect, useState} from 'react';
 import {Form, Input, InputNumber, Modal, Select, Switch, message} from 'antd';
 import {usePluginStore} from '../../store/plugins';
 
@@ -27,6 +27,15 @@ const TopicFormModal: React.FC<TopicFormModalProps> = ({open, clusterId, tenant,
     const [submitting, setSubmitting] = useState(false);
     const templates = usePluginStore(state => state.templates);
     const [templateKey, setTemplateKey] = useState<string | undefined>(undefined);
+
+    // 每次打开都从空白开始：弹窗关闭只是把 DOM 拆掉，useForm 的表单值仍留在 store 里，
+    // 不清的话上次输入的 Topic 名、套用的模板会原地出现，容易误建同名 topic。
+    useEffect(() => {
+        if (open) {
+            form.resetFields();
+            setTemplateKey(undefined);
+        }
+    }, [open, form]);
 
     const handleOk = useCallback(async () => {
         let values: TopicFormValues;

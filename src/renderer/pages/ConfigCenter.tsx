@@ -53,18 +53,31 @@ const ConfigCenter: React.FC = () => {
     const loadShortcuts = useShortcutStore(state => state.load);
 
     const [meta, setMeta] = useState<ConfigMeta | null>(null);
+    const [metaError, setMetaError] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
+    // 截断长度在输入过程中只改草稿，失焦/回车才落库：
+    // 直接每敲一位就写一次设置，输入 500 会先落 5、50，再落 500。
+    const [truncateDraft, setTruncateDraft] = useState<number | null>(null);
 
     useEffect(() => {
         let cancelled = false;
         window.electronAPI.config
             .meta()
             .then(response => {
-                if (!cancelled && response.success && response.data) {
+                if (cancelled) {
+                    return;
+                }
+                if (response.success && response.data) {
                     setMeta(response.data);
+                } else {
+                    setMetaError(response.error || '读取运行信息失败');
                 }
             })
-            .catch(() => undefined);
+            .catch((error: unknown) => {
+                if (!cancelled) {
+                    setMetaError(error instanceof Error ? error.message : String(error));
+                }
+            });
         return () => {
             cancelled = true;
         };
@@ -74,6 +87,13 @@ const ConfigCenter: React.FC = () => {
         const result = await updateSettings(next);
         if (!result.ok) {
             message.error(`保存失败：${result.error}`);
+        }
+    };
+
+    const commitTruncate = (value: number | null) => {
+        setTruncateDraft(null);
+        if (typeof value === 'number' && value !== settings.truncateLength) {
+            void patch({truncateLength: value});
         }
     };
 
@@ -175,12 +195,10 @@ const ConfigCenter: React.FC = () => {
                                         min={20}
                                         max={500}
                                         step={10}
-                                        value={settings.truncateLength}
-                                        onChange={value => {
-                                            if (typeof value === 'number') {
-                                                void patch({truncateLength: value});
-                                            }
-                                        }}
+                                        value={truncateDraft ?? settings.truncateLength}
+                                        onChange={value => setTruncateDraft(typeof value === 'number' ? value : null)}
+                                        onBlur={() => commitTruncate(truncateDraft)}
+                                        onPressEnter={() => commitTruncate(truncateDraft)}
                                         addonAfter="字符"
                                         style={{width: 160}}
                                     />
@@ -213,9 +231,15 @@ const ConfigCenter: React.FC = () => {
                                         value={settings.autoRefresh ? settings.refreshIntervalSeconds : 0}
                                         options={REFRESH_OPTIONS}
                                         style={{width: 160}}
-                                        onChange={value =>
-                                            void patch({autoRefresh: value > 0, refreshIntervalSeconds: value})
-                                        }
+                                        onChange={value => {
+                                            // 选"手动"只关自动刷新，保留原来的间隔值：
+                                            // 一起写 0 的话，用户再打开开关就变成 0 秒间隔直接不刷新了。
+                                            if (value > 0) {
+                                                void patch({autoRefresh: true, refreshIntervalSeconds: value});
+                                            } else {
+                                                void patch({autoRefresh: false});
+                                            }
+                                        }}
                                     />
                                 </div>
                                 <Text type="secondary" style={{fontSize: 12}}>
@@ -291,6 +315,9 @@ const ConfigCenter: React.FC = () => {
                 <Col span={24}>
                     <Card title="运行信息" size="small">
                         <Space direction="vertical" size={4}>
+                            {metaError && (
+                                <Alert type="warning" showIcon message="运行信息读取失败" description={metaError} />
+                            )}
                             <Text>
                                 应用版本：<Tag color="blue">{meta?.appVersion ?? '读取中'}</Tag>
                             </Text>

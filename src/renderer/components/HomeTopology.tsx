@@ -120,6 +120,9 @@ function buildTopologyFromData(clusterData: ClusterTopologyData[]): {
         // 添加 Topic 节点：只按真实归属连线，归属未知就不连，不按序号轮转分配
         clusterTopics.forEach((topic, idx) => {
             const topicId = `${cluster.clusterId}-topic-${idx}`;
+            // 速率保留两位小数：Math.floor 会把 0.4 msg/s 显示成 0，
+            // 慢速 topic 在提示里看着像"没有流量"。
+            const rate = Math.round(topic.msgRateIn * 100) / 100;
 
             nodes.push({
                 id: topicId,
@@ -131,7 +134,7 @@ function buildTopologyFromData(clusterData: ClusterTopologyData[]): {
                 namespace: topic.namespace,
                 topicPath: topic.name,
                 persistent: topic.persistent,
-                count: Math.floor(topic.msgRateIn),
+                count: rate,
             });
             topic.ownerBrokers.forEach(owner => {
                 const brokerId = brokerIdByName.get(owner);
@@ -141,7 +144,7 @@ function buildTopologyFromData(clusterData: ClusterTopologyData[]): {
                 edges.push({
                     source: brokerId,
                     target: topicId,
-                    value: Math.floor(topic.msgRateIn) + 10 || 10,
+                    value: rate + 10,
                 });
             });
         });

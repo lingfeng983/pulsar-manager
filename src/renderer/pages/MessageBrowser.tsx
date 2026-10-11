@@ -1,4 +1,4 @@
-import React, {useState, useEffect, useCallback, useRef} from 'react';
+import React, {useState, useEffect, useCallback, useMemo, useRef} from 'react';
 import {
     Card,
     Table,
@@ -47,7 +47,39 @@ interface MessageBrowserProps {
     namespace: string;
     topic: string;
     persistent?: boolean;
+    // 外层 Topic 页签里当前选中的是不是「消息浏览器」这个内嵌页签。
+    // antd 切走的页签只是 display:none，会话不会自己停，切到概览后还在后台持续收消息。
+    active?: boolean;
 }
+
+// 主进程传来的 data 是 base64（原生载荷可能是任意二进制）。
+// 直接展示 base64 等于没展示内容，所以先解回文本；解出控制字符说明是二进制，保留 base64。
+const asText = (base64: string): string | null => {
+    let decoded: string;
+    try {
+        const binary = atob(base64);
+        decoded = new TextDecoder().decode(Uint8Array.from(binary, ch => ch.charCodeAt(0)));
+    } catch {
+        return null;
+    }
+    for (let index = 0; index < decoded.length; index += 1) {
+        const code = decoded.charCodeAt(index);
+        const isControl = code < 32 && code !== 9 && code !== 10 && code !== 13;
+        if (isControl || code === 0xfffd) {
+            return null;
+        }
+    }
+    return decoded;
+};
+
+const formatMessageData = (data: string): string => {
+    const text = asText(data) ?? data;
+    try {
+        return JSON.stringify(JSON.parse(text), null, 2);
+    } catch {
+        return text;
+    }
+};
 
 interface ActiveSession {
     sessionId: string;
@@ -56,7 +88,14 @@ interface ActiveSession {
 
 const MAX_DISPLAY_COUNT = 500;
 
-const MessageBrowser: React.FC<MessageBrowserProps> = ({clusterId, tenant, namespace, topic, persistent = true}) => {
+const MessageBrowser: React.FC<MessageBrowserProps> = ({
+    clusterId,
+    tenant,
+    namespace,
+    topic,
+    persistent = true,
+    active = true,
+}) => {
     // 正文截断长度是配置中心里的应用设置，改完立刻对所有消息浏览器生效
     const truncateLength = useSettingsStore(state => state.settings.truncateLength);
     const [mode, setMode] = useState<PanelMode>('send');
@@ -124,6 +163,14 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({clusterId, tenant, names
         setError(null);
     }, [mode, clusterId, tenant, namespace, topic, persistent, stopActiveSession]);
 
+    // 切到别的内嵌页签（概览/订阅/配置）就把会话停掉：页签是 display:none 不是卸载，
+    // 不停的话它会一直在后台消费并把消息堆进这个看不见的列表。
+    useEffect(() => {
+        if (!active) {
+            void stopActiveSession(false);
+        }
+    }, [active, stopActiveSession]);
+
     // 组件卸载（关标签页）时主进程侧的 consumer/reader 必须一起关掉，
     // 否则它会一直占着订阅，下次开始消费会被"该订阅已有会话"拒绝。
     useEffect(
@@ -183,9 +230,14 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({clusterId, tenant, names
             if (response.success && response.data) {
                 setSubscriptions(response.data);
                 setSubscription(current => current || response.data?.[0] || '');
+            } else if (!response.success) {
+                // 订阅列表拉不到会让"订阅消费"直接没法用（下拉里一个名字都没有），
+                // 只写 console 用户只会看到"点开始没反应"。
+                setError(response.error || '获取订阅列表失败');
             }
         } catch (fetchError) {
             console.error('Failed to fetch subscriptions:', fetchError);
+            setError(fetchError instanceof Error ? fetchError.message : String(fetchError));
         }
     }, [clusterId, tenant, namespace, topic, persistent]);
 
@@ -364,34 +416,18 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({clusterId, tenant, names
         );
     }, []);
 
-    // 主进程传来的 data 是 base64（原生载荷可能是任意二进制）。
-    // 直接展示 base64 等于没展示内容，所以先解回文本；解出控制字符说明是二进制，保留 base64。
-    const asText = (base64: string): string | null => {
-        let decoded: string;
-        try {
-            const binary = atob(base64);
-            decoded = new TextDecoder().decode(Uint8Array.from(binary, ch => ch.charCodeAt(0)));
-        } catch {
-            return null;
-        }
-        for (let index = 0; index < decoded.length; index += 1) {
-            const code = decoded.charCodeAt(index);
-            const isControl = code < 32 && code !== 9 && code !== 10 && code !== 13;
-            if (isControl || code === 0xfffd) {
-                return null;
+    // 列表里每条消息都要展示格式化后的正文，解 base64 + JSON.parse 是逐条开销；
+    // 之前放在列渲染里做，任何一次重渲染（例如展开一条消息）都会对全部 500 条重跑。
+    // 按原始 data 缓存（同一条消息重复出现也只需算一次）。
+    const formattedData = useMemo(() => {
+        const cache = new Map<string, string>();
+        for (const msg of messages) {
+            if (!cache.has(msg.data)) {
+                cache.set(msg.data, formatMessageData(msg.data));
             }
         }
-        return decoded;
-    };
-
-    const formatMessageData = (data: string): string => {
-        const text = asText(data) ?? data;
-        try {
-            return JSON.stringify(JSON.parse(text), null, 2);
-        } catch {
-            return text;
-        }
-    };
+        return cache;
+    }, [messages]);
 
     const truncateMessage = (content: string, maxLength: number = truncateLength): string =>
         content.length <= maxLength ? content : content.substring(0, maxLength) + '...';
@@ -492,7 +528,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({clusterId, tenant, names
             dataIndex: 'data',
             key: 'data',
             render: (data: string, record: Message) => {
-                const formatted = formatMessageData(data);
+                const formatted = formattedData.get(data) ?? formatMessageData(data);
                 const isExpanded = expandedMessages.includes(record.messageId);
                 const displayContent = isExpanded ? formatted : truncateMessage(formatted);
 

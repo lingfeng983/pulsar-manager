@@ -53,13 +53,16 @@ const NamespaceDetail: React.FC<NamespaceDetailProps> = ({clusterId, tenant, nam
 
             if (nsResponse.success && nsResponse.data) {
                 setNamespaceInfo(nsResponse.data);
+            } else {
+                // 静默忽略会让页面照常显示 0 个集群，看不出是请求失败了
+                setError(nsResponse.error || '获取命名空间信息失败');
             }
         } catch (error) {
             if (currentRequestId !== requestIdRef.current) {
                 return;
             }
             console.error('Failed to fetch namespace info:', error);
-            setError('获取命名空间信息失败');
+            setError(error instanceof Error ? error.message : String(error));
         } finally {
             if (currentRequestId === requestIdRef.current) {
                 setLoading(false);
@@ -110,7 +113,17 @@ const NamespaceDetail: React.FC<NamespaceDetailProps> = ({clusterId, tenant, nam
                     <Spin size="large" />
                 </div>
             ) : error ? (
-                <Alert message={error} type="error" showIcon />
+                <Alert
+                    message="加载命名空间信息失败"
+                    description={error}
+                    type="error"
+                    showIcon
+                    action={
+                        <Button size="small" onClick={() => void fetchNamespaceInfo()}>
+                            重试
+                        </Button>
+                    }
+                />
             ) : (
                 <Tabs
                     items={[

@@ -1,10 +1,11 @@
-import React, {useEffect, useMemo, useRef, useState} from 'react';
-import {Alert, Button, Card, Space, Switch, Table, Tag, Tooltip, Typography, message} from 'antd';
+import React, {useContext, useEffect, useMemo, useRef, useState} from 'react';
+import {Alert, Button, Card, Popconfirm, Space, Switch, Table, Tag, Tooltip, Typography, message} from 'antd';
 import {DownloadOutlined, ReloadOutlined, UploadOutlined} from '@ant-design/icons';
 import {GROUP_ORDER, COMMAND_BY_ID, COMMAND_CATALOG, type CommandId, type CommandMeta} from '../store/commands';
 import {useShortcutStore, resolveBinding, isDefaultBinding, findConflicts} from '../store/shortcuts';
 import {bindingFromEvent, formatBinding} from '../utils/keybinding';
 import {downloadBlob} from '../utils/download';
+import {PaneActiveContext} from '../hooks/useKeybindings';
 
 const {Text} = Typography;
 
@@ -22,12 +23,23 @@ const ShortcutConfig: React.FC = () => {
     const [preview, setPreview] = useState<string | null>(null);
     const [previewError, setPreviewError] = useState<string | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const paneActive = useContext(PaneActiveContext);
 
     useEffect(() => {
         if (!ready) {
             void load();
         }
     }, [ready, load]);
+
+    // 切走页签（antd 只是 display:none）时必须退出捕获态：
+    // 捕获用的是 window 级 keydown，不取消的话在别的页签打字也会被它吞掉。
+    useEffect(() => {
+        if (!paneActive && capturing) {
+            setCapturing(null);
+            setPreview(null);
+            setPreviewError(null);
+        }
+    }, [paneActive, capturing]);
 
     const conflicts = useMemo(() => findConflicts(config, platform), [config, platform]);
 
@@ -50,7 +62,7 @@ const ShortcutConfig: React.FC = () => {
     // 捕获态：接管全局 keydown，把按键转成绑定并即时做冲突校验。
     // 冲突时不落库、继续保持捕获，让用户直接改按其它组合键。
     useEffect(() => {
-        if (!capturing) {
+        if (!capturing || !paneActive) {
             return;
         }
         const handleKeyDown = (event: KeyboardEvent) => {
@@ -83,7 +95,7 @@ const ShortcutConfig: React.FC = () => {
         };
         window.addEventListener('keydown', handleKeyDown, true);
         return () => window.removeEventListener('keydown', handleKeyDown, true);
-    }, [capturing, platform, config, setBinding]);
+    }, [capturing, paneActive, platform, config, setBinding]);
 
     const handleExport = () => {
         downloadBlob(exportConfig(), `pulsar-manager-shortcuts_${platform}.json`);
@@ -199,15 +211,18 @@ const ShortcutConfig: React.FC = () => {
                         <Button icon={<DownloadOutlined />} onClick={handleExport}>
                             导出配置
                         </Button>
-                        <Button
-                            icon={<ReloadOutlined />}
-                            onClick={() => {
+                        <Popconfirm
+                            title="恢复默认快捷键"
+                            description="所有自定义绑定与解绑都会被清空，无法撤销。"
+                            okText="恢复"
+                            cancelText="取消"
+                            onConfirm={() => {
                                 resetAll();
                                 message.success('已恢复出厂快捷键');
                             }}
                         >
-                            恢复默认
-                        </Button>
+                            <Button icon={<ReloadOutlined />}>恢复默认</Button>
+                        </Popconfirm>
                         <input
                             ref={fileInputRef}
                             type="file"

@@ -6,8 +6,19 @@ type CheckResult = NonNullable<Awaited<ReturnType<typeof window.electronAPI.upda
 const formatBytes = (n: number): string =>
     n > 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${(n / 1024).toFixed(0)} KB`;
 
+// 令牌状态必须是三态：布尔初值 false 会让"读取中"先闪一条"未配置"的警告，
+// 明明配好了却先看到红字。unknown 用来区分"读失败"和"确实没配"。
+type TokenStatus = 'loading' | 'configured' | 'missing' | 'unknown';
+
+const TOKEN_ALERT: Record<TokenStatus, {type: 'info' | 'success' | 'warning'; message: string}> = {
+    loading: {type: 'info', message: '正在读取令牌状态...'},
+    configured: {type: 'success', message: 'Gitee 访问令牌已配置'},
+    missing: {type: 'warning', message: 'Gitee 访问令牌未配置（私有仓库检查更新必需）'},
+    unknown: {type: 'warning', message: '令牌状态读取失败，可关闭后重新打开本窗口'},
+};
+
 const UpdateModal: React.FC<{open: boolean; onClose: () => void}> = ({open, onClose}) => {
-    const [tokenConfigured, setTokenConfigured] = useState(false);
+    const [tokenStatus, setTokenStatus] = useState<TokenStatus>('loading');
     const [tokenInput, setTokenInput] = useState('');
     const [savingToken, setSavingToken] = useState(false);
     const [checking, setChecking] = useState(false);
@@ -39,10 +50,17 @@ const UpdateModal: React.FC<{open: boolean; onClose: () => void}> = ({open, onCl
 
     useEffect(() => {
         if (!open) return;
+        setTokenStatus('loading');
         void window.electronAPI.update
             .tokenStatus()
-            .then(r => r.success && r.data && setTokenConfigured(r.data.configured))
-            .catch(() => {});
+            .then(r => {
+                if (r.success && r.data) {
+                    setTokenStatus(r.data.configured ? 'configured' : 'missing');
+                } else {
+                    setTokenStatus('unknown');
+                }
+            })
+            .catch(() => setTokenStatus('unknown'));
         void runCheck();
     }, [open, runCheck]);
 
@@ -68,7 +86,7 @@ const UpdateModal: React.FC<{open: boolean; onClose: () => void}> = ({open, onCl
             if (response.success) {
                 message.info(tokenInput.trim() ? '令牌已保存' : '令牌已清除');
                 setTokenInput('');
-                setTokenConfigured(!!tokenInput.trim());
+                setTokenStatus(tokenInput.trim() ? 'configured' : 'missing');
                 void runCheck();
             } else {
                 message.error(response.error || '保存失败');
@@ -189,9 +207,9 @@ const UpdateModal: React.FC<{open: boolean; onClose: () => void}> = ({open, onCl
                 )}
 
                 <Alert
-                    type={tokenConfigured ? 'success' : 'warning'}
+                    type={TOKEN_ALERT[tokenStatus].type}
                     showIcon
-                    message={tokenConfigured ? 'Gitee 访问令牌已配置' : 'Gitee 访问令牌未配置（私有仓库检查更新必需）'}
+                    message={TOKEN_ALERT[tokenStatus].message}
                     description={
                         <Space direction="vertical" style={{width: '100%'}}>
                             <Space.Compact style={{width: '100%'}}>
@@ -199,12 +217,17 @@ const UpdateModal: React.FC<{open: boolean; onClose: () => void}> = ({open, onCl
                                     value={tokenInput}
                                     onChange={e => setTokenInput(e.target.value)}
                                     placeholder={
-                                        tokenConfigured
+                                        tokenStatus === 'configured'
                                             ? '输入新令牌可覆盖，留空保存即清除'
                                             : 'Gitee 私人令牌 (access_token)'
                                     }
+                                    disabled={tokenStatus === 'loading'}
                                 />
-                                <Button loading={savingToken} onClick={() => void handleSaveToken()}>
+                                <Button
+                                    loading={savingToken}
+                                    disabled={tokenStatus === 'loading'}
+                                    onClick={() => void handleSaveToken()}
+                                >
                                     保存
                                 </Button>
                             </Space.Compact>

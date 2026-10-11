@@ -35,6 +35,17 @@ export function formatThroughput(bytesPerSecond: number | undefined | null, frac
     return `${toKilobytesPerSecond(bytesPerSecond).toFixed(fractionDigits)} KB/s`;
 }
 
+/**
+ * 字节/秒 → 自动选档位的吞吐文本（达到 1 MB/s 才换成 MB/s）。
+ * 与 formatBytes 同一套 1024 进制，避免同一个量在不同页面被标成不同单位。
+ */
+export function formatThroughputAuto(bytesPerSecond: number | undefined | null, fractionDigits = 2): string {
+    const value = bytesPerSecond || 0;
+    return value >= MB
+        ? `${(value / MB).toFixed(fractionDigits)} MB/s`
+        : `${(value / KB).toFixed(fractionDigits)} KB/s`;
+}
+
 /** 条/秒 → 带单位的速率文本 */
 export function formatMessageRate(messagesPerSecond: number | undefined | null, fractionDigits = 2): string {
     return `${(messagesPerSecond || 0).toFixed(fractionDigits)} msg/s`;

@@ -46,7 +46,10 @@ const PluginMarket: React.FC = () => {
     const [keyword, setKeyword] = useState('');
     const [category, setCategory] = useState<CategoryFilter>('all');
     const [status, setStatus] = useState<StatusFilter>('all');
+    // 工具栏级忙碌（导入/打开目录/刷新）与单行忙碌分开：
+    // 原来用一个 busy 控制所有按钮，点某一行的"安装"会让整页按钮集体变灰。
     const [busy, setBusy] = useState(false);
+    const [busyId, setBusyId] = useState<string | null>(null);
 
     const visible = useMemo(() => {
         const text = keyword.trim().toLowerCase();
@@ -69,18 +72,21 @@ const PluginMarket: React.FC = () => {
         });
     }, [entries, keyword, category, status]);
 
-    const withBusy = useCallback(
-        async (action: () => Promise<APIResponse>) => {
-            setBusy(true);
-            const result = await run(action);
-            setBusy(false);
-            return result;
+    // 单行操作只锁这一行，其余卡片仍可操作
+    const withRowBusy = useCallback(
+        async (id: string, action: () => Promise<APIResponse>) => {
+            setBusyId(id);
+            try {
+                return await run(action);
+            } finally {
+                setBusyId(null);
+            }
         },
         [run],
     );
 
     const install = async (id: string) => {
-        const result = await withBusy(() => window.electronAPI.plugin.installOfficial(id));
+        const result = await withRowBusy(id, () => window.electronAPI.plugin.installOfficial(id));
         if (result.ok) {
             message.success(`已安装 ${id}`);
         } else {
@@ -106,14 +112,14 @@ const PluginMarket: React.FC = () => {
     };
 
     const toggle = async (plugin: PluginEntry, enabled: boolean) => {
-        const result = await withBusy(() => window.electronAPI.plugin.setEnabled(plugin.id, enabled));
+        const result = await withRowBusy(plugin.id, () => window.electronAPI.plugin.setEnabled(plugin.id, enabled));
         if (!result.ok) {
             message.error(result.error);
         }
     };
 
     const uninstall = async (plugin: PluginEntry) => {
-        const result = await withBusy(() => window.electronAPI.plugin.uninstall(plugin.id));
+        const result = await withRowBusy(plugin.id, () => window.electronAPI.plugin.uninstall(plugin.id));
         if (result.ok) {
             message.success(`已卸载 ${plugin.name}`);
         } else {
@@ -250,7 +256,16 @@ const PluginMarket: React.FC = () => {
                             {label: '未安装', value: 'available'},
                         ]}
                     />
-                    <Upload accept=".json" showUploadList={false} beforeUpload={file => void importFile(file)}>
+                    <Upload
+                        accept=".json"
+                        showUploadList={false}
+                        // 必须显式返回 false：返回 undefined 时 antd 会认为要照常上传，
+                        // 于是把文件 POST 到当前页面地址（dev 下 5173，打包后 file://）。
+                        beforeUpload={file => {
+                            void importFile(file);
+                            return false;
+                        }}
+                    >
                         <Button icon={<DownloadOutlined rotate={180} />} disabled={busy}>
                             导入插件文件
                         </Button>
@@ -294,7 +309,8 @@ const PluginMarket: React.FC = () => {
                                                 <Switch
                                                     size="small"
                                                     checked={plugin.enabled}
-                                                    disabled={busy}
+                                                    loading={busyId === plugin.id}
+                                                    disabled={busyId === plugin.id}
                                                     onChange={checked => void toggle(plugin, checked)}
                                                 />
                                                 <Popconfirm
@@ -305,14 +321,22 @@ const PluginMarket: React.FC = () => {
                                                     cancelText="取消"
                                                     onConfirm={() => void uninstall(plugin)}
                                                 >
-                                                    <Button size="small" danger type="text" icon={<DeleteOutlined />} />
+                                                    <Button
+                                                        size="small"
+                                                        danger
+                                                        type="text"
+                                                        disabled={busyId === plugin.id}
+                                                        loading={busyId === plugin.id}
+                                                        icon={<DeleteOutlined />}
+                                                    />
                                                 </Popconfirm>
                                             </>
                                         ) : (
                                             <Button
                                                 size="small"
                                                 type="primary"
-                                                disabled={busy}
+                                                loading={busyId === plugin.id}
+                                                disabled={busyId === plugin.id}
                                                 onClick={() => void install(plugin.id)}
                                             >
                                                 安装
