@@ -6,7 +6,6 @@ import {
     FolderOutlined,
     DatabaseOutlined,
     TableOutlined,
-    ReloadOutlined,
     MenuFoldOutlined,
     BarChartOutlined,
     ApartmentOutlined,
@@ -872,43 +871,19 @@ const ResourceTree: React.FC = () => {
                         borderBottom: '1px solid var(--color-border)',
                     }}
                 >
-                    <Space direction="vertical" size="small" style={{width: '100%'}}>
-                        <Space wrap>
-                            <Button
-                                size="small"
-                                icon={<BarChartOutlined />}
-                                onClick={handleOpenMetrics}
-                                title="监控仪表盘"
-                            >
-                                监控
-                            </Button>
-                            <Button
-                                size="small"
-                                icon={<ApartmentOutlined />}
-                                onClick={handleOpenTopology}
-                                title="集群拓扑"
-                            >
-                                拓扑
-                            </Button>
-                        </Space>
-                        <Space wrap>
-                            <Button
-                                size="small"
-                                icon={<ReloadOutlined spin={loading} />}
-                                onClick={handleRefresh}
-                                title="刷新"
-                            >
-                                刷新
-                            </Button>
-                            <Button
-                                size="small"
-                                icon={<MenuFoldOutlined />}
-                                onClick={() => setCollapsed(true)}
-                                title="折叠"
-                            >
-                                折叠
-                            </Button>
-                        </Space>
+                    <Space wrap>
+                        <Button size="small" icon={<BarChartOutlined />} onClick={handleOpenMetrics} title="监控仪表盘">
+                            监控
+                        </Button>
+                        <Button size="small" icon={<ApartmentOutlined />} onClick={handleOpenTopology} title="集群拓扑">
+                            拓扑
+                        </Button>
+                        <IconButton
+                            size="small"
+                            icon={<MenuFoldOutlined />}
+                            label="折叠侧边栏"
+                            onClick={() => setCollapsed(true)}
+                        />
                     </Space>
                 </div>
             )}

@@ -1,5 +1,5 @@
 import React, {useEffect, useRef, useState, useCallback, useMemo} from 'react';
-import {Card, Button, Space, Spin, Alert, Statistic, Row, Col, Tag} from 'antd';
+import {Card, Space, Spin, Alert, Statistic, Row, Col, Tag} from 'antd';
 import {
     ReloadOutlined,
     ZoomInOutlined,
@@ -345,14 +345,17 @@ const HomeTopology: React.FC = () => {
 
     return (
         <Card
-            title="集群拓扑总览"
             extra={
                 <Space>
                     <IconButton size="small" icon={<ZoomOutOutlined />} label="缩小拓扑图" onClick={handleZoomOut} />
                     <IconButton size="small" icon={<ZoomInOutlined />} label="放大拓扑图" onClick={handleZoomIn} />
-                    <Button icon={<ReloadOutlined />} onClick={loadTopology} loading={loading} size="small">
-                        刷新
-                    </Button>
+                    <IconButton
+                        size="small"
+                        icon={<ReloadOutlined />}
+                        label="刷新拓扑图"
+                        loading={loading}
+                        onClick={loadTopology}
+                    />
                     <IconButton
                         size="small"
                         icon={isFullscreen ? <CompressOutlined /> : <FullscreenOutlined />}
