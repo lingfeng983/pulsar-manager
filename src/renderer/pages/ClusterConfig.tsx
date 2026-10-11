@@ -274,7 +274,7 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
                         message: '需为 http:// 或 https:// 地址',
                     },
                 ]}
-                extra="Pulsar Admin HTTP 地址，如 http://localhost:8080"
+                extra="Pulsar Admin HTTP 地址，如 http://localhost:8080；留空则按 Broker 地址推导（6650→8080，6651→8443）"
             >
                 <Input placeholder="http://localhost:8080" />
             </Form.Item>

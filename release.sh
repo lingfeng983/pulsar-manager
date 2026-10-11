@@ -6,6 +6,10 @@
 #        tag 已存在且指向当前提交则复用：发行版会被更新、同名附件会被替换
 #        tag 已存在但指向别的提交则报错，不会把新包挂到旧标签上
 #
+# 出包目录: OUT_DIR 环境变量，默认 release
+#        IDE 的文件索引器可能长期锁住旧输出目录里的 app.asar，electron-builder
+#        清空目录时会直接失败。换个空目录即可绕开：OUT_DIR=release-next ./release.sh
+#
 # 凭证:  环境变量 GITEE_TOKEN，或仓库根目录 .gitee_token 文件
 #        （在 https://gitee.com/profile/personal_access_tokens 创建，勾选 projects 权限）
 #
@@ -15,7 +19,8 @@ cd "$(dirname "$0")"
 
 OWNER="lingfeng983"
 REPO="pulsar-manager"
-LOG="release/release.log"
+OUT_DIR="${OUT_DIR:-release}"
+LOG="${OUT_DIR}/release.log"
 
 die() { echo "!! $*" >&2; exit 1; }
 
@@ -37,7 +42,7 @@ git fetch -q origin master --tags || die "无法访问 origin（网络/凭证问
 VERSION="$(node -p "require('./package.json').version")"
 TAG="${1:-v$VERSION}"
 TITLE="${2:-Pulsar 管理工具 ${TAG}}"
-EXE="release/Pulsar管理工具-安装包-${VERSION}.exe"
+EXE="${OUT_DIR}/Pulsar管理工具-安装包-${VERSION}.exe"
 
 REMOTE_SHA="$(git ls-remote --tags origin "refs/tags/${TAG}^{}" | cut -f1)"
 if [ -n "$REMOTE_SHA" ] && [ "$REMOTE_SHA" != "$(git rev-parse HEAD)" ]; then
@@ -46,7 +51,7 @@ fi
 
 # ---------- 1. 静态门 ----------
 echo "==> [1/4] 静态检查（类型 / 规范 / 格式）"
-mkdir -p release
+mkdir -p "$OUT_DIR"
 : > "$LOG"
 npx tsc -b --force >> "$LOG" 2>&1 || { tail -30 "$LOG"; die "类型检查失败（完整日志 $LOG）"; }
 npx eslint src >> "$LOG" 2>&1 || { tail -30 "$LOG"; die "eslint 失败（完整日志 $LOG）"; }
@@ -54,10 +59,13 @@ npm run format:check >> "$LOG" 2>&1 || { tail -30 "$LOG"; die "格式检查失�
 
 # ---------- 2. 出包 ----------
 echo "==> [2/4] 构建 + electron-builder 打包（约 2-4 分钟，日志 $LOG）"
-rm -f release/*-安装包-*.exe release/*-安装包-*.exe.blockmap
-# electron:dist 自己会先跑 build（避免"改了源码却把上一代 dist 打进安装包"），
-# 这里不再重复构建一次
-npm run electron:dist >> "$LOG" 2>&1 || { tail -40 "$LOG"; die "打包失败（完整日志 $LOG）"; }
+rm -f "${OUT_DIR}"/-安装包-*.exe "${OUT_DIR}"/-安装包-*.exe.blockmap
+# 先单独 build（避免"改了源码却把上一代 dist 打进安装包"），再按 OUT_DIR 打包，
+# 最后跑 verify-package：electron-builder 在输出目录被锁住时可能只写出
+# resources/app.asar 就以 0 退出，安装包能生成但装出来是打不开的半成品，必须在这里拦下
+npm run build >> "$LOG" 2>&1 || { tail -40 "$LOG"; die "构建失败（完整日志 $LOG）"; }
+npx electron-builder -c.directories.output="$OUT_DIR" >> "$LOG" 2>&1 || { tail -40 "$LOG"; die "打包失败（完整日志 $LOG）"; }
+node scripts/verify-package.mjs "$OUT_DIR" >> "$LOG" 2>&1 || { tail -40 "$LOG"; die "产物完整性校验失败（完整日志 $LOG）"; }
 [ -f "$EXE" ] || { tail -40 "$LOG"; die "打包结束但没找到 $EXE（electron-builder.json 的 artifactName 与脚本不一致？）"; }
 
 SIZE="$(stat -c %s "$EXE")"

@@ -125,22 +125,53 @@ function readPem(value: string | undefined): string | undefined {
     }
 }
 
+// broker 的二进制口和 admin 的 HTTP 口本来就不是同一个：默认 6650/6651 对应 8080/8443。
+// 集群表单里「Admin API URL」允许留空，留空时只能从 serviceUrl 推地址——把 6650 原样
+// 照搬过去的话，所有 admin 请求都会打到一个不说 HTTP 的端口上，用户看到的现象是
+// 「地址明明填对了，测试连接就是失败」，而且错误只有一个笼统的网络错误。
+const DEFAULT_PORTS = {
+    http: {broker: 6650, admin: 8080},
+    https: {broker: 6651, admin: 8443},
+};
+
 /**
  * Resolve the Admin API base URL. An explicit webServiceUrl always wins;
- * otherwise the binary protocol URL is mapped onto its HTTP equivalent.
+ * otherwise the binary protocol URL is mapped onto its HTTP equivalent,
+ * including the port (broker binary port -> admin HTTP port).
  */
 export function resolveBaseUrl(config: PulsarAdminConfig): string {
     if (config.webServiceUrl) {
         return config.webServiceUrl;
     }
-    const mapped = config.serviceUrl.replace(/^pulsar\+ssl:\/\//, 'https://').replace(/^pulsar:\/\//, 'http://');
-    if (config.tls?.enabled && !mapped.startsWith('https://')) {
+    // ssl:// 是 SERVICE_URL_PATTERN 放行的第三种写法，同样要落到 https
+    const mapped = config.serviceUrl
+        .replace(/^pulsar\+ssl:\/\//, 'https://')
+        .replace(/^ssl:\/\//, 'https://')
+        .replace(/^pulsar:\/\//, 'http://');
+    const isHttps = mapped.startsWith('https://');
+    if (!isHttps && !mapped.startsWith('http://')) {
+        // 不是 http(s) 地址，端口无从谈起，交给后续请求去报错
+        return mapped;
+    }
+    if (config.tls?.enabled && !isHttps) {
         throw new Error(
             `TLS is enabled but the resolved Admin API URL is not HTTPS ("${mapped}"). ` +
                 'Set webServiceUrl to an https:// address or use a pulsar+ssl:// service URL.',
         );
     }
-    return mapped;
+
+    const defaults = isHttps ? DEFAULT_PORTS.https : DEFAULT_PORTS.http;
+    try {
+        const url = new URL(mapped);
+        // 没写端口、或写的正好是 broker 二进制口，都换成同侧默认的 admin 口
+        if (!url.port || Number(url.port) === defaults.broker) {
+            url.port = String(defaults.admin);
+        }
+        return url.toString().replace(/\/+$/, '');
+    } catch {
+        // 地址本身不合法时原样返回，让后续请求报错，不要提前抛一个更难懂的异常
+        return mapped;
+    }
 }
 
 function createHttpsAgent(tls: TLSConfig | undefined, verifyHost?: string): https.Agent | undefined {

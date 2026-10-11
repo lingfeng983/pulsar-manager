@@ -41,6 +41,17 @@ let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let isQuitting = false;
 
+// 窗口只有在 IPC handlers 注册完之后才允许创建。渲染层一挂载就会打 cluster:list
+// （Home 页首屏），只要窗口抢在 registerIPCHandlers() 之前出现，这个 invoke 就会以
+// "No handler registered for 'cluster:list'" 抛在渲染层——主进程一行日志都没有，
+// 因为请求根本没走到 ipcMain。second-instance / activate 这两条路径都能在
+// app.whenReady() 兑现之前进来（连点两次图标、macOS 点 Dock 图标），所以这里用
+// 一个 readyPromise 把它们统一挡在注册之后。
+let resolveIpcReady: () => void = () => {};
+const ipcReady = new Promise<void>(resolve => {
+    resolveIpcReady = resolve;
+});
+
 // 托盘图标：16x16 紫色闪电（内联 PNG，避免打包资源路径问题）
 const TRAY_ICON_DATA_URL =
     'data:image/png;base64,' +
@@ -49,7 +60,12 @@ const TRAY_ICON_DATA_URL =
 
 function showMainWindow() {
     if (!mainWindow) {
-        createWindow();
+        // 等 handlers 注册完再建窗；此时若已有别处建好的窗口就直接用它，别重复创建
+        void ipcReady.then(() => {
+            if (!mainWindow) {
+                createWindow();
+            }
+        });
         return;
     }
     if (mainWindow.isMinimized()) {
@@ -204,12 +220,15 @@ if (!gotTheLock) {
         try {
             // 注册 IPC handlers（包括数据库初始化）
             registerIPCHandlers();
+            // 注册一完成就放行建窗：排在它前面的任何 createWindow() 都必须等这一刻
+            resolveIpcReady();
             createWindow();
             createTray();
         } catch (error) {
             // 数据库打不开（文件损坏、旧版本程序把 user_version 写得比本机更高）时
             // 绝不能只往控制台打一行就退出：安装版没有控制台，用户的现象是
             // 「双击图标没反应」，而且单实例锁已经拿到，再双击也不会重试。
+            // 这里刻意不 resolveIpcReady——注册失败时不该再有任何窗口被建出来。
             const detail = error instanceof Error ? error.message : String(error);
             console.error('[Main] Startup failed:', detail);
             dialog.showErrorBox('Pulsar Manager 启动失败', `本地数据库初始化失败：\n${detail}`);
@@ -219,7 +238,7 @@ if (!gotTheLock) {
 
         app.on('activate', () => {
             if (BrowserWindow.getAllWindows().length === 0) {
-                createWindow();
+                showMainWindow();
             }
         });
     });

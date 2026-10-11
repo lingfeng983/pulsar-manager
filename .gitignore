@@ -21,5 +21,8 @@ release-backup-*/
 # SSH 隧道自检的临时主机密钥/证书，只在本机生成，严禁入库
 scripts/tunnel-selftest/certs/
 
-# Qoder 索引器会锁 win-unpacked 里的 app.asar，本机发版用的临时输出目录
-release-alt/
+# IDE 索引器（Qoder、MiniMax Code 等）会长期锁住输出目录里 win-unpacked/resources/app.asar，
+# electron-builder 清空目录时删不掉就直接失败。本机发版改用 OUT_DIR=<空目录> 绕开，
+# 这里统一忽略所有 electron-builder 输出目录（release/、release-alt/、release-next/ …）。
+# 注意 release.sh 是脚本文件，不带尾斜杠的写法不会误伤它。
+release*/

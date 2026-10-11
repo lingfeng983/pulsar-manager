@@ -46,6 +46,7 @@
 **数据来源：**
 - **集群配置表单**: 本地状态 `useState`
   - 字段: name, serviceUrl, webServiceUrl, authPlugin, authParams, tlsEnabled
+  - `webServiceUrl` 可留空；留空时主进程由 `serviceUrl` 推导 Admin 地址：`pulsar://` → `http://`、`pulsar+ssl://` / `ssl://` → `https://`，并把 broker 二进制端口换成同侧默认的 admin 端口（6650→8080、6651→8443）。把 6650 照搬过去会让所有 admin 请求打到一个不说 HTTP 的端口上
 
 - **连接测试**: `window.electronAPI.cluster.testConnection()`
   - IPC: `cluster:testConnection`（Handler: `src/main/ipc/cluster-handlers.ts`）
