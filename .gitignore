@@ -20,3 +20,6 @@ release-backup-*/
 
 # SSH 隧道自检的临时主机密钥/证书，只在本机生成，严禁入库
 scripts/tunnel-selftest/certs/
+
+# Qoder 索引器会锁 win-unpacked 里的 app.asar，本机发版用的临时输出目录
+release-alt/
