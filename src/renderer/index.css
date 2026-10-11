@@ -239,6 +239,11 @@ pre,
     color: var(--color-text-primary);
 }
 
+/* 顶部指标行：排布同提示行，但数值是正文级读数，跟着提示文字一起缩小就读不出了 */
+.metric-line strong {
+    font-size: var(--font-size-md);
+}
+
 /* 图例并入提示行右侧：色点与拓扑节点同形，比矩形 Tag 省一截高度 */
 .legend-item {
     display: inline-flex;
@@ -317,7 +322,12 @@ pre,
     flex-wrap: wrap;
     gap: var(--spacing-xs);
     align-items: center;
-    /* 页签已给出页面名的页面无需渲染标题，此时操作区仍靠右 */
+}
+
+/* 筛选与按钮默认从左边排起：页签已经给出页面名的页面上没有标题，
+   再靠右就是把整条工具栏推到右上角、左边空出一大片。
+   只有页内确实渲染了标题（如 Topic 详情）时才把操作区推到行尾。 */
+.page-header:has(.page-heading) .page-actions {
     margin-left: auto;
 }
 
@@ -329,6 +339,9 @@ pre,
     flex-direction: column;
     gap: var(--spacing-md);
     flex: 1 1 auto;
+    /* 列向 flex 项的 min-height 默认 auto：图表把行内像素高写死以后，正文就再也缩不回去，
+       窗口变矮时不是跟着缩而是溢出。清零后由 .page-shell 负责滚动。 */
+    min-height: 0;
 }
 
 /* 图表卡片的固定高度：四张趋势/分布卡共用，避免每页手写 height 内联样式 */

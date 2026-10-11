@@ -148,8 +148,12 @@ export function buildTopologyOption(params: {
     showLegend?: boolean;
     /** 全局字号档位相对默认档的比例（见 utils/fontScale）：canvas 文字不受 CSS 变量影响。 */
     fontScale?: number;
+    /** 画在图内左上角的一行规模计数。传了就不再在图外加提示行。 */
+    summary?: string;
+    /** 绘图区实际像素尺寸：力导的斥力与边长按它缩放，图才随容器铺满而不是缩在中间一团。 */
+    canvasSize?: {width: number; height: number};
 }): EChartsOption {
-    const {nodes, edges, palette, layout, showLegend = true, fontScale = 1} = params;
+    const {nodes, edges, palette, layout, showLegend = true, fontScale = 1, summary, canvasSize} = params;
     const nodeById = new Map(nodes.map(node => [node.id, node]));
 
     // 分类表固定为完整类型表、不随数据增删：两张拓扑图都用合并式 setOption
@@ -164,7 +168,14 @@ export function buildTopologyOption(params: {
     // 节点越多越小、斥力越大，否则上百个节点会糊成一团。
     // 下限比标签外置时高一些：名字现在压在圆里，圆太小就只剩省略号。
     const baseSize = clamp(16, 42, 52 - nodes.length / 10);
-    const repulsion = clamp(120, 600, 260 + nodes.length * 4);
+    // 斥力与边长原本跟画布无关，页面拉长后图还是中间那一团。按画布面积反推每个节点
+    // 应得的间距，再由此定斥力（与间距的平方同量级）和边长，图就跟着容器一起铺开。
+    const area = canvasSize && canvasSize.width > 0 && canvasSize.height > 0 ? canvasSize.width * canvasSize.height : 0;
+    const spacing = area > 0 ? clamp(90, 380, Math.sqrt(area / Math.max(nodes.length, 1)) * 0.62) : 0;
+    const repulsion =
+        spacing > 0 ? clamp(120, 1500, spacing * spacing * 0.22) : clamp(120, 600, 260 + nodes.length * 4);
+    const edgeLength: [number, number] =
+        spacing > 0 ? [Math.round(spacing * 0.8), Math.round(spacing * 1.6)] : [80, 220];
 
     const graphNodes = nodes.map(node => {
         const category = categoryIndex.get(node.type) ?? 0;
@@ -269,7 +280,8 @@ export function buildTopologyOption(params: {
             ? {
                   data: categories.map(category => category.name),
                   top: 8,
-                  left: 'center',
+                  // 靠左：规模计数画在同一行的右侧，居中会让两者在窄窗口下叠在一起
+                  left: 8,
                   itemWidth: 14,
                   itemHeight: 14,
                   padding: [5, 10],
@@ -282,6 +294,24 @@ export function buildTopologyOption(params: {
                   textStyle: {fontSize: Math.round(13 * fontScale), color: palette.label},
               }
             : undefined,
+        // 规模计数画进图内：图外那一行无论有没有数据都固定占 20px，
+        // 而这几项说的正是图上此刻画了什么。空数组是为了合并式 setOption 时能清掉旧文案。
+        graphic: summary
+            ? [
+                  {
+                      type: 'text',
+                      right: 16,
+                      top: 12,
+                      z: 10,
+                      silent: true,
+                      style: {
+                          text: summary,
+                          fill: palette.label,
+                          fontSize: Math.round(12 * fontScale),
+                      },
+                  },
+              ]
+            : [],
         animation: true,
         animationDuration: 800,
         animationDurationUpdate: 800,
@@ -313,7 +343,7 @@ export function buildTopologyOption(params: {
                 force: {
                     repulsion,
                     gravity: 0.1,
-                    edgeLength: [80, 220],
+                    edgeLength,
                     layoutAnimation: true,
                 },
                 lineStyle: {opacity: 0.55},

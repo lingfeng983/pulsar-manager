@@ -158,8 +158,10 @@ const HomeTopology: React.FC = () => {
         topics: 0,
     });
     const layout: TopologyLayout = 'force';
-    const chartInstance = useRef<any>(null);
-    const getChart = useCallback(() => chartInstance.current, []);
+    // 引用组件而不是实例：手工抓一份实例再自己 dispose，在 StrictMode 的双挂载里
+    // 会留下已卸载的悬空引用，下一次 componentDidUpdate 解绑事件时整页崩。
+    const echartsRef = useRef<ReactECharts>(null);
+    const getChart = useCallback(() => echartsRef.current?.getEchartsInstance(), []);
     // 拓扑加载代次：集群列表变化后，旧一轮的晚到响应必须作废
     const homeTopologyRequestRef = useRef(0);
     const palette = useTopologyPalette();
@@ -175,19 +177,18 @@ const HomeTopology: React.FC = () => {
 
     // 缓存 ECharts 配置
     const chartOption = useMemo(
-        () => buildTopologyOption({nodes, edges, palette, layout, showLegend: false, fontScale}),
-        [nodes, edges, palette, layout, fontScale],
+        () =>
+            buildTopologyOption({
+                nodes,
+                edges,
+                palette,
+                layout,
+                showLegend: false,
+                fontScale,
+                canvasSize: {width: chartWidth, height: chartHeight},
+            }),
+        [nodes, edges, palette, layout, fontScale, chartWidth, chartHeight],
     );
-
-    // 清理图表实例
-    useEffect(() => {
-        return () => {
-            if (chartInstance.current) {
-                chartInstance.current.dispose();
-                chartInstance.current = null;
-            }
-        };
-    }, []);
 
     // 加载集群拓扑数据
     const loadTopology = useCallback(async () => {
@@ -289,13 +290,13 @@ const HomeTopology: React.FC = () => {
 
     // 放大
     const handleZoomIn = useCallback(() => {
-        zoomGraph(chartInstance.current, 1.2);
-    }, []);
+        zoomGraph(getChart(), 1.2);
+    }, [getChart]);
 
     // 缩小
     const handleZoomOut = useCallback(() => {
-        zoomGraph(chartInstance.current, 0.8);
-    }, []);
+        zoomGraph(getChart(), 0.8);
+    }, [getChart]);
 
     // Topic 节点点击打开详情页；集群节点点击打开对应的集群配置页
     const handleChartClick = useCallback(
@@ -400,13 +401,23 @@ const HomeTopology: React.FC = () => {
                 )}
 
                 {/* 拓扑图 */}
-                <div ref={chartRef} style={{flex: 1, minHeight: 300, display: 'flex', flexDirection: 'column'}}>
-                    <div ref={measureChartArea} style={{flex: 1, minHeight: 0}}>
+                <div
+                    ref={chartRef}
+                    style={{
+                        flex: 1,
+                        minHeight: 300,
+                        display: 'flex',
+                        flexDirection: 'column',
+                        // zrender 写回的行内像素宽就是内容的最小宽度，flex 项的 min-width
+                        // 默认 auto，不清零就回不去，窗口变窄时图只能溢出而不是跟着缩。
+                        minWidth: 0,
+                        overflow: 'hidden',
+                    }}
+                >
+                    <div ref={measureChartArea} style={{flex: 1, minHeight: 0, minWidth: 0}}>
                         {nodes.length > 0 && (
                             <ReactECharts
-                                ref={e => {
-                                    chartInstance.current = e?.getEchartsInstance() as typeof chartInstance.current;
-                                }}
+                                ref={echartsRef}
                                 option={chartOption}
                                 notMerge={false}
                                 style={{width: chartWidth || '100%', height: chartHeight || 300}}

@@ -1,13 +1,6 @@
 import React, {useEffect, useRef, useState, useCallback, useMemo} from 'react';
 import {Card, Button, Space, Select, Spin, message, Input, Switch, Alert, Tooltip} from 'antd';
-import {
-    ReloadOutlined,
-    ZoomInOutlined,
-    ZoomOutOutlined,
-    UndoOutlined,
-    FullscreenOutlined,
-    CompressOutlined,
-} from '@ant-design/icons';
+import {ReloadOutlined, ZoomInOutlined, ZoomOutOutlined, FullscreenOutlined, CompressOutlined} from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
 import type {EChartsOption} from 'echarts';
 import {useClusterStore} from '../../store/cluster';
@@ -57,7 +50,11 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
     const [truncatedPartitions, setTruncatedPartitions] = useState(false);
     const [selectedClusterId, setSelectedClusterId] = useState<string | undefined>(initialClusterId);
     const [layout, setLayout] = useState<TopologyLayout>('force');
-    const [visibleTypes, setVisibleTypes] = useState<TopologyNodeType[]>([...ALL_NODE_TYPES]);
+    const [visibleTypes, setVisibleTypes] = useState<TopologyNodeType[]>(
+        // 单集群拓扑里没有集群节点，可选项里也没有它：带上 cluster 只会在选择框里
+        // 多出一个取不到标签、只能显示原始值的 "cluster" 标签。
+        ALL_NODE_TYPES.filter(type => type !== 'cluster'),
+    );
     const [query, setQuery] = useState('');
     const [showPartitions, setShowPartitions] = useState(false);
     const [stats, setStats] = useState({brokers: 0, topics: 0, subscriptions: 0, partitions: 0});
@@ -240,9 +237,32 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
         [rawNodes, rawEdges, visibleTypes, query],
     );
 
+    // 规模计数：画在图内左上角那一行，不再单独占图外一行
+    const summaryText = useMemo(() => {
+        const parts = [
+            `Brokers ${stats.brokers}`,
+            `Topics ${stats.topics}`,
+            `Subscriptions ${stats.subscriptions}`,
+            `分区 ${stats.partitions}`,
+        ];
+        if (rawNodes.length > 0) {
+            parts.push(`节点 ${visibleNodes.length}/${rawNodes.length}`, `连接 ${visibleEdges.length}`);
+        }
+        return parts.join('   ');
+    }, [stats, rawNodes.length, visibleNodes.length, visibleEdges.length]);
+
     const chartOption: EChartsOption = useMemo(
-        () => buildTopologyOption({nodes: visibleNodes, edges: visibleEdges, palette, layout, fontScale}),
-        [visibleNodes, visibleEdges, palette, layout, fontScale],
+        () =>
+            buildTopologyOption({
+                nodes: visibleNodes,
+                edges: visibleEdges,
+                palette,
+                layout,
+                fontScale,
+                canvasSize: {width: chartWidth, height: chartHeight},
+                summary: summaryText,
+            }),
+        [visibleNodes, visibleEdges, palette, layout, fontScale, chartWidth, chartHeight, summaryText],
     );
 
     // 节点点击：topic / partition 直接开详情页，之前只 console.log 等于没有交互。
@@ -294,6 +314,13 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
 
         message.success('视图已重置');
     }, [getChart]);
+
+    // 刷新与重置视图是同一个动作：重拉一次拓扑本来就要重新看图，
+    // 拆成两个按钮只是多占一格、还让人犹豫该点哪个。
+    const handleReload = useCallback(() => {
+        resetGraphView(getChart());
+        void loadTopology();
+    }, [getChart, loadTopology]);
 
     useCommand('topologyZoomIn', handleZoomIn);
     useCommand('topologyZoomOut', handleZoomOut);
@@ -388,47 +415,20 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
                     </Tooltip>
                     <IconButton icon={<ZoomInOutlined />} label="放大视图" onClick={handleZoomIn} />
                     <IconButton icon={<ZoomOutOutlined />} label="缩小视图" onClick={handleZoomOut} />
-                    <IconButton icon={<UndoOutlined />} label="重置视图" onClick={handleResetView} />
                     <IconButton
                         icon={isFullscreen ? <CompressOutlined /> : <FullscreenOutlined />}
                         label={isFullscreen ? '退出全屏' : '全屏'}
                         onClick={toggleFullscreen}
                     />
-                    <Button icon={<ReloadOutlined />} onClick={loadTopology} loading={loading}>
-                        刷新
-                    </Button>
+                    <IconButton
+                        icon={<ReloadOutlined />}
+                        label="刷新并重置视图"
+                        loading={loading}
+                        onClick={handleReload}
+                    />
                 </>
             }
         >
-            {/* 规模提示：一行文字点到为止，不再占一整排统计卡（卡片高度会把图挤到半屏） */}
-            <div className="summary-line">
-                <span>
-                    Brokers <strong>{stats.brokers}</strong>
-                </span>
-                <span>
-                    Topics <strong>{stats.topics}</strong>
-                </span>
-                <span>
-                    Subscriptions <strong>{stats.subscriptions}</strong>
-                </span>
-                <span>
-                    分区 <strong>{stats.partitions}</strong>
-                </span>
-                {rawNodes.length > 0 && (
-                    <span>
-                        节点{' '}
-                        <strong>
-                            {visibleNodes.length}/{rawNodes.length}
-                        </strong>
-                    </span>
-                )}
-                {rawNodes.length > 0 && (
-                    <span>
-                        连接 <strong>{visibleEdges.length}</strong>
-                    </span>
-                )}
-            </div>
-
             {ownershipAlert && (
                 <Alert type="warning" showIcon closable message={`Topic 归属信息受限：${ownershipAlert}`} />
             )}
@@ -460,7 +460,18 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
                     tip="正在加载拓扑数据..."
                     wrapperClassName="chart-spin"
                 >
-                    <div ref={chartAreaRef} style={{flex: 1, minHeight: 320, position: 'relative'}}>
+                    <div
+                        ref={chartAreaRef}
+                        style={{
+                            flex: 1,
+                            minHeight: 320,
+                            position: 'relative',
+                            // 图表容器被 zrender 写成行内像素，窗口缩小时这个像素值就是内容的最小宽度；
+                            // flex 项的 min-width 默认 auto，不显式清零的话整条链回不去，图只能溢出而不是跟着缩。
+                            minWidth: 0,
+                            overflow: 'hidden',
+                        }}
+                    >
                         {rawNodes.length === 0 ? (
                             <StateBlock
                                 empty

@@ -4,7 +4,6 @@ import {
     Tabs,
     Row,
     Col,
-    Statistic,
     Tag,
     Button,
     Table,
@@ -547,54 +546,29 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                 </Button>
             }
         >
-            {/* 顶部指标卡片 */}
-            <Card>
-                <Row gutter={[12, 12]}>
-                    <Col span={6}>
-                        <Statistic
-                            title="消息输入速率"
-                            value={stats?.msgRateIn || 0}
-                            precision={2}
-                            prefix={<BarChartOutlined />}
-                            suffix=" msg/s"
-                            valueStyle={{color: 'var(--color-primary)'}}
-                        />
-                    </Col>
-                    <Col span={6}>
-                        <Statistic
-                            title="消息输出速率"
-                            value={stats?.msgRateOut || 0}
-                            precision={2}
-                            prefix={<MessageOutlined />}
-                            suffix=" msg/s"
-                            valueStyle={{color: 'var(--color-success)'}}
-                        />
-                    </Col>
-                    <Col span={6}>
-                        <Statistic
-                            title="总积压"
-                            // broker 给的是字节数，直接渲染会是一长串数字（如 10485760）；
-                            // 与页面其他地方统一用人类可读单位。
-                            value={formatBytes(stats?.backlogSize ?? 0)}
-                            prefix={<DatabaseOutlined />}
-                            valueStyle={{
-                                color:
-                                    stats?.backlogSize && stats.backlogSize > 0
-                                        ? 'var(--color-warning)'
-                                        : 'var(--color-text-primary)',
-                            }}
-                        />
-                    </Col>
-                    <Col span={6}>
-                        <Statistic
-                            title="消费者数"
-                            value={stats?.consumers?.length || 0}
-                            prefix={<UserOutlined />}
-                            valueStyle={{color: 'var(--color-info)'}}
-                        />
-                    </Col>
-                </Row>
-            </Card>
+            {/* 顶部指标：一行读完。四个 Statistic 竖着排要吃 90px，而这页真正要看的是下面的
+                生产者 / 消费者 / 订阅；「消息输入速率」这类长标签在行内只剩「输入」。 */}
+            <div className="summary-line metric-line">
+                <span>
+                    <BarChartOutlined style={{color: 'var(--color-primary)'}} /> 输入{' '}
+                    <strong>{(stats?.msgRateIn || 0).toFixed(2)}</strong> msg/s
+                </span>
+                <span>
+                    <MessageOutlined style={{color: 'var(--color-success)'}} /> 输出{' '}
+                    <strong>{(stats?.msgRateOut || 0).toFixed(2)}</strong> msg/s
+                </span>
+                <span>
+                    <DatabaseOutlined
+                        style={
+                            stats?.backlogSize && stats.backlogSize > 0 ? {color: 'var(--color-warning)'} : undefined
+                        }
+                    />{' '}
+                    积压 <strong>{formatBytes(stats?.backlogSize ?? 0)}</strong>
+                </span>
+                <span>
+                    <UserOutlined /> 消费者 <strong>{stats?.consumers?.length || 0}</strong>
+                </span>
+            </div>
 
             {/* Tab内容区域 */}
             <Tabs

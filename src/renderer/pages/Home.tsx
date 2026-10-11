@@ -1,5 +1,5 @@
-import React, {useEffect, useState} from 'react';
-import {Card, Table, Tag, Button, Space, Switch, message} from 'antd';
+import React, {useEffect, useMemo, useState} from 'react';
+import {Card, Table, Tag, Button, Input, Select, Space, Switch, message} from 'antd';
 import {ClusterOutlined, PlusOutlined, BarChartOutlined, AppstoreOutlined, ReloadOutlined} from '@ant-design/icons';
 import {useClusterStore} from '../store/cluster';
 import ClusterConfigModal from './ClusterConfig';
@@ -11,9 +11,20 @@ import {useConfirmDanger} from '../components/common/dangerConfirm';
 import type {ClusterConfig} from '../types';
 import {useCommand} from '../hooks/useKeybindings';
 
+type StatusFilter = 'all' | 'connected' | 'warning' | 'disconnected';
+
+const STATUS_OPTIONS: {label: string; value: StatusFilter}[] = [
+    {label: '全部状态', value: 'all'},
+    {label: '在线', value: 'connected'},
+    {label: '警告', value: 'warning'},
+    {label: '离线', value: 'disconnected'},
+];
+
 const HomePage: React.FC = () => {
     const confirmDanger = useConfirmDanger();
     const [viewMode, setViewMode] = useState<'list' | 'topology'>('list');
+    const [query, setQuery] = useState('');
+    const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
     const [modalOpen, setModalOpen] = useState(false);
     const [editingCluster, setEditingCluster] = useState<ClusterConfig | null>(null);
 
@@ -23,6 +34,20 @@ const HomePage: React.FC = () => {
     useEffect(() => {
         fetchClusters();
     }, [fetchClusters]);
+
+    // 筛选在渲染层做：集群数量本来就小，为了过滤再发一轮 IPC 没有意义。
+    const filteredClusters = useMemo(() => {
+        const text = query.trim().toLowerCase();
+        return clusters.filter(cluster => {
+            if (statusFilter !== 'all' && (cluster.status ?? 'disconnected') !== statusFilter) {
+                return false;
+            }
+            if (!text) {
+                return true;
+            }
+            return `${cluster.name} ${cluster.serviceUrl}`.toLowerCase().includes(text);
+        });
+    }, [clusters, query, statusFilter]);
 
     const handleAddCluster = () => {
         setEditingCluster(null);
@@ -122,9 +147,28 @@ const HomePage: React.FC = () => {
 
     return (
         <PageShell
-            title="集群总览"
             actions={
                 <>
+                    {/* 列表视图才有的筛选：拓扑视图画的是全部集群，筛它没有对应对象 */}
+                    {viewMode === 'list' && (
+                        <>
+                            <Input
+                                allowClear
+                                aria-label="按集群名称或地址筛选"
+                                placeholder="筛选名称/地址"
+                                value={query}
+                                onChange={event => setQuery(event.target.value)}
+                                style={{width: 180}}
+                            />
+                            <Select<StatusFilter>
+                                aria-label="按状态筛选集群"
+                                value={statusFilter}
+                                onChange={value => setStatusFilter(value)}
+                                options={STATUS_OPTIONS}
+                                style={{width: 100}}
+                            />
+                        </>
+                    )}
                     <Button icon={<ReloadOutlined />} onClick={() => fetchClusters()} loading={loading}>
                         刷新
                     </Button>
@@ -148,18 +192,20 @@ const HomePage: React.FC = () => {
                 <Card variant="borderless">
                     <StateBlock
                         loading={loading && clusters.length === 0}
-                        empty={clusters.length === 0}
-                        emptyText="暂无集群配置"
+                        empty={clusters.length === 0 || filteredClusters.length === 0}
+                        emptyText={clusters.length === 0 ? '暂无集群配置' : '没有符合筛选条件的集群'}
                         onRetry={fetchClusters}
                         action={
-                            <Button type="primary" onClick={handleAddCluster}>
-                                添加第一个集群
-                            </Button>
+                            clusters.length === 0 ? (
+                                <Button type="primary" onClick={handleAddCluster}>
+                                    添加第一个集群
+                                </Button>
+                            ) : undefined
                         }
                     >
                         <Table
                             columns={columns}
-                            dataSource={clusters}
+                            dataSource={filteredClusters}
                             rowKey="id"
                             pagination={false}
                             size="small"
