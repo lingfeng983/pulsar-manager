@@ -472,12 +472,14 @@ const TopNav: React.FC = () => {
                 ]}
             >
                 <div style={{textAlign: 'center'}}>
-                    <div style={{fontSize: 48, marginBottom: 16}}>⚡</div>
-                    <h3 style={{marginBottom: 8}}>Pulsar Manager</h3>
-                    <p style={{color: 'var(--color-text-secondary)', fontSize: 13}}>版本 {appVersion}</p>
-                    <div style={{marginTop: 20, textAlign: 'left', color: 'var(--color-text-primary)', fontSize: 13}}>
+                    <div style={{fontSize: 48, marginBottom: 'var(--spacing-lg)'}}>⚡</div>
+                    <h3 style={{marginBottom: 'var(--spacing-sm)'}}>Pulsar Manager</h3>
+                    <p className="hint-text">版本 {appVersion}</p>
+                    <div style={{marginTop: 'var(--spacing-xl)', textAlign: 'left'}}>
                         <p>一个功能强大的 Apache Pulsar 桌面管理工具。</p>
-                        <p style={{marginTop: 8}}>支持集群管理、资源浏览、消息查看、监控分析等功能。</p>
+                        <p style={{marginTop: 'var(--spacing-sm)'}}>
+                            支持集群管理、资源浏览、消息查看、监控分析等功能。
+                        </p>
                     </div>
                 </div>
             </Modal>

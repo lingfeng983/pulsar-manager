@@ -1,10 +1,11 @@
 import React, {useState, useEffect, useCallback, useRef} from 'react';
-import {Card, Tabs, Row, Col, Statistic, Tag, Button, Table, Spin, Alert} from 'antd';
+import {Button, type TableColumnsType} from 'antd';
 import {FolderOutlined, DatabaseOutlined, TagOutlined, ArrowRightOutlined} from '@ant-design/icons';
 import {useTabStore} from '../store/tabs';
 import {loadNamespaces} from '../hooks/resourceCache';
 import {shortName} from '../utils/format';
 import {namespaceTab} from '../utils/tabIds';
+import ResourceDetailPage, {type ResourceStat} from '../components/common/ResourceDetailPage';
 
 interface TenantDetailProps {
     clusterId: string;
@@ -41,10 +42,7 @@ const TenantDetail: React.FC<TenantDetailProps> = ({clusterId, tenant}) => {
                 return;
             }
 
-            const nsList: NamespaceInfo[] = namespaceNames.map((ns: string) => ({
-                name: shortName(ns),
-            }));
-            setNamespaces(nsList);
+            setNamespaces(namespaceNames.map((ns: string) => ({name: shortName(ns)})));
 
             if (tenantResponse.success && tenantResponse.data) {
                 setTenantInfo(tenantResponse.data);
@@ -66,14 +64,14 @@ const TenantDetail: React.FC<TenantDetailProps> = ({clusterId, tenant}) => {
     }, [clusterId, tenant]);
 
     useEffect(() => {
-        fetchTenantInfo();
+        void fetchTenantInfo();
     }, [fetchTenantInfo]);
 
     const handleNamespaceClick = (namespace: string) => {
         addTab(namespaceTab(clusterId, tenant, namespace));
     };
 
-    const namespaceColumns = [
+    const namespaceColumns: TableColumnsType<NamespaceInfo> = [
         {
             title: '命名空间名称',
             dataIndex: 'name',
@@ -81,135 +79,49 @@ const TenantDetail: React.FC<TenantDetailProps> = ({clusterId, tenant}) => {
             render: (name: string) => (
                 <Button type="link" onClick={() => handleNamespaceClick(name)}>
                     {name}
-                    <ArrowRightOutlined style={{marginLeft: 4}} />
+                    <ArrowRightOutlined style={{marginLeft: 'var(--spacing-xs)'}} />
                 </Button>
             ),
         },
     ];
 
-    return (
-        <div style={{padding: 'var(--spacing-lg)', height: '100%', overflow: 'auto'}}>
-            {loading ? (
-                <div style={{display: 'flex', justifyContent: 'center', alignItems: 'center', height: '200px'}}>
-                    <Spin size="large" />
-                </div>
-            ) : error ? (
-                <Alert
-                    message="加载租户信息失败"
-                    description={error}
-                    type="error"
-                    showIcon
-                    action={
-                        <Button size="small" onClick={() => void fetchTenantInfo()}>
-                            重试
-                        </Button>
-                    }
-                />
-            ) : (
-                <Tabs
-                    items={[
-                        {
-                            key: 'overview',
-                            label: '概览',
-                            children: (
-                                <>
-                                    <Row gutter={16}>
-                                        <Col span={8}>
-                                            <Card>
-                                                <Statistic
-                                                    title="命名空间数量"
-                                                    value={namespaces.length}
-                                                    prefix={<FolderOutlined />}
-                                                />
-                                            </Card>
-                                        </Col>
-                                        <Col span={8}>
-                                            <Card>
-                                                <Statistic
-                                                    title="管理角色数"
-                                                    value={tenantInfo?.adminRoles?.length || 0}
-                                                    prefix={<TagOutlined />}
-                                                />
-                                            </Card>
-                                        </Col>
-                                        <Col span={8}>
-                                            <Card>
-                                                <Statistic
-                                                    title="允许的集群数"
-                                                    value={tenantInfo?.allowedClusters?.length || 0}
-                                                    prefix={<DatabaseOutlined />}
-                                                />
-                                            </Card>
-                                        </Col>
-                                    </Row>
+    const stats: ResourceStat[] = [
+        {key: 'namespaces', title: '命名空间数量', value: namespaces.length, prefix: <FolderOutlined />},
+        {
+            key: 'roles',
+            title: '管理角色数',
+            value: tenantInfo?.adminRoles?.length || 0,
+            prefix: <TagOutlined />,
+        },
+        {
+            key: 'clusters',
+            title: '允许的集群数',
+            value: tenantInfo?.allowedClusters?.length || 0,
+            prefix: <DatabaseOutlined />,
+        },
+    ];
 
-                                    <Card title="租户信息" style={{marginTop: 'var(--spacing-md)'}}>
-                                        <div style={{padding: '20px'}}>
-                                            <div style={{marginBottom: 'var(--spacing-md)'}}>
-                                                <span style={{fontWeight: 500}}>租户名称:</span>
-                                                <code style={{marginLeft: 8}}>{tenant}</code>
-                                            </div>
-                                            <div style={{marginBottom: 'var(--spacing-md)'}}>
-                                                <span style={{fontWeight: 500}}>管理角色:</span>
-                                                <div style={{marginLeft: 8, display: 'flex', flexWrap: 'wrap', gap: 8}}>
-                                                    {tenantInfo?.adminRoles?.map(role => (
-                                                        <Tag key={role}>{role}</Tag>
-                                                    ))}
-                                                    {(!tenantInfo?.adminRoles ||
-                                                        tenantInfo?.adminRoles?.length === 0) && (
-                                                        <span style={{color: 'var(--color-text-tertiary)'}}>无</span>
-                                                    )}
-                                                </div>
-                                            </div>
-                                            <div style={{marginBottom: 'var(--spacing-md)'}}>
-                                                <span style={{fontWeight: 500}}>允许的集群:</span>
-                                                <div style={{marginLeft: 8, display: 'flex', flexWrap: 'wrap', gap: 8}}>
-                                                    {tenantInfo?.allowedClusters?.map(cluster => (
-                                                        <Tag key={cluster}>{cluster}</Tag>
-                                                    ))}
-                                                    {(!tenantInfo?.allowedClusters ||
-                                                        tenantInfo?.allowedClusters?.length === 0) && (
-                                                        <span style={{color: 'var(--color-text-tertiary)'}}>无</span>
-                                                    )}
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </Card>
-                                </>
-                            ),
-                        },
-                        {
-                            key: 'namespaces',
-                            label: '命名空间',
-                            children: (
-                                <Card title={`命名空间列表 (${namespaces.length})`}>
-                                    {namespaces.length > 0 ? (
-                                        <Table
-                                            dataSource={namespaces}
-                                            columns={namespaceColumns}
-                                            rowKey="name"
-                                            pagination={false}
-                                            size="small"
-                                            scroll={{x: 'max-content'}}
-                                        />
-                                    ) : (
-                                        <div
-                                            style={{
-                                                textAlign: 'center',
-                                                padding: '40px 0',
-                                                color: 'var(--color-text-secondary)',
-                                            }}
-                                        >
-                                            暂无命名空间
-                                        </div>
-                                    )}
-                                </Card>
-                            ),
-                        },
-                    ]}
-                />
-            )}
-        </div>
+    return (
+        <ResourceDetailPage<NamespaceInfo>
+            title={`租户 ${tenant}`}
+            loading={loading}
+            error={error}
+            errorTitle="加载租户信息失败"
+            onRetry={() => void fetchTenantInfo()}
+            stats={stats}
+            infoTitle="租户信息"
+            infoRows={[
+                {label: '租户名称', value: tenant},
+                {label: '管理角色', tags: tenantInfo?.adminRoles ?? [], fallback: '无'},
+                {label: '允许的集群', tags: tenantInfo?.allowedClusters ?? [], fallback: '无'},
+            ]}
+            listLabel="命名空间"
+            listTitle={`命名空间列表 (${namespaces.length})`}
+            listEmptyText="暂无命名空间"
+            columns={namespaceColumns}
+            dataSource={namespaces}
+            rowKey="name"
+        />
     );
 };
 

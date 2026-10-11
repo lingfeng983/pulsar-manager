@@ -1,5 +1,5 @@
 import React, {useState, useEffect, useCallback, useMemo, useRef} from 'react';
-import {Tree, Button, Space, Spin, message, Menu, Modal, Input} from 'antd';
+import {Tree, Button, Space, Spin, message, Input} from 'antd';
 import type {DataNode} from 'antd/es/tree';
 import {
     ClusterOutlined,
@@ -34,6 +34,10 @@ import {topicTab, tenantTab, namespaceTab, topologyTab, metricsTab} from '../../
 import {useCommand} from '../../hooks/useKeybindings';
 import TenantFormModal from '../tenant/TenantFormModal';
 import TopicFormModal from '../topic/TopicFormModal';
+import ContextMenu, {clampMenuPosition, type ContextMenuItem} from '../common/ContextMenu';
+import StateBlock from '../common/StateBlock';
+import IconButton from '../common/IconButton';
+import {useConfirmDanger, themedModal} from '../common/dangerConfirm';
 import type {Tenant, Topic} from '../../types';
 
 interface ResourceTreeNode extends DataNode {
@@ -51,6 +55,8 @@ interface ResourceTreeNode extends DataNode {
 const SIDEBAR_MIN_WIDTH = 160;
 const SIDEBAR_MAX_WIDTH = 640;
 const SIDEBAR_WIDTH_KEY = 'pulsar-manager.sidebar-width';
+// 节点菜单最长的一支（集群：查看/拓扑/监控/分隔/新建租户/分隔/删除）用于定位时估算高度
+const MAX_MENU_ITEMS = 7;
 
 const clampSidebarWidth = (w: number) => Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, w));
 
@@ -89,6 +95,9 @@ const ResourceTree: React.FC = () => {
     const [contextMenu, setContextMenu] = useState<{x: number; y: number; node: ResourceTreeNode | null} | null>(null);
     const {clusters, fetchClusters, setActiveCluster, deleteClusterAsync, expandedClusterId} = useClusterStore();
     const {addTab} = useTabStore();
+    const confirmDanger = useConfirmDanger();
+    // 键盘打开菜单时用得上：右键有 node，纯键盘只有"最后一次选中的节点"
+    const activeNodeRef = useRef<ResourceTreeNode | null>(null);
     const [tenantForm, setTenantForm] = useState<{
         open: boolean;
         mode: 'create' | 'edit';
@@ -374,6 +383,9 @@ const ResourceTree: React.FC = () => {
 
             const selectedNode = info.node as ResourceTreeNode;
             const dataRef = selectedNode.dataRef;
+            // 键盘入口要用最近选中的节点：Tree 渲染的 DOM 上没有节点 key，
+            // 只有这里能拿到 React 侧完整的 dataRef。
+            activeNodeRef.current = selectedNode;
 
             if (dataRef?.type === 'cluster') {
                 setActiveCluster(dataRef.clusterId ?? null);
@@ -399,21 +411,34 @@ const ResourceTree: React.FC = () => {
     // 右键菜单处理
     const handleContextMenu = useCallback((e: React.MouseEvent, node: DataNode) => {
         e.preventDefault();
-        const menuWidth = 180; // approximate menu width
-        const menuHeight = 200; // approximate menu height
+        // 菜单锚定视口（树在滚动容器里，客户端坐标最稳），越界向内收
+        const pos = clampMenuPosition(
+            e.clientX,
+            e.clientY,
+            {width: window.innerWidth, height: window.innerHeight},
+            MAX_MENU_ITEMS,
+        );
+        setContextMenu({x: pos.x, y: pos.y, node: node as ResourceTreeNode});
+    }, []);
 
-        let x = e.clientX;
-        let y = e.clientY;
-
-        // Adjust if menu would overflow viewport
-        if (x + menuWidth > window.innerWidth) {
-            x = window.innerWidth - menuWidth - 8;
+    // ContextMenu 键 / Shift+F10 的键盘等价入口：对最近选中的节点展开同一份菜单
+    const handleTreeKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+        if (e.key !== 'ContextMenu' && !(e.key === 'F10' && e.shiftKey)) {
+            return;
         }
-        if (y + menuHeight > window.innerHeight) {
-            y = window.innerHeight - menuHeight - 8;
+        const node = activeNodeRef.current;
+        if (!node) {
+            return;
         }
-
-        setContextMenu({x, y, node: node as ResourceTreeNode});
+        e.preventDefault();
+        const focusedRect = (document.activeElement as HTMLElement | null)?.getBoundingClientRect?.();
+        const pos = clampMenuPosition(
+            focusedRect?.left ?? 24,
+            (focusedRect?.bottom ?? 120) + 4,
+            {width: window.innerWidth, height: window.innerHeight},
+            MAX_MENU_ITEMS,
+        );
+        setContextMenu({x: pos.x, y: pos.y, node});
     }, []);
 
     // 关闭右键菜单
@@ -421,26 +446,17 @@ const ResourceTree: React.FC = () => {
         setContextMenu(null);
     }, []);
 
-    // 点击外部关闭右键菜单
-    useEffect(() => {
-        const handleClickOutside = (event: MouseEvent) => {
-            if (contextMenu && !(event.target as Element).closest('.ant-menu')) {
-                closeContextMenu();
-            }
-        };
-
-        document.addEventListener('mousedown', handleClickOutside);
-        return () => {
-            document.removeEventListener('mousedown', handleClickOutside);
-        };
-    }, [contextMenu, closeContextMenu]);
-
     // 右键菜单操作
     // 命名空间只需要一个名字，用轻量确认框即可，不必再做一个表单组件。
+    // 走 themedModal 而不是静态 Modal.confirm：静态弹窗不读 ConfigProvider，暗色下是亮块。
     const promptCreateNamespace = useCallback(
         (clusterId: string, tenant: string) => {
+            const modal = themedModal();
+            if (!modal) {
+                return;
+            }
             let draft = '';
-            Modal.confirm({
+            modal.confirm({
                 title: `新建命名空间（${tenant}）`,
                 icon: null,
                 content: (
@@ -518,32 +534,29 @@ const ResourceTree: React.FC = () => {
                     break;
                 case 'delete':
                     if (dataRef?.type === 'cluster') {
+                        const {clusterId} = dataRef;
                         const clusterName = dataRef.cluster?.name || dataRef.clusterId;
-                        Modal.confirm({
-                            title: '确认删除',
-                            content: `确定要删除集群 "${clusterName}" 吗？`,
-                            okText: '删除',
-                            okType: 'danger',
-                            cancelText: '取消',
+                        confirmDanger({
+                            title: '删除集群',
+                            description: `删除本机保存的集群「${clusterName}」配置及其连接信息。`,
+                            requireExactName: clusterName,
                             onOk: async () => {
-                                if (dataRef.clusterId && (await deleteClusterAsync(dataRef.clusterId))) {
-                                    message.success('删除成功');
+                                if (!clusterId || !(await deleteClusterAsync(clusterId))) {
+                                    throw new Error('删除集群失败');
                                 }
+                                message.success('删除成功');
                             },
                         });
                     } else if (dataRef?.type === 'tenant' && dataRef.clusterId && dataRef.tenant) {
                         const {clusterId, tenant} = dataRef;
-                        Modal.confirm({
-                            title: '确认删除租户',
-                            content: `删除租户 "${tenant}"。broker 会拒绝删除仍包含命名空间的租户。`,
-                            okText: '删除',
-                            okType: 'danger',
-                            cancelText: '取消',
+                        confirmDanger({
+                            title: '删除租户',
+                            description: `删除租户 "${tenant}"。broker 会拒绝删除仍包含命名空间的租户。`,
+                            requireExactName: tenant,
                             onOk: async () => {
                                 const response = await window.electronAPI.resources.deleteTenant(clusterId, tenant);
                                 if (!response.success) {
-                                    message.error(response.error || '删除失败');
-                                    return;
+                                    throw new Error(response.error || '删除失败');
                                 }
                                 message.success('租户已删除');
                                 invalidateTenants(clusterId);
@@ -557,12 +570,10 @@ const ResourceTree: React.FC = () => {
                         dataRef.namespace
                     ) {
                         const {clusterId, tenant, namespace} = dataRef;
-                        Modal.confirm({
-                            title: '确认删除命名空间',
-                            content: `删除 "${tenant}/${namespace}" 会同时删除其中所有 Topic，且不可恢复。`,
-                            okText: '删除',
-                            okType: 'danger',
-                            cancelText: '取消',
+                        confirmDanger({
+                            title: '删除命名空间',
+                            description: `删除 "${tenant}/${namespace}" 会同时删除其中所有 Topic，且不可恢复。`,
+                            requireExactName: namespace,
                             onOk: async () => {
                                 const response = await window.electronAPI.resources.deleteNamespace(
                                     clusterId,
@@ -570,8 +581,7 @@ const ResourceTree: React.FC = () => {
                                     namespace,
                                 );
                                 if (!response.success) {
-                                    message.error(response.error || '删除失败');
-                                    return;
+                                    throw new Error(response.error || '删除失败');
                                 }
                                 message.success('命名空间已删除');
                                 invalidateNamespaces(clusterId, tenant);
@@ -581,12 +591,10 @@ const ResourceTree: React.FC = () => {
                         });
                     } else if (dataRef?.type === 'topic' && dataRef.clusterId && dataRef.tenant && dataRef.namespace) {
                         const {clusterId, tenant, namespace, topic, persistent} = dataRef;
-                        Modal.confirm({
-                            title: '确认删除 Topic',
-                            content: `删除 "${tenant}/${namespace}/${topic}" 会丢弃其全部消息与订阅游标，不可恢复。`,
-                            okText: '删除',
-                            okType: 'danger',
-                            cancelText: '取消',
+                        confirmDanger({
+                            title: '删除 Topic',
+                            description: `删除 "${tenant}/${namespace}/${topic}" 会丢弃其全部消息与订阅游标，不可恢复。`,
+                            requireExactName: topic ?? '',
                             onOk: async () => {
                                 const response = await window.electronAPI.resources.deleteTopic(
                                     clusterId,
@@ -596,8 +604,7 @@ const ResourceTree: React.FC = () => {
                                     persistent,
                                 );
                                 if (!response.success) {
-                                    message.error(response.error || '删除失败');
-                                    return;
+                                    throw new Error(response.error || '删除失败');
                                 }
                                 message.success('Topic 已删除');
                                 invalidateTopics(clusterId, tenant, namespace);
@@ -650,59 +657,102 @@ const ResourceTree: React.FC = () => {
             }
             closeContextMenu();
         },
-        [addTab, setActiveCluster, deleteClusterAsync, closeContextMenu, reloadNodeChildren, promptCreateNamespace],
+        [
+            addTab,
+            setActiveCluster,
+            deleteClusterAsync,
+            closeContextMenu,
+            reloadNodeChildren,
+            promptCreateNamespace,
+            confirmDanger,
+        ],
     );
 
-    // 构建右键菜单
-    const contextMenuItems = useMemo(() => {
-        if (!contextMenu?.node) return [];
+    // 构建右键菜单（共享 ContextMenu：视觉走 CSS token，方向键/Enter/Esc 键盘可操作）
+    const contextMenuItems = useMemo<ContextMenuItem[]>(() => {
+        const node = contextMenu?.node;
+        if (!node) return [];
 
-        const dataRef = (contextMenu.node as ResourceTreeNode).dataRef;
+        const dataRef = node.dataRef;
+        const run = (action: string) => () => {
+            void handleContextMenuAction(action, node);
+        };
 
-        const baseItems = [{key: 'view', label: '查看详情', icon: <EyeOutlined />}];
+        const baseItems: ContextMenuItem[] = [
+            {key: 'view', label: '查看详情', icon: <EyeOutlined />, onSelect: run('view')},
+        ];
 
         if (dataRef?.type === 'cluster') {
             return [
                 ...baseItems,
-                {key: 'topology', label: '查看拓扑', icon: <ApartmentOutlined />},
-                {key: 'metrics', label: '查看监控', icon: <BarChartOutlined />},
-                {type: 'divider' as const},
-                {key: 'createTenant', label: '新建租户', icon: <PlusOutlined />},
-                {type: 'divider' as const},
-                {key: 'delete', label: '删除集群', icon: <DeleteOutlined />, danger: true},
+                {key: 'topology', label: '查看拓扑', icon: <ApartmentOutlined />, onSelect: run('topology')},
+                {key: 'metrics', label: '查看监控', icon: <BarChartOutlined />, onSelect: run('metrics')},
+                {key: 'sep-1', separator: true},
+                {key: 'createTenant', label: '新建租户', icon: <PlusOutlined />, onSelect: run('createTenant')},
+                {key: 'sep-2', separator: true},
+                {
+                    key: 'delete',
+                    label: '删除集群',
+                    icon: <DeleteOutlined />,
+                    danger: true,
+                    onSelect: run('delete'),
+                },
             ];
         }
 
         if (dataRef?.type === 'tenant') {
             return [
                 ...baseItems,
-                {key: 'createNamespace', label: '新建命名空间', icon: <PlusOutlined />},
-                {key: 'editTenant', label: '编辑租户', icon: <EditOutlined />},
-                {type: 'divider' as const},
-                {key: 'delete', label: '删除租户', icon: <DeleteOutlined />, danger: true},
+                {
+                    key: 'createNamespace',
+                    label: '新建命名空间',
+                    icon: <PlusOutlined />,
+                    onSelect: run('createNamespace'),
+                },
+                {key: 'editTenant', label: '编辑租户', icon: <EditOutlined />, onSelect: run('editTenant')},
+                {key: 'sep-1', separator: true},
+                {
+                    key: 'delete',
+                    label: '删除租户',
+                    icon: <DeleteOutlined />,
+                    danger: true,
+                    onSelect: run('delete'),
+                },
             ];
         }
 
         if (dataRef?.type === 'namespace') {
             return [
                 ...baseItems,
-                {key: 'createTopic', label: '新建 Topic', icon: <PlusOutlined />},
-                {type: 'divider' as const},
-                {key: 'delete', label: '删除命名空间', icon: <DeleteOutlined />, danger: true},
+                {key: 'createTopic', label: '新建 Topic', icon: <PlusOutlined />, onSelect: run('createTopic')},
+                {key: 'sep-1', separator: true},
+                {
+                    key: 'delete',
+                    label: '删除命名空间',
+                    icon: <DeleteOutlined />,
+                    danger: true,
+                    onSelect: run('delete'),
+                },
             ];
         }
 
         if (dataRef?.type === 'topic') {
             return [
                 ...baseItems,
-                {key: 'metrics', label: '查看监控', icon: <BarChartOutlined />},
-                {type: 'divider' as const},
-                {key: 'delete', label: '删除 Topic', icon: <DeleteOutlined />, danger: true},
+                {key: 'metrics', label: '查看监控', icon: <BarChartOutlined />, onSelect: run('metrics')},
+                {key: 'sep-1', separator: true},
+                {
+                    key: 'delete',
+                    label: '删除 Topic',
+                    icon: <DeleteOutlined />,
+                    danger: true,
+                    onSelect: run('delete'),
+                },
             ];
         }
 
         return baseItems;
-    }, [contextMenu]);
+    }, [contextMenu, handleContextMenuAction]);
 
     // 重拉当前展开的分支：合并策略会保留旧 children，展开节点必须强制重载，
     // 否则"刷新"只是重读集群状态，树里的租户/命名空间/topic 还是旧的。
@@ -792,19 +842,7 @@ const ResourceTree: React.FC = () => {
     }, []);
 
     // 空状态
-    const renderEmpty = () => (
-        <div
-            style={{
-                padding: '40px 16px',
-                textAlign: 'center',
-                color: 'var(--color-text-secondary)',
-            }}
-        >
-            <ClusterOutlined style={{fontSize: 32, marginBottom: 8}} />
-            <p style={{margin: 0}}>暂无集群</p>
-            <p style={{margin: '8px 0 0', fontSize: 12}}>请在首页添加集群</p>
-        </div>
-    );
+    const renderEmpty = () => <StateBlock empty emptyText="暂无集群，请在首页添加集群" />;
 
     return (
         <div
@@ -889,18 +927,18 @@ const ResourceTree: React.FC = () => {
 
             {/* 展开/折叠按钮 */}
             {collapsed && (
-                <Button
+                <IconButton
                     size="small"
                     icon={<MenuFoldOutlined rotate={180} />}
+                    label="展开资源树"
                     onClick={() => setCollapsed(false)}
                     style={{margin: 'var(--spacing-sm)'}}
-                    title="展开"
                 />
             )}
 
             {/* 资源树 */}
             {!collapsed && (
-                <div style={{flex: 1, overflow: 'auto', padding: 'var(--spacing-sm)'}}>
+                <div style={{flex: 1, overflow: 'auto', padding: 'var(--spacing-sm)'}} onKeyDown={handleTreeKeyDown}>
                     <Spin spinning={loading}>
                         {treeData.length === 0 ? (
                             renderEmpty()
@@ -926,22 +964,13 @@ const ResourceTree: React.FC = () => {
 
             {/* 右键菜单 */}
             {contextMenu && (
-                <Menu
+                <ContextMenu
+                    x={contextMenu.x}
+                    y={contextMenu.y}
                     items={contextMenuItems}
-                    style={{
-                        position: 'fixed',
-                        top: contextMenu.y,
-                        left: contextMenu.x,
-                        zIndex: 1000,
-                        boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
-                        borderRadius: 4,
-                        border: '1px solid var(--color-border)',
-                    }}
-                    onClick={e => {
-                        if (contextMenu.node) {
-                            handleContextMenuAction(e.key, contextMenu.node);
-                        }
-                    }}
+                    ariaLabel="资源节点操作菜单"
+                    fixed
+                    onClose={closeContextMenu}
                 />
             )}
             {/* 资源增删改表单 */}

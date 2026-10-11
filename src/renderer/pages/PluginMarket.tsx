@@ -5,9 +5,7 @@ import {
     Card,
     Col,
     Collapse,
-    Empty,
     Input,
-    Popconfirm,
     Row,
     Select,
     Space,
@@ -20,8 +18,12 @@ import {
 import {DownloadOutlined, FolderOpenOutlined, ReloadOutlined, DeleteOutlined} from '@ant-design/icons';
 import {usePluginStore} from '../store/plugins';
 import type {APIResponse, PluginEntry} from '../types';
+import PageShell from '../components/common/PageShell';
+import StateBlock from '../components/common/StateBlock';
+import IconButton from '../components/common/IconButton';
+import {useConfirmDanger} from '../components/common/dangerConfirm';
 
-const {Text, Title, Paragraph} = Typography;
+const {Text, Paragraph} = Typography;
 
 type CategoryFilter = 'all' | 'benchmark' | 'topic';
 type StatusFilter = 'all' | 'installed' | 'available';
@@ -36,6 +38,7 @@ function matchesCategory(plugin: PluginEntry, category: CategoryFilter): boolean
 }
 
 const PluginMarket: React.FC = () => {
+    const confirmDanger = useConfirmDanger();
     const entries = usePluginStore(state => state.entries);
     const errors = usePluginStore(state => state.errors);
     const pluginsDir = usePluginStore(state => state.pluginsDir);
@@ -118,13 +121,20 @@ const PluginMarket: React.FC = () => {
         }
     };
 
-    const uninstall = async (plugin: PluginEntry) => {
-        const result = await withRowBusy(plugin.id, () => window.electronAPI.plugin.uninstall(plugin.id));
-        if (result.ok) {
-            message.success(`已卸载 ${plugin.name}`);
-        } else {
-            message.error(result.error);
-        }
+    const uninstall = (plugin: PluginEntry) => {
+        confirmDanger({
+            title: `卸载插件「${plugin.name}」`,
+            description: '删除本机上的插件文件，官方条目可以重新安装。',
+            okText: '卸载',
+            onOk: async () => {
+                const result = await withRowBusy(plugin.id, () => window.electronAPI.plugin.uninstall(plugin.id));
+                if (!result.ok) {
+                    // 抛错让 antd 保持确认框打开，卸载失败不会被静默关掉
+                    throw new Error(result.error);
+                }
+                message.success(`已卸载 ${plugin.name}`);
+            },
+        });
     };
 
     const revealDir = async () => {
@@ -202,24 +212,19 @@ const PluginMarket: React.FC = () => {
     };
 
     return (
-        <div style={{padding: 'var(--spacing-lg)'}}>
-            <Title level={4} style={{marginBottom: 4}}>
-                插件市场
-            </Title>
-            <Paragraph type="secondary" style={{marginBottom: 'var(--spacing-md)'}}>
-                插件是本地声明式扩展，只贡献数据（压测预设、Topic 创建模板），应用不会加载或执行插件携带的任何代码。
-            </Paragraph>
-
+        <PageShell
+            title="插件市场"
+            subtitle="插件是本地声明式扩展，只贡献数据（压测预设、Topic 创建模板），应用不会加载或执行插件携带的任何代码。"
+        >
             {errors.length > 0 && (
                 <Alert
                     type="warning"
                     showIcon
-                    style={{marginBottom: 'var(--spacing-md)'}}
                     message={`${errors.length} 个插件文件没能加载`}
                     description={
                         <Space direction="vertical" size={2}>
                             {errors.map(error => (
-                                <Text key={error.file} style={{fontSize: 12}}>
+                                <Text key={error.file} className="hint-text">
                                     {error.file}：{error.reason}
                                 </Text>
                             ))}
@@ -228,15 +233,17 @@ const PluginMarket: React.FC = () => {
                 />
             )}
 
-            <Card size="small" style={{marginBottom: 'var(--spacing-md)'}}>
+            <Card size="small">
                 <Space wrap size="middle">
                     <Input.Search
+                        aria-label="搜索插件"
                         placeholder="搜索插件名 / 描述"
                         allowClear
                         style={{width: 220}}
                         onChange={event => setKeyword(event.target.value)}
                     />
                     <Select
+                        aria-label="按类型筛选插件"
                         value={category}
                         onChange={value => setCategory(value)}
                         style={{width: 140}}
@@ -247,6 +254,7 @@ const PluginMarket: React.FC = () => {
                         ]}
                     />
                     <Select
+                        aria-label="按安装状态筛选插件"
                         value={status}
                         onChange={value => setStatus(value)}
                         style={{width: 130}}
@@ -279,15 +287,19 @@ const PluginMarket: React.FC = () => {
                 </Space>
             </Card>
 
-            {!ready && entries.length === 0 ? (
-                <Card size="small">
-                    <Empty description="正在读取插件目录" image={Empty.PRESENTED_IMAGE_SIMPLE} />
-                </Card>
-            ) : visible.length === 0 ? (
-                <Card size="small">
-                    <Empty description="没有匹配的插件" image={Empty.PRESENTED_IMAGE_SIMPLE} />
-                </Card>
-            ) : (
+            <StateBlock
+                loading={!ready && entries.length === 0}
+                onRetry={() => void load()}
+                empty={visible.length === 0}
+                emptyText={entries.length === 0 ? '插件目录里还没有任何插件' : '没有匹配的插件'}
+                action={
+                    entries.length === 0 ? (
+                        <Button icon={<ReloadOutlined />} onClick={() => void load()}>
+                            重新读取插件目录
+                        </Button>
+                    ) : undefined
+                }
+            >
                 <Row gutter={[16, 16]}>
                     {visible.map(plugin => (
                         <Col key={plugin.id} xs={24} lg={12} xxl={8}>
@@ -308,28 +320,22 @@ const PluginMarket: React.FC = () => {
                                             <>
                                                 <Switch
                                                     size="small"
+                                                    aria-label={`启用插件 ${plugin.name}`}
                                                     checked={plugin.enabled}
                                                     loading={busyId === plugin.id}
                                                     disabled={busyId === plugin.id}
                                                     onChange={checked => void toggle(plugin, checked)}
                                                 />
-                                                <Popconfirm
-                                                    title="卸载插件"
-                                                    description="删除本机上的插件文件，官方条目可以重新安装。"
-                                                    okText="卸载"
-                                                    okButtonProps={{danger: true}}
-                                                    cancelText="取消"
-                                                    onConfirm={() => void uninstall(plugin)}
-                                                >
-                                                    <Button
-                                                        size="small"
-                                                        danger
-                                                        type="text"
-                                                        disabled={busyId === plugin.id}
-                                                        loading={busyId === plugin.id}
-                                                        icon={<DeleteOutlined />}
-                                                    />
-                                                </Popconfirm>
+                                                <IconButton
+                                                    size="small"
+                                                    type="text"
+                                                    danger
+                                                    label={`卸载插件 ${plugin.name}`}
+                                                    disabled={busyId === plugin.id}
+                                                    loading={busyId === plugin.id}
+                                                    icon={<DeleteOutlined />}
+                                                    onClick={() => uninstall(plugin)}
+                                                />
                                             </>
                                         ) : (
                                             <Button
@@ -345,24 +351,24 @@ const PluginMarket: React.FC = () => {
                                     </Space>
                                 }
                             >
-                                <Text type="secondary" style={{fontSize: 12}}>
+                                <Text className="hint-text">
                                     {plugin.id}
                                     {plugin.author ? ` · ${plugin.author}` : ''}
                                 </Text>
                                 {plugin.description ? (
-                                    <Paragraph style={{marginTop: 6, marginBottom: 0}}>{plugin.description}</Paragraph>
+                                    <Paragraph style={{marginTop: 'var(--spacing-sm)', marginBottom: 0}}>
+                                        {plugin.description}
+                                    </Paragraph>
                                 ) : null}
                                 {renderContributions(plugin)}
                             </Card>
                         </Col>
                     ))}
                 </Row>
-            )}
+            </StateBlock>
 
-            <Text type="secondary" style={{fontSize: 12, display: 'block', marginTop: 'var(--spacing-md)'}}>
-                插件目录：{pluginsDir || '读取中'}
-            </Text>
-        </div>
+            <Text className="hint-text">插件目录：{pluginsDir || '读取中'}</Text>
+        </PageShell>
     );
 };
 

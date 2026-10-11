@@ -6,6 +6,7 @@ import {loadAppSettings} from './store/settings';
 import {loadPlugins} from './store/plugins';
 import Layout from './components/layout/Layout';
 import ErrorBoundary from './components/ErrorBoundary';
+import {DangerConfirmHost} from './components/common/dangerConfirm';
 
 // 首屏渲染前就要有属性：子组件在 render 阶段读 CSS 变量取色，父组件的 effect 一定晚于它们。
 // 主题走 localStorage 同步副本（store 初始化时已读入），不用等主进程那次异步 IPC。
@@ -33,6 +34,7 @@ const App: React.FC = () => {
             }}
         >
             <ErrorBoundary>
+                <DangerConfirmHost />
                 <Layout />
             </ErrorBoundary>
         </ConfigProvider>

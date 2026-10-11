@@ -1,11 +1,10 @@
-import React, {useEffect, useState} from 'react';
+import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {
     Alert,
     Button,
     Card,
     Col,
     InputNumber,
-    Popconfirm,
     Radio,
     Row,
     Select,
@@ -23,8 +22,11 @@ import {useThemeStore} from '../store/theme';
 import {useClusterStore} from '../store/cluster';
 import {useShortcutStore} from '../store/shortcuts';
 import {downloadBlob} from '../utils/download';
+import PageShell from '../components/common/PageShell';
+import StateBlock from '../components/common/StateBlock';
+import {useConfirmDanger} from '../components/common/dangerConfirm';
 
-const {Text, Title, Paragraph} = Typography;
+const {Text} = Typography;
 
 const REFRESH_OPTIONS = [
     {label: '5 秒', value: 5},
@@ -44,6 +46,7 @@ function looksLikeConfigBundle(raw: unknown): raw is ConfigBundle {
 }
 
 const ConfigCenter: React.FC = () => {
+    const confirmDanger = useConfirmDanger();
     const settings = useSettingsStore(state => state.settings);
     const updateSettings = useSettingsStore(state => state.update);
     const resetSettings = useSettingsStore(state => state.reset);
@@ -53,18 +56,25 @@ const ConfigCenter: React.FC = () => {
     const loadShortcuts = useShortcutStore(state => state.load);
 
     const [meta, setMeta] = useState<ConfigMeta | null>(null);
+    const [metaLoading, setMetaLoading] = useState(true);
     const [metaError, setMetaError] = useState<string | null>(null);
+    // 重试与首屏加载可能同时在途，晚到的那一份不能覆盖新一轮的结果
+    const metaRequestRef = useRef(0);
     const [busy, setBusy] = useState(false);
     // 截断长度在输入过程中只改草稿，失焦/回车才落库：
     // 直接每敲一位就写一次设置，输入 500 会先落 5、50，再落 500。
     const [truncateDraft, setTruncateDraft] = useState<number | null>(null);
 
-    useEffect(() => {
-        let cancelled = false;
+    const loadMeta = useCallback(() => {
+        const requestId = ++metaRequestRef.current;
+        const isStale = () => requestId !== metaRequestRef.current;
+
+        setMetaLoading(true);
+        setMetaError(null);
         window.electronAPI.config
             .meta()
             .then(response => {
-                if (cancelled) {
+                if (isStale()) {
                     return;
                 }
                 if (response.success && response.data) {
@@ -74,14 +84,20 @@ const ConfigCenter: React.FC = () => {
                 }
             })
             .catch((error: unknown) => {
-                if (!cancelled) {
+                if (!isStale()) {
                     setMetaError(error instanceof Error ? error.message : String(error));
                 }
+            })
+            .finally(() => {
+                if (!isStale()) {
+                    setMetaLoading(false);
+                }
             });
-        return () => {
-            cancelled = true;
-        };
     }, []);
+
+    useEffect(() => {
+        loadMeta();
+    }, [loadMeta]);
 
     const patch = async (next: Parameters<typeof updateSettings>[0]) => {
         const result = await updateSettings(next);
@@ -143,31 +159,39 @@ const ConfigCenter: React.FC = () => {
         }
     };
 
-    const handleClearLogs = async () => {
-        setBusy(true);
-        try {
-            const response = await window.electronAPI.config.clearLogs();
-            if (response.success) {
+    const handleClearLogs = () => {
+        confirmDanger({
+            title: '清空操作日志',
+            description: '日志只存在本机，清空后无法找回。',
+            okText: '清空',
+            onOk: async () => {
+                const response = await window.electronAPI.config.clearLogs();
+                if (!response.success) {
+                    // 抛错让 antd 保持确认框打开，失败不会被静默关掉
+                    throw new Error(response.error || '清空失败');
+                }
                 message.success(`已清空操作日志（删除 ${response.data?.deleted ?? 0} 条）`);
-            } else {
-                message.error(response.error || '清空失败');
-            }
-        } catch (error) {
-            message.error(`清空失败：${(error as Error).message}`);
-        } finally {
-            setBusy(false);
-        }
+            },
+        });
+    };
+
+    const handleResetSettings = () => {
+        confirmDanger({
+            title: '恢复默认设置',
+            description: '只影响界面与刷新相关的设置，不动集群配置。',
+            okText: '恢复',
+            onOk: async () => {
+                const result = await resetSettings();
+                if (!result.ok) {
+                    throw new Error(result.error ?? '恢复失败');
+                }
+                message.success('已恢复默认设置');
+            },
+        });
     };
 
     return (
-        <div style={{padding: 16}}>
-            <Title level={4} style={{marginBottom: 4}}>
-                配置中心
-            </Title>
-            <Paragraph type="secondary" style={{marginBottom: 16}}>
-                这里改的是应用自身的设置，全部落在本机 SQLite，改完立即生效。
-            </Paragraph>
-
+        <PageShell title="配置中心" subtitle="这里改的是应用自身的设置，全部落在本机 SQLite，改完立即生效。">
             <Row gutter={[16, 16]}>
                 <Col span={12}>
                     <Card title="界面" size="small">
@@ -192,6 +216,7 @@ const ConfigCenter: React.FC = () => {
                                 <Text>消息正文截断长度（20 ~ 500 字符）</Text>
                                 <div style={{marginTop: 4}}>
                                     <InputNumber
+                                        aria-label="消息正文截断长度"
                                         min={20}
                                         max={500}
                                         step={10}
@@ -203,7 +228,7 @@ const ConfigCenter: React.FC = () => {
                                         style={{width: 160}}
                                     />
                                 </div>
-                                <Text type="secondary" style={{fontSize: 12}}>
+                                <Text className="hint-text">
                                     消息浏览器列表里的正文超过该长度即折叠，可点"展开全文"看完整内容
                                 </Text>
                             </div>
@@ -218,6 +243,7 @@ const ConfigCenter: React.FC = () => {
                                 <Space>
                                     <Text>自动刷新</Text>
                                     <Switch
+                                        aria-label="自动刷新监控"
                                         checked={settings.autoRefresh}
                                         onChange={checked => void patch({autoRefresh: checked})}
                                         size="small"
@@ -228,6 +254,7 @@ const ConfigCenter: React.FC = () => {
                                 <Text>刷新间隔</Text>
                                 <div style={{marginTop: 4}}>
                                     <Select
+                                        aria-label="监控刷新间隔"
                                         value={settings.autoRefresh ? settings.refreshIntervalSeconds : 0}
                                         options={REFRESH_OPTIONS}
                                         style={{width: 160}}
@@ -242,7 +269,7 @@ const ConfigCenter: React.FC = () => {
                                         }}
                                     />
                                 </div>
-                                <Text type="secondary" style={{fontSize: 12}}>
+                                <Text className="hint-text">
                                     监控面板按此节奏拉取集群统计；选"手动"后只响应刷新按钮
                                 </Text>
                             </div>
@@ -267,34 +294,12 @@ const ConfigCenter: React.FC = () => {
                                 >
                                     <Button icon={<UploadOutlined />}>导入配置</Button>
                                 </Upload>
-                                <Popconfirm
-                                    title="恢复默认设置"
-                                    description="只影响界面与刷新相关的设置，不动集群配置。"
-                                    onConfirm={async () => {
-                                        const result = await resetSettings();
-                                        if (result.ok) {
-                                            message.success('已恢复默认设置');
-                                        } else {
-                                            message.error(result.error);
-                                        }
-                                    }}
-                                    okText="恢复"
-                                    cancelText="取消"
-                                >
-                                    <Button icon={<ReloadOutlined />}>恢复默认</Button>
-                                </Popconfirm>
-                                <Popconfirm
-                                    title="清空操作日志"
-                                    description="日志只存在本机，清空后无法找回。"
-                                    onConfirm={() => void handleClearLogs()}
-                                    okText="清空"
-                                    okButtonProps={{danger: true}}
-                                    cancelText="取消"
-                                >
-                                    <Button danger icon={<DeleteOutlined />}>
-                                        清空操作日志
-                                    </Button>
-                                </Popconfirm>
+                                <Button icon={<ReloadOutlined />} onClick={handleResetSettings}>
+                                    恢复默认
+                                </Button>
+                                <Button danger icon={<DeleteOutlined />} onClick={handleClearLogs}>
+                                    清空操作日志
+                                </Button>
                             </Space>
                             <Alert
                                 type="info"
@@ -314,25 +319,29 @@ const ConfigCenter: React.FC = () => {
 
                 <Col span={24}>
                     <Card title="运行信息" size="small">
-                        <Space direction="vertical" size={4}>
-                            {metaError && (
-                                <Alert type="warning" showIcon message="运行信息读取失败" description={metaError} />
-                            )}
-                            <Text>
-                                应用版本：<Tag color="blue">{meta?.appVersion ?? '读取中'}</Tag>
-                            </Text>
-                            <Text copyable={meta ? {text: meta.databasePath} : false}>
-                                本地数据库：{meta?.databasePath ?? '读取中'}
-                            </Text>
-                            <Text type="secondary" style={{fontSize: 12}}>
-                                快捷键绑定在"快捷键配置"页里单独管理与导入导出；Gitee 更新令牌在"设置 →
-                                检查更新"里配置。
-                            </Text>
-                        </Space>
+                        <StateBlock
+                            loading={metaLoading}
+                            error={metaError}
+                            errorTitle="运行信息读取失败"
+                            onRetry={loadMeta}
+                        >
+                            {meta ? (
+                                <Space direction="vertical" size={4} style={{width: '100%'}}>
+                                    <Text>
+                                        应用版本：<Tag color="blue">{meta.appVersion}</Tag>
+                                    </Text>
+                                    <Text copyable={{text: meta.databasePath}}>本地数据库：{meta.databasePath}</Text>
+                                    <Text className="hint-text">
+                                        快捷键绑定在"快捷键配置"页里单独管理与导入导出；Gitee 更新令牌在"设置 →
+                                        检查更新"里配置。
+                                    </Text>
+                                </Space>
+                            ) : null}
+                        </StateBlock>
                     </Card>
                 </Col>
             </Row>
-        </div>
+        </PageShell>
     );
 };
 

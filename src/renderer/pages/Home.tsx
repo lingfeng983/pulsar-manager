@@ -1,5 +1,5 @@
 import React, {useEffect, useRef, useState, useCallback} from 'react';
-import {Card, Row, Col, Statistic, Table, Tag, Button, Space, Switch, Spin, Alert, Modal, message} from 'antd';
+import {Card, Row, Col, Statistic, Table, Tag, Button, Space, Switch, Spin, message} from 'antd';
 import {
     ClusterOutlined,
     DatabaseOutlined,
@@ -14,6 +14,10 @@ import {
 import {useClusterStore} from '../store/cluster';
 import ClusterConfigModal from './ClusterConfig';
 import HomeTopology from '../components/HomeTopology';
+import PageShell from '../components/common/PageShell';
+import StateBlock from '../components/common/StateBlock';
+import ErrorBanner from '../components/common/ErrorBanner';
+import {useConfirmDanger} from '../components/common/dangerConfirm';
 import type {ClusterConfig} from '../types';
 import {useCommand} from '../hooks/useKeybindings';
 
@@ -30,6 +34,7 @@ interface GlobalStats {
 }
 
 const HomePage: React.FC = () => {
+    const confirmDanger = useConfirmDanger();
     const [viewMode, setViewMode] = useState<'list' | 'topology'>('list');
     const [modalOpen, setModalOpen] = useState(false);
     const [editingCluster, setEditingCluster] = useState<ClusterConfig | null>(null);
@@ -149,13 +154,11 @@ const HomePage: React.FC = () => {
         setModalOpen(true);
     };
 
-    const handleDeleteCluster = async (cluster: ClusterConfig) => {
-        Modal.confirm({
-            title: '确认删除',
-            content: `确定要删除集群 "${cluster.name}" 吗？此操作将移除本地存储的集群配置。`,
-            okText: '删除',
-            okType: 'danger',
-            cancelText: '取消',
+    const handleDeleteCluster = (cluster: ClusterConfig) => {
+        confirmDanger({
+            title: '确认删除集群',
+            description: `确定要删除集群 "${cluster.name}" 吗？此操作将移除本地存储的集群配置。`,
+            requireExactName: cluster.name,
             onOk: async () => {
                 const ok = await deleteClusterAsync(cluster.id);
                 if (!ok) {
@@ -182,7 +185,7 @@ const HomePage: React.FC = () => {
             render: (text: string) => (
                 <Space>
                     <ClusterOutlined style={{color: 'var(--color-primary)'}} />
-                    <span style={{fontWeight: 500}}>{text}</span>
+                    <span className="field-label">{text}</span>
                 </Space>
             ),
         },
@@ -190,7 +193,7 @@ const HomePage: React.FC = () => {
             title: 'Service URL',
             dataIndex: 'serviceUrl',
             key: 'serviceUrl',
-            render: (url: string) => <span style={{fontSize: 12, color: 'var(--color-text-secondary)'}}>{url}</span>,
+            render: (url: string) => <span className="hint-text">{url}</span>,
         },
         {
             title: '状态',
@@ -235,30 +238,15 @@ const HomePage: React.FC = () => {
     ];
 
     return (
-        <div
-            style={{
-                padding: 'var(--spacing-lg)',
-                overflow: 'auto',
-                height: '100%',
-                display: 'flex',
-                flexDirection: 'column',
-            }}
-        >
-            {/* 页面标题和视图切换 */}
-            <div
-                style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    marginBottom: 'var(--spacing-lg)',
-                }}
-            >
-                <h2 style={{fontSize: '20px', fontWeight: 600}}>集群总览</h2>
-                <Space>
+        <PageShell
+            title="集群总览"
+            actions={
+                <>
                     <Button icon={<ReloadOutlined />} onClick={() => fetchClusters()} loading={loading}>
                         刷新
                     </Button>
                     <Switch
+                        aria-label="切换列表视图与拓扑视图"
                         checkedChildren={<AppstoreOutlined />}
                         unCheckedChildren={<BarChartOutlined />}
                         checked={viewMode === 'topology'}
@@ -268,24 +256,15 @@ const HomePage: React.FC = () => {
                     <Button type="primary" icon={<PlusOutlined />} onClick={handleAddCluster}>
                         添加集群
                     </Button>
-                </Space>
-            </div>
-
-            {error && (
-                <Alert
-                    message="加载失败"
-                    description={error}
-                    type="error"
-                    showIcon
-                    closable
-                    style={{marginBottom: 16}}
-                />
-            )}
+                </>
+            }
+        >
+            <ErrorBanner error={error} />
 
             {viewMode === 'list' ? (
                 <>
                     {/* 全局指标卡片 */}
-                    <Row gutter={16} style={{marginBottom: 'var(--spacing-lg)'}}>
+                    <Row gutter={[16, 16]}>
                         <Col span={8}>
                             <Card>
                                 <Statistic
@@ -319,13 +298,7 @@ const HomePage: React.FC = () => {
                                                 prefix={<DatabaseOutlined />}
                                                 valueStyle={{color: 'var(--color-text-primary)'}}
                                             />
-                                            <div
-                                                style={{
-                                                    marginTop: 8,
-                                                    fontSize: 12,
-                                                    color: 'var(--color-text-secondary)',
-                                                }}
-                                            >
+                                            <div className="stat-subline">
                                                 分区: {globalStats?.totalPartitions || 0}｜订阅:{' '}
                                                 {globalStats?.totalSubscriptions || 0}
                                             </div>
@@ -376,16 +349,7 @@ const HomePage: React.FC = () => {
                         ) : (
                             <Col span={16}>
                                 <Card>
-                                    <div
-                                        style={{
-                                            textAlign: 'center',
-                                            padding: '20px 0',
-                                            color: 'var(--color-text-secondary)',
-                                        }}
-                                    >
-                                        <MessageOutlined style={{fontSize: 24, marginBottom: 8}} />
-                                        <p>暂无已连接的集群，请先添加并连接集群查看统计信息</p>
-                                    </div>
+                                    <StateBlock empty emptyText="暂无已连接的集群，请先添加并连接集群查看统计信息" />
                                 </Card>
                             </Col>
                         )}
@@ -393,26 +357,26 @@ const HomePage: React.FC = () => {
 
                     {/* 集群列表 */}
                     <Card title="集群列表" variant="borderless">
-                        <Spin spinning={loading}>
-                            {clusters.length === 0 && !loading ? (
-                                <div style={{textAlign: 'center', padding: '40px 0'}}>
-                                    <ClusterOutlined style={{fontSize: 48, color: 'var(--color-text-secondary)'}} />
-                                    <p style={{marginTop: 16, color: 'var(--color-text-secondary)'}}>暂无集群配置</p>
-                                    <Button type="primary" onClick={handleAddCluster} style={{marginTop: 16}}>
-                                        添加第一个集群
-                                    </Button>
-                                </div>
-                            ) : (
-                                <Table
-                                    columns={columns}
-                                    dataSource={clusters}
-                                    rowKey="id"
-                                    pagination={false}
-                                    size="middle"
-                                    scroll={{x: 'max-content'}}
-                                />
-                            )}
-                        </Spin>
+                        <StateBlock
+                            loading={loading && clusters.length === 0}
+                            empty={clusters.length === 0}
+                            emptyText="暂无集群配置"
+                            onRetry={fetchClusters}
+                            action={
+                                <Button type="primary" onClick={handleAddCluster}>
+                                    添加第一个集群
+                                </Button>
+                            }
+                        >
+                            <Table
+                                columns={columns}
+                                dataSource={clusters}
+                                rowKey="id"
+                                pagination={false}
+                                size="middle"
+                                scroll={{x: 'max-content'}}
+                            />
+                        </StateBlock>
                     </Card>
                 </>
             ) : (
@@ -430,7 +394,7 @@ const HomePage: React.FC = () => {
                 }}
                 editingCluster={editingCluster}
             />
-        </div>
+        </PageShell>
     );
 };
 

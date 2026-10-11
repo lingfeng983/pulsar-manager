@@ -9,8 +9,6 @@ import {
     Button,
     Table,
     Space,
-    Spin,
-    Alert,
     Modal,
     Form,
     Input,
@@ -30,6 +28,7 @@ import {
     EditOutlined,
     DeleteOutlined,
     PlusOutlined,
+    ReloadOutlined,
 } from '@ant-design/icons';
 import type {TopicConfigPatch, TopicStats} from '../types';
 import {useTabStore} from '../store/tabs';
@@ -38,6 +37,9 @@ import {topicTabId} from '../utils/tabIds';
 import {invalidateTopics, invalidateTopicStats} from '../hooks/resourceCache';
 import MessageBrowser from './MessageBrowser';
 import {useCommand, PaneActiveContext} from '../hooks/useKeybindings';
+import PageShell from '../components/common/PageShell';
+import StateBlock from '../components/common/StateBlock';
+import {useConfirmDanger} from '../components/common/dangerConfirm';
 
 interface TopicDetailProps {
     clusterId: string;
@@ -59,9 +61,6 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [activeTab, setActiveTab] = useState('overview');
-    const [deleteModalOpen, setDeleteModalOpen] = useState(false);
-    const [deletingSubscription, setDeletingSubscription] = useState<string | null>(null);
-    const [deletingInProgress, setDeletingInProgress] = useState(false);
     const [createModalOpen, setCreateModalOpen] = useState(false);
     const [createForm] = Form.useForm();
     const [creatingInProgress, setCreatingInProgress] = useState(false);
@@ -80,6 +79,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
     const [savingInProgress, setSavingInProgress] = useState(false);
 
     const {removeTab} = useTabStore();
+    const confirmDanger = useConfirmDanger();
     const tabId = topicTabId({clusterId, tenant, namespace, topic, persistent});
     // 外层页签被切走时 antd 只是 display:none，组件仍然挂载，15s 轮询会在后台
     // 一直打 IPC。这里跟随页签激活态，非当前页签不启动轮询。
@@ -158,35 +158,34 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
     }, [fetchTopicStats, paneActive]);
 
     // 删除订阅
-    const handleDeleteSubscription = async () => {
-        if (!deletingSubscription) return;
-        // 提交态与"当前操作哪个订阅"分开存：订阅名同时是弹窗标题的数据源，
-        // 早先版本用 !!deletingSubscription 直接当 loading，弹窗一打开按钮就进入
-        // loading 态，而 antd 的 loading 按钮不派发点击，导致永远点不动确认删除。
-        setDeletingInProgress(true);
-        try {
-            const response = await window.electronAPI.resources.deleteSubscription(
-                clusterId,
-                tenant,
-                namespace,
-                topic,
-                deletingSubscription,
-                persistent,
-            );
-            if (response.success) {
+    const handleDeleteSubscription = (subscriptionName: string) => {
+        confirmDanger({
+            title: '删除订阅',
+            description: (
+                <>
+                    删除订阅 <strong>{subscriptionName}</strong> 会同时丢弃它的游标与未确认消息，此操作不可恢复。
+                </>
+            ),
+            okText: '确认删除',
+            requireExactName: subscriptionName,
+            onOk: async () => {
+                const response = await window.electronAPI.resources.deleteSubscription(
+                    clusterId,
+                    tenant,
+                    namespace,
+                    topic,
+                    subscriptionName,
+                    persistent,
+                );
+                if (!response.success) {
+                    // 抛错让确认框保持打开，失败不会被静默关掉
+                    throw new Error(response.error || '删除失败');
+                }
                 message.success('订阅删除成功');
-                setDeleteModalOpen(false);
-                setDeletingSubscription(null);
                 invalidateTopicStats(clusterId, tenant, namespace, topic);
                 await fetchTopicStats();
-            } else {
-                message.error(response.error || '删除失败');
-            }
-        } catch {
-            message.error('删除失败');
-        } finally {
-            setDeletingInProgress(false);
-        }
+            },
+        });
     };
 
     // 创建订阅
@@ -385,44 +384,29 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
     };
 
     // 删除Topic
-    const handleDeleteTopic = async () => {
-        Modal.confirm({
+    const handleDeleteTopic = () => {
+        confirmDanger({
             title: '确认删除 Topic',
-            content: (
-                <div>
-                    <p>
-                        确定要删除 Topic <strong>{topic}</strong> 吗？
-                    </p>
-                    <p style={{color: 'var(--color-danger)', fontSize: 12, marginTop: 8}}>
-                        此操作不可恢复，且会删除所有关联的订阅和消息！
-                    </p>
-                </div>
-            ),
+            description: '此操作不可恢复，且会删除所有关联的订阅和消息！',
             okText: '确认删除',
-            okType: 'danger',
-            cancelText: '取消',
-            async onOk() {
-                try {
-                    const response = await window.electronAPI.resources.deleteTopic(
-                        clusterId,
-                        tenant,
-                        namespace,
-                        topic,
-                        persistent,
-                    );
-                    if (response.success) {
-                        message.success('Topic 删除成功');
-                        // Topic 已不存在，列表缓存必须失效，否则资源树仍显示它
-                        invalidateTopics(clusterId, tenant, namespace);
-                        invalidateTopicStats(clusterId, tenant, namespace, topic);
-                        // 关闭当前 tab
-                        removeTab(tabId);
-                    } else {
-                        message.error(response.error || '删除失败');
-                    }
-                } catch {
-                    message.error('删除失败');
+            requireExactName: topic,
+            onOk: async () => {
+                const response = await window.electronAPI.resources.deleteTopic(
+                    clusterId,
+                    tenant,
+                    namespace,
+                    topic,
+                    persistent,
+                );
+                if (!response.success) {
+                    throw new Error(response.error || '删除失败');
                 }
+                message.success('Topic 删除成功');
+                // Topic 已不存在，列表缓存必须失效，否则资源树仍显示它
+                invalidateTopics(clusterId, tenant, namespace);
+                invalidateTopicStats(clusterId, tenant, namespace, topic);
+                // 关闭当前 tab
+                removeTab(tabId);
             },
         });
     };
@@ -462,15 +446,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                     <Button type="link" size="small" onClick={() => handleSkipMessages(record.name)}>
                         跳过消息
                     </Button>
-                    <Button
-                        type="link"
-                        size="small"
-                        danger
-                        onClick={() => {
-                            setDeletingSubscription(record.name);
-                            setDeleteModalOpen(true);
-                        }}
-                    >
+                    <Button type="link" size="small" danger onClick={() => handleDeleteSubscription(record.name)}>
                         删除
                     </Button>
                 </Space>
@@ -562,14 +538,23 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
             : [];
 
     return (
-        <div style={{height: '100%', display: 'flex', flexDirection: 'column'}}>
+        <PageShell
+            title={`Topic ${topic}`}
+            subtitle={`${topicUri} · ${persistent ? '持久化' : '非持久化'}`}
+            actions={
+                <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void fetchTopicStats()}>
+                    刷新
+                </Button>
+            }
+        >
             {/* 顶部指标卡片 */}
-            <Card style={{margin: 'var(--spacing-md)', marginBottom: 0}}>
-                <Row gutter={16}>
+            <Card>
+                <Row gutter={[16, 16]}>
                     <Col span={6}>
                         <Statistic
                             title="消息输入速率"
                             value={stats?.msgRateIn || 0}
+                            precision={2}
                             prefix={<BarChartOutlined />}
                             suffix=" msg/s"
                             valueStyle={{color: 'var(--color-primary)'}}
@@ -579,6 +564,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                         <Statistic
                             title="消息输出速率"
                             value={stats?.msgRateOut || 0}
+                            precision={2}
                             prefix={<MessageOutlined />}
                             suffix=" msg/s"
                             valueStyle={{color: 'var(--color-success)'}}
@@ -611,249 +597,169 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
             </Card>
 
             {/* Tab内容区域 */}
-            <div style={{flex: 1, margin: 'var(--spacing-md)', overflow: 'hidden'}}>
-                <Tabs
-                    activeKey={activeTab}
-                    onChange={setActiveTab}
-                    items={[
-                        {
-                            key: 'overview',
-                            label: '概览',
-                            icon: <BarChartOutlined />,
-                            children: (
-                                <Spin spinning={loading}>
-                                    {error ? (
-                                        <Alert message="获取数据失败" description={error} type="error" showIcon />
-                                    ) : stats ? (
-                                        <div>
-                                            <Card title="存储信息" style={{marginBottom: 'var(--spacing-md)'}}>
-                                                <Row gutter={16}>
-                                                    <Col span={8}>
-                                                        <div>
-                                                            <span style={{color: 'var(--color-text-secondary)'}}>
-                                                                总存储大小
-                                                            </span>
-                                                            <p style={{fontSize: 24, fontWeight: 600}}>
-                                                                {formatBytes(stats.storageSize)}
-                                                            </p>
-                                                        </div>
-                                                    </Col>
-                                                    <Col span={8}>
-                                                        <div>
-                                                            <span style={{color: 'var(--color-text-secondary)'}}>
-                                                                积压大小
-                                                            </span>
-                                                            <p style={{fontSize: 24, fontWeight: 600}}>
-                                                                {formatBytes(stats.backlogSize)}
-                                                            </p>
-                                                        </div>
-                                                    </Col>
-                                                    <Col span={8}>
-                                                        <div>
-                                                            <span style={{color: 'var(--color-text-secondary)'}}>
-                                                                消息输入速率
-                                                            </span>
-                                                            <p style={{fontSize: 24, fontWeight: 600}}>
-                                                                {formatMessageRate(stats.msgRateIn)}
-                                                            </p>
-                                                        </div>
-                                                    </Col>
-                                                </Row>
-                                            </Card>
+            <Tabs
+                activeKey={activeTab}
+                onChange={setActiveTab}
+                items={[
+                    {
+                        key: 'overview',
+                        label: '概览',
+                        icon: <BarChartOutlined />,
+                        children: (
+                            <StateBlock
+                                loading={loading && !stats}
+                                error={error}
+                                errorTitle="获取数据失败"
+                                onRetry={() => void fetchTopicStats()}
+                                empty={!stats}
+                                emptyText="暂无 Topic 统计"
+                            >
+                                {stats ? (
+                                    <div className="stack">
+                                        <Card title="存储信息">
+                                            <Row gutter={[16, 16]}>
+                                                <Col span={8}>
+                                                    <div className="hint-text">总存储大小</div>
+                                                    <p className="metric-value">{formatBytes(stats.storageSize)}</p>
+                                                </Col>
+                                                <Col span={8}>
+                                                    <div className="hint-text">积压大小</div>
+                                                    <p className="metric-value">{formatBytes(stats.backlogSize)}</p>
+                                                </Col>
+                                                <Col span={8}>
+                                                    <div className="hint-text">消息输入速率</div>
+                                                    <p className="metric-value">{formatMessageRate(stats.msgRateIn)}</p>
+                                                </Col>
+                                            </Row>
+                                        </Card>
 
-                                            <Card
-                                                title={`生产者 (${stats.producers?.length || 0})`}
-                                                style={{marginBottom: 'var(--spacing-md)'}}
-                                            >
-                                                {stats.producers && stats.producers.length > 0 ? (
-                                                    <Table
-                                                        dataSource={stats.producers}
-                                                        columns={producerColumns}
-                                                        rowKey={record =>
-                                                            `${record.producerName}-${record.address ?? ''}`
-                                                        }
-                                                        pagination={false}
-                                                        size="small"
-                                                        scroll={{x: 'max-content'}}
-                                                    />
-                                                ) : (
-                                                    <div
-                                                        style={{
-                                                            textAlign: 'center',
-                                                            padding: '20px 0',
-                                                            color: 'var(--color-text-secondary)',
-                                                        }}
-                                                    >
-                                                        暂无生产者
-                                                    </div>
-                                                )}
-                                            </Card>
+                                        <Card title={`生产者 (${stats.producers?.length || 0})`}>
+                                            {stats.producers && stats.producers.length > 0 ? (
+                                                <Table
+                                                    dataSource={stats.producers}
+                                                    columns={producerColumns}
+                                                    rowKey={record => `${record.producerName}-${record.address ?? ''}`}
+                                                    pagination={false}
+                                                    size="small"
+                                                    scroll={{x: 'max-content'}}
+                                                />
+                                            ) : (
+                                                <StateBlock empty emptyText="暂无生产者" height={120} />
+                                            )}
+                                        </Card>
 
-                                            <Card title={`消费者 (${stats.consumers?.length || 0})`}>
-                                                {stats.consumers && stats.consumers.length > 0 ? (
-                                                    <Table
-                                                        dataSource={stats.consumers}
-                                                        columns={consumerColumns}
-                                                        rowKey={record =>
-                                                            `${record.subscription}-${record.consumerName}`
-                                                        }
-                                                        pagination={false}
-                                                        size="small"
-                                                        scroll={{x: 'max-content'}}
-                                                    />
-                                                ) : (
-                                                    <div
-                                                        style={{
-                                                            textAlign: 'center',
-                                                            padding: '20px 0',
-                                                            color: 'var(--color-text-secondary)',
-                                                        }}
-                                                    >
-                                                        暂无消费者
-                                                    </div>
-                                                )}
-                                            </Card>
-                                        </div>
-                                    ) : (
-                                        <div style={{textAlign: 'center', padding: '40px 0'}}>加载中...</div>
-                                    )}
-                                </Spin>
-                            ),
-                        },
-                        {
-                            key: 'subscriptions',
-                            label: '订阅管理',
-                            icon: <UserOutlined />,
-                            children: (
-                                <Card
-                                    title={`订阅列表 (${subscriptionData.length})`}
-                                    extra={
-                                        <Tooltip title={adminSubscriptionUnsupported ? adminSubscriptionHint : ''}>
-                                            <Button
-                                                type="primary"
-                                                icon={<PlusOutlined />}
-                                                disabled={adminSubscriptionUnsupported}
-                                                onClick={() => setCreateModalOpen(true)}
-                                            >
-                                                创建订阅
-                                            </Button>
-                                        </Tooltip>
-                                    }
-                                >
-                                    {subscriptionData.length > 0 ? (
-                                        <Table
-                                            dataSource={subscriptionData}
-                                            columns={subscriptionColumns}
-                                            rowKey="name"
-                                            pagination={false}
-                                            size="small"
-                                            scroll={{x: 'max-content'}}
-                                        />
-                                    ) : (
-                                        <div
-                                            style={{
-                                                textAlign: 'center',
-                                                padding: '40px 0',
-                                                color: 'var(--color-text-secondary)',
-                                            }}
-                                        >
-                                            暂无订阅
-                                        </div>
-                                    )}
-                                </Card>
-                            ),
-                        },
-                        {
-                            key: 'messages',
-                            label: '消息浏览器',
-                            icon: <MessageOutlined />,
-                            children: (
-                                <MessageBrowser
-                                    clusterId={clusterId}
-                                    tenant={tenant}
-                                    namespace={namespace}
-                                    topic={topic}
-                                    persistent={persistent}
-                                    // 内层页签是 display:none 而非卸载，会话得靠这个标记停掉，
-                                    // 否则切到概览后消息浏览器还在后台收消息。
-                                    active={activeTab === 'messages'}
-                                />
-                            ),
-                        },
-                        {
-                            key: 'config',
-                            label: '配置',
-                            icon: <SettingOutlined />,
-                            children: (
-                                <Card title="Topic 配置">
-                                    <div style={{padding: '20px'}}>
-                                        <div style={{marginBottom: 'var(--spacing-md)'}}>
-                                            <span style={{fontWeight: 500}}>Topic 名称:</span>
-                                            <code style={{marginLeft: 8}}>{topicUri}</code>
-                                        </div>
-                                        <div style={{marginBottom: 'var(--spacing-md)'}}>
-                                            <span style={{fontWeight: 500}}>分区数:</span>
-                                            <span style={{marginLeft: 8}}>{stats?.partitions?.length || 0}</span>
-                                        </div>
-                                        <div style={{marginBottom: 'var(--spacing-md)'}}>
-                                            <span style={{fontWeight: 500}}>是否持久化:</span>
-                                            <span style={{marginLeft: 8}}>{persistent ? '是' : '否'}</span>
-                                        </div>
-                                        <Space style={{marginTop: 'var(--spacing-md)'}}>
-                                            <Button
-                                                icon={<EditOutlined />}
-                                                loading={configLoading}
-                                                onClick={handleOpenEditConfig}
-                                            >
-                                                编辑配置
-                                            </Button>
-                                            <Button icon={<DeleteOutlined />} danger onClick={handleDeleteTopic}>
-                                                删除 Topic
-                                            </Button>
-                                        </Space>
+                                        <Card title={`消费者 (${stats.consumers?.length || 0})`}>
+                                            {stats.consumers && stats.consumers.length > 0 ? (
+                                                <Table
+                                                    dataSource={stats.consumers}
+                                                    columns={consumerColumns}
+                                                    rowKey={record => `${record.subscription}-${record.consumerName}`}
+                                                    pagination={false}
+                                                    size="small"
+                                                    scroll={{x: 'max-content'}}
+                                                />
+                                            ) : (
+                                                <StateBlock empty emptyText="暂无消费者" height={120} />
+                                            )}
+                                        </Card>
                                     </div>
-                                </Card>
-                            ),
-                        },
-                    ]}
-                    style={{height: '100%'}}
-                />
-            </div>
-
-            {/* 删除订阅确认弹窗 */}
-            <Modal
-                title="确认删除"
-                open={deleteModalOpen}
-                onCancel={() => {
-                    setDeleteModalOpen(false);
-                    setDeletingSubscription(null);
-                }}
-                footer={[
-                    <Button
-                        key="back"
-                        onClick={() => {
-                            setDeleteModalOpen(false);
-                            setDeletingSubscription(null);
-                        }}
-                    >
-                        取消
-                    </Button>,
-                    <Button
-                        key="submit"
-                        type="primary"
-                        danger
-                        loading={deletingInProgress}
-                        onClick={() => void handleDeleteSubscription()}
-                    >
-                        确认删除
-                    </Button>,
+                                ) : null}
+                            </StateBlock>
+                        ),
+                    },
+                    {
+                        key: 'subscriptions',
+                        label: '订阅管理',
+                        icon: <UserOutlined />,
+                        children: (
+                            <Card
+                                title={`订阅列表 (${subscriptionData.length})`}
+                                extra={
+                                    <Tooltip title={adminSubscriptionUnsupported ? adminSubscriptionHint : ''}>
+                                        <Button
+                                            type="primary"
+                                            icon={<PlusOutlined />}
+                                            disabled={adminSubscriptionUnsupported}
+                                            onClick={() => setCreateModalOpen(true)}
+                                        >
+                                            创建订阅
+                                        </Button>
+                                    </Tooltip>
+                                }
+                            >
+                                {subscriptionData.length > 0 ? (
+                                    <Table
+                                        dataSource={subscriptionData}
+                                        columns={subscriptionColumns}
+                                        rowKey="name"
+                                        pagination={false}
+                                        size="small"
+                                        scroll={{x: 'max-content'}}
+                                    />
+                                ) : (
+                                    <StateBlock empty emptyText="暂无订阅" height={160} />
+                                )}
+                            </Card>
+                        ),
+                    },
+                    {
+                        key: 'messages',
+                        label: '消息浏览器',
+                        icon: <MessageOutlined />,
+                        children: (
+                            <MessageBrowser
+                                clusterId={clusterId}
+                                tenant={tenant}
+                                namespace={namespace}
+                                topic={topic}
+                                persistent={persistent}
+                                // 内层页签是 display:none 而非卸载，会话得靠这个标记停掉，
+                                // 否则切到概览后消息浏览器还在后台收消息。
+                                active={activeTab === 'messages'}
+                            />
+                        ),
+                    },
+                    {
+                        key: 'config',
+                        label: '配置',
+                        icon: <SettingOutlined />,
+                        children: (
+                            <Card title="Topic 配置">
+                                <div className="stack" style={{gap: 'var(--spacing-md)'}}>
+                                    <div>
+                                        <span className="field-label">Topic 名称:</span>
+                                        <code style={{marginLeft: 'var(--spacing-sm)'}}>{topicUri}</code>
+                                    </div>
+                                    <div>
+                                        <span className="field-label">分区数:</span>
+                                        <span style={{marginLeft: 'var(--spacing-sm)'}}>
+                                            {stats?.partitions?.length || 0}
+                                        </span>
+                                    </div>
+                                    <div>
+                                        <span className="field-label">是否持久化:</span>
+                                        <span style={{marginLeft: 'var(--spacing-sm)'}}>
+                                            {persistent ? '是' : '否'}
+                                        </span>
+                                    </div>
+                                    <Space>
+                                        <Button
+                                            icon={<EditOutlined />}
+                                            loading={configLoading}
+                                            onClick={handleOpenEditConfig}
+                                        >
+                                            编辑配置
+                                        </Button>
+                                        <Button icon={<DeleteOutlined />} danger onClick={handleDeleteTopic}>
+                                            删除 Topic
+                                        </Button>
+                                    </Space>
+                                </div>
+                            </Card>
+                        ),
+                    },
                 ]}
-            >
-                <p>
-                    确定要删除订阅 <strong>{deletingSubscription}</strong> 吗？
-                </p>
-                <p style={{color: 'var(--color-danger)', fontSize: 12, marginTop: 8}}>此操作不可恢复，请谨慎操作。</p>
-            </Modal>
+            />
 
             {/* 创建订阅弹窗 */}
             <Modal
@@ -947,7 +853,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                             />
                         </Form.Item>
                     )}
-                    <p style={{color: 'var(--color-text-secondary)', fontSize: 12, marginTop: 8}}>
+                    <p className="hint-text" style={{marginTop: 'var(--spacing-sm)'}}>
                         最早位置与指定时间戳会重置游标；本 broker 没有"跳到最新"的游标接口，
                         该选项实现为跳过当前全部积压消息（skip_all），已被跳过的消息不会再次投递。
                     </p>
@@ -993,7 +899,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                             style={{width: '100%'}}
                         />
                     </Form.Item>
-                    <p style={{color: 'var(--color-text-secondary)', fontSize: 12, marginTop: 8}}>
+                    <p className="hint-text" style={{marginTop: 'var(--spacing-sm)'}}>
                         跳过消息后，积压消息数将减少对应数量。
                     </p>
                 </Form>
@@ -1051,7 +957,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                         style={{
                             padding: 'var(--spacing-sm) var(--spacing-md)',
                             background: 'var(--color-bg-secondary)',
-                            borderRadius: 6,
+                            borderRadius: 'var(--radius-md)',
                             fontSize: 12,
                             lineHeight: 1.9,
                         }}
@@ -1064,13 +970,13 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                         <div>归属 Broker：{stats?.ownerBrokers?.length ? stats.ownerBrokers.join('、') : '未知'}</div>
                     </div>
 
-                    <p style={{color: 'var(--color-text-secondary)', fontSize: 12, marginTop: 8}}>
+                    <p className="hint-text" style={{marginTop: 'var(--spacing-sm)'}}>
                         最大消息大小、积压配额、TTL、生产/消费者上限等策略在本 broker 上只有命名空间级别的写入口， 在
                         topic 级别修改不会生效，因此这里不提供输入框。
                     </p>
                 </Form>
             </Modal>
-        </div>
+        </PageShell>
     );
 };
 

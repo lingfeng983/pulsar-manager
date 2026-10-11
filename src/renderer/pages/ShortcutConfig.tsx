@@ -1,11 +1,14 @@
 import React, {useContext, useEffect, useMemo, useRef, useState} from 'react';
-import {Alert, Button, Card, Popconfirm, Space, Switch, Table, Tag, Tooltip, Typography, message} from 'antd';
+import {Alert, Button, Card, Space, Switch, Table, Tag, Tooltip, Typography, message} from 'antd';
 import {DownloadOutlined, ReloadOutlined, UploadOutlined} from '@ant-design/icons';
 import {GROUP_ORDER, COMMAND_BY_ID, COMMAND_CATALOG, type CommandId, type CommandMeta} from '../store/commands';
 import {useShortcutStore, resolveBinding, isDefaultBinding, findConflicts} from '../store/shortcuts';
 import {bindingFromEvent, formatBinding} from '../utils/keybinding';
 import {downloadBlob} from '../utils/download';
 import {PaneActiveContext} from '../hooks/useKeybindings';
+import PageShell from '../components/common/PageShell';
+import StateBlock from '../components/common/StateBlock';
+import {useConfirmDanger} from '../components/common/dangerConfirm';
 
 const {Text} = Typography;
 
@@ -24,6 +27,7 @@ const ShortcutConfig: React.FC = () => {
     const [previewError, setPreviewError] = useState<string | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const paneActive = useContext(PaneActiveContext);
+    const confirmDanger = useConfirmDanger();
 
     useEffect(() => {
         if (!ready) {
@@ -116,6 +120,18 @@ const ShortcutConfig: React.FC = () => {
         }
     };
 
+    const handleResetAll = () => {
+        confirmDanger({
+            title: '恢复默认快捷键',
+            description: '所有自定义绑定与解绑都会被清空，无法撤销。',
+            okText: '恢复',
+            onOk: () => {
+                resetAll();
+                message.success('已恢复出厂快捷键');
+            },
+        });
+    };
+
     const columns = [
         {
             title: '功能名称',
@@ -191,62 +207,53 @@ const ShortcutConfig: React.FC = () => {
     ];
 
     return (
-        <div style={{padding: 'var(--spacing-lg)', overflow: 'auto', height: '100%'}}>
-            <Card
-                size="small"
-                style={{marginBottom: 'var(--spacing-md)'}}
-                title={
-                    <Space>
-                        <span>快捷键配置</span>
-                        <Tag>{platform === 'mac' ? 'macOS' : 'Windows / Linux'}</Tag>
-                    </Space>
-                }
-                extra={
-                    <Space>
+        <PageShell
+            title={
+                <Space size="small">
+                    <span>快捷键配置</span>
+                    <Tag>{platform === 'mac' ? 'macOS' : 'Windows / Linux'}</Tag>
+                </Space>
+            }
+            subtitle="两套平台映射相互独立保存；点击「编辑」后按下任意组合键即可绑定，Esc 取消。"
+            actions={
+                <>
+                    <Space size={4}>
                         <Text type="secondary">全局快捷键</Text>
-                        <Switch checked={config.enabled} onChange={checked => void setEnabled(checked)} />
-                        <Button icon={<UploadOutlined />} onClick={() => fileInputRef.current?.click()}>
-                            导入配置
-                        </Button>
-                        <Button icon={<DownloadOutlined />} onClick={handleExport}>
-                            导出配置
-                        </Button>
-                        <Popconfirm
-                            title="恢复默认快捷键"
-                            description="所有自定义绑定与解绑都会被清空，无法撤销。"
-                            okText="恢复"
-                            cancelText="取消"
-                            onConfirm={() => {
-                                resetAll();
-                                message.success('已恢复出厂快捷键');
-                            }}
-                        >
-                            <Button icon={<ReloadOutlined />}>恢复默认</Button>
-                        </Popconfirm>
-                        <input
-                            ref={fileInputRef}
-                            type="file"
-                            accept="application/json"
-                            style={{display: 'none'}}
-                            onChange={event => {
-                                const file = event.target.files?.[0];
-                                if (file) {
-                                    void handleImportFile(file);
-                                }
-                                event.target.value = '';
-                            }}
+                        <Switch
+                            aria-label="启用全局快捷键"
+                            checked={config.enabled}
+                            onChange={checked => void setEnabled(checked)}
                         />
                     </Space>
-                }
-            >
-                <Text type="secondary">两套平台映射相互独立保存；点击「编辑」后按下任意组合键即可绑定，Esc 取消。</Text>
-            </Card>
-
+                    <Button icon={<UploadOutlined />} onClick={() => fileInputRef.current?.click()}>
+                        导入配置
+                    </Button>
+                    <Button icon={<DownloadOutlined />} onClick={handleExport}>
+                        导出配置
+                    </Button>
+                    <Button icon={<ReloadOutlined />} onClick={handleResetAll}>
+                        恢复默认
+                    </Button>
+                    <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept="application/json"
+                        style={{display: 'none'}}
+                        onChange={event => {
+                            const file = event.target.files?.[0];
+                            if (file) {
+                                void handleImportFile(file);
+                            }
+                            event.target.value = '';
+                        }}
+                    />
+                </>
+            }
+        >
             {!config.enabled && (
                 <Alert
                     type="warning"
                     showIcon
-                    style={{marginBottom: 'var(--spacing-md)'}}
                     message="全局快捷键已关闭"
                     description="关闭后所有自定义按键均不会响应，仅可在界面按钮上手动操作。"
                 />
@@ -256,32 +263,33 @@ const ShortcutConfig: React.FC = () => {
                 <Alert
                     type="error"
                     showIcon
-                    style={{marginBottom: 'var(--spacing-md)'}}
                     message={`检测到 ${totalConflicts} 个快捷键冲突`}
                     description="冲突的按键只会触发列表中靠前的功能，请手动调整以保证行为可预期。"
                 />
             )}
 
-            {GROUP_ORDER.map(group => {
-                const groupRows = rows.get(group) ?? [];
-                if (groupRows.length === 0) {
-                    return null;
-                }
-                return (
-                    <Card key={group} size="small" title={group} style={{marginBottom: 'var(--spacing-md)'}}>
-                        <Table<ShortcutRow>
-                            rowKey={row => row.meta.id}
-                            size="small"
-                            columns={columns}
-                            dataSource={groupRows}
-                            pagination={false}
-                            scroll={{x: 'max-content'}}
-                            rowClassName={row => (row.conflictWith.length > 0 ? 'shortcut-row-conflict' : '')}
-                        />
-                    </Card>
-                );
-            })}
-        </div>
+            <StateBlock loading={!ready}>
+                {GROUP_ORDER.map(group => {
+                    const groupRows = rows.get(group) ?? [];
+                    if (groupRows.length === 0) {
+                        return null;
+                    }
+                    return (
+                        <Card key={group} size="small" title={group}>
+                            <Table<ShortcutRow>
+                                rowKey={row => row.meta.id}
+                                size="small"
+                                columns={columns}
+                                dataSource={groupRows}
+                                pagination={false}
+                                scroll={{x: 'max-content'}}
+                                rowClassName={row => (row.conflictWith.length > 0 ? 'shortcut-row-conflict' : '')}
+                            />
+                        </Card>
+                    );
+                })}
+            </StateBlock>
+        </PageShell>
     );
 };
 

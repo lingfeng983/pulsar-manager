@@ -11,6 +11,7 @@
     --color-bg-base: #ffffff;
     --color-bg-secondary: #f2f3f5;
     --color-bg-elevated: #ffffff;
+    --color-fill-secondary: #f2f3f5;
 
     --color-border: #e5e6eb;
     --color-text-primary: #1d2129;
@@ -51,6 +52,7 @@
     --color-bg-base: #17171a;
     --color-bg-secondary: #232327;
     --color-bg-elevated: #2e2e33;
+    --color-fill-secondary: #3a3a40;
 
     --color-border: #2e2e33;
     --color-text-primary: #f5f5f7;
@@ -72,6 +74,7 @@
     --color-bg-base: #f5f5dc;
     --color-bg-secondary: #e8e8d0;
     --color-bg-elevated: #fffff0;
+    --color-fill-secondary: #e8e8d0;
 
     --color-border: #d4d4be;
     --color-text-primary: #2b2b2b;
@@ -173,9 +176,189 @@ pre,
     background-color: var(--color-bg-secondary);
 }
 
+/* 12px 说明文字：规范 §1.3.1 字号梯度最小档，页面里成片的 fontSize:12 内联样式归到这里 */
+.hint-text {
+    font-size: 12px;
+    line-height: 20px;
+    color: var(--color-text-secondary);
+}
+
+/* 统计卡下方的补充行 */
+.stat-subline {
+    margin-top: var(--spacing-sm);
+    font-size: 12px;
+    line-height: 20px;
+    color: var(--color-text-secondary);
+}
+
+/* 指标数值：规范 §1.3.1 字号梯度上限 20px，原先各处写 24px 已越界 */
+.metric-value {
+    margin: 0;
+    font-size: 20px;
+    line-height: 28px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+}
+
+/* 纵向堆叠：卡片之间的统一间距，替代散落的 marginBottom 裸值 */
+.stack {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-lg);
+}
+
 /* 快捷键配置：存在冲突绑定的行 */
 .shortcut-row-conflict > td {
     background-color: color-mix(in srgb, var(--color-danger) 8%, transparent);
+}
+
+/* ===== 页面骨架（规范 §2.3：内容区统一内边距 16px、统一标题基线）===== */
+.page-shell {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: var(--spacing-lg);
+    overflow: auto;
+}
+
+.page-header {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--spacing-sm);
+    align-items: flex-start;
+    justify-content: space-between;
+    margin-bottom: var(--spacing-lg);
+}
+
+.page-heading {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-xs);
+    min-width: 0;
+}
+
+.page-title {
+    font-size: 20px;
+    font-weight: 600;
+    line-height: 28px;
+    color: var(--color-text-primary);
+}
+
+.page-subtitle {
+    font-size: 14px;
+    line-height: 22px;
+    color: var(--color-text-secondary);
+}
+
+.page-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--spacing-sm);
+    align-items: center;
+}
+
+/* 页面正文：卡片/区块之间的纵向节奏统一由 gap 提供，页面不再各写 margin。
+   flex: 1 1 auto 让需要撑满高度的页面（Topic 详情的内层页签）拿到剩余空间，
+   basis 取 auto 而非 0，正文比可用高度长时仍按内容撑开、由 .page-shell 滚动。 */
+.page-body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-lg);
+    flex: 1 1 auto;
+}
+
+/* 图表卡片的固定高度：四张趋势/分布卡共用，避免每页手写 height 内联样式 */
+.chart-frame {
+    height: 300px;
+}
+
+/* ===== 三态占位（规范 §2.3：加载 / 空数据 / 异常全局统一）===== */
+.state-block {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-sm);
+    align-items: center;
+    justify-content: center;
+    padding: var(--spacing-xxl) var(--spacing-lg);
+    text-align: center;
+}
+
+/* Result/Empty 自带 48px 外边距，套进 .state-block 会变成双倍留白 */
+.state-block .ant-result {
+    padding: 0;
+}
+
+.state-block .ant-empty-normal {
+    margin-block: 0;
+}
+
+/* 详情页信息区块的字段标签（租户/命名空间/Topic 概览共用） */
+.field-label {
+    font-weight: 500;
+}
+
+/* 与标签同行的字段值：留 8px 间隔，替代散落的 marginLeft: 8 */
+.field-value {
+    margin-left: var(--spacing-sm);
+}
+
+.field-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--spacing-sm);
+    margin-left: var(--spacing-sm);
+}
+
+/* ===== 共享右键菜单（页签栏 / 资源树共用，含键盘可达）===== */
+.context-menu {
+    position: absolute;
+    z-index: 1050;
+    min-width: 160px;
+    padding: 4px 0;
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-medium);
+}
+
+.context-menu-item {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    padding: 4px 12px;
+    font-size: 14px;
+    line-height: 22px;
+    color: var(--color-text-primary);
+    cursor: pointer;
+    outline: none;
+    transition: background 0.2s;
+}
+
+/* 方向键导航靠 focus() 移动焦点，程序化聚焦不匹配 :focus-visible，只能用 :focus */
+.context-menu-item:hover:not([aria-disabled='true']),
+.context-menu-item:focus:not([aria-disabled='true']) {
+    background: var(--color-fill-secondary);
+}
+
+.context-menu-item-icon {
+    display: inline-flex;
+    color: inherit;
+}
+
+.context-menu-separator {
+    height: 1px;
+    margin: 4px 0;
+    background: var(--color-border);
+}
+
+.context-menu-item-danger {
+    color: var(--color-danger);
+}
+
+.context-menu-item[aria-disabled='true'] {
+    color: var(--color-text-secondary);
+    cursor: not-allowed;
+    opacity: 0.5;
 }
 
 /* 图表高度链：antd Spin 嵌套使用时把 style 落在圆点上，外层容器拿不到样式，

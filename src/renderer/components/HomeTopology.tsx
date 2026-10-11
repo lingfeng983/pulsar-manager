@@ -19,6 +19,8 @@ import {useElementSize} from '../hooks/useElementSize';
 import {shortName} from '../utils/format';
 import {topicTab, topologyTab} from '../utils/tabIds';
 import {useTopologyPalette} from '../utils/topologyColors';
+import StateBlock from './common/StateBlock';
+import IconButton from './common/IconButton';
 import {
     buildTopologyOption,
     type TopologyGraphEdge,
@@ -336,20 +338,7 @@ const HomeTopology: React.FC = () => {
     if (clusters.length === 0) {
         return (
             <Card>
-                <div
-                    style={{
-                        height: '500px',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        color: 'var(--color-text-secondary)',
-                    }}
-                >
-                    <ClusterOutlined style={{fontSize: 64, marginBottom: 16}} />
-                    <p style={{fontSize: 18, marginBottom: 8}}>暂无集群配置</p>
-                    <p style={{fontSize: 12, color: 'var(--color-text-hint)'}}>请先添加集群配置以查看拓扑图</p>
-                </div>
+                <StateBlock empty height={500} emptyText="暂无集群配置，请先添加集群以查看拓扑图" />
             </Card>
         );
     }
@@ -359,16 +348,16 @@ const HomeTopology: React.FC = () => {
             title="集群拓扑总览"
             extra={
                 <Space>
-                    <Button icon={<ZoomOutOutlined />} onClick={handleZoomOut} size="small" title="缩小" />
-                    <Button icon={<ZoomInOutlined />} onClick={handleZoomIn} size="small" title="放大" />
+                    <IconButton size="small" icon={<ZoomOutOutlined />} label="缩小拓扑图" onClick={handleZoomOut} />
+                    <IconButton size="small" icon={<ZoomInOutlined />} label="放大拓扑图" onClick={handleZoomIn} />
                     <Button icon={<ReloadOutlined />} onClick={loadTopology} loading={loading} size="small">
                         刷新
                     </Button>
-                    <Button
-                        icon={isFullscreen ? <CompressOutlined /> : <FullscreenOutlined />}
-                        onClick={toggleFullscreen}
+                    <IconButton
                         size="small"
-                        title={isFullscreen ? '退出全屏' : '全屏'}
+                        icon={isFullscreen ? <CompressOutlined /> : <FullscreenOutlined />}
+                        label={isFullscreen ? '退出全屏' : '全屏'}
+                        onClick={toggleFullscreen}
                     />
                 </Space>
             }
@@ -377,7 +366,7 @@ const HomeTopology: React.FC = () => {
         >
             <Spin spinning={loading} tip="正在加载拓扑数据..." wrapperClassName="chart-spin">
                 {/* 统计信息 */}
-                <Row gutter={16} style={{marginBottom: 16}}>
+                <Row gutter={[16, 16]} style={{marginBottom: 'var(--spacing-lg)'}}>
                     <Col span={8}>
                         <Statistic
                             title="集群数"
@@ -412,7 +401,7 @@ const HomeTopology: React.FC = () => {
                         showIcon
                         closable
                         onClose={() => setError(null)}
-                        style={{marginBottom: 16}}
+                        style={{marginBottom: 'var(--spacing-lg)'}}
                     />
                 )}
 
@@ -435,8 +424,14 @@ const HomeTopology: React.FC = () => {
                 </div>
 
                 {/* 图例说明 */}
-                <div style={{marginTop: 16, paddingTop: 16, borderTop: `1px solid var(--color-border)`}}>
-                    <div style={{display: 'flex', gap: 24, flexWrap: 'wrap', alignItems: 'center'}}>
+                <div
+                    style={{
+                        marginTop: 'var(--spacing-lg)',
+                        paddingTop: 'var(--spacing-lg)',
+                        borderTop: '1px solid var(--color-border)',
+                    }}
+                >
+                    <div style={{display: 'flex', gap: 'var(--spacing-xl)', flexWrap: 'wrap', alignItems: 'center'}}>
                         <Space size={16}>
                             <Tag color={palette.primary}>集群</Tag>
                             <Tag color={palette.success}>Broker</Tag>

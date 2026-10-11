@@ -1,34 +1,19 @@
 import React, {useState, useEffect, useCallback, useRef, useMemo, useContext} from 'react';
-import {
-    Card,
-    Row,
-    Col,
-    Select,
-    Button,
-    Space,
-    Spin,
-    Alert,
-    Statistic,
-    Progress,
-    Tag,
-    DatePicker,
-    Empty,
-    Typography,
-    message,
-} from 'antd';
-import {ReloadOutlined, FullscreenOutlined} from '@ant-design/icons';
-import ReactECharts from 'echarts-for-react';
+import {Card, Row, Col, Select, Button, Statistic, Progress, Tag, DatePicker, message} from 'antd';
+import {ReloadOutlined} from '@ant-design/icons';
 import type {EChartsOption} from 'echarts';
 import dayjs from 'dayjs';
 import {useClusterStore} from '../store/cluster';
 import {useSettingsStore} from '../store/settings';
 import {formatThroughput, toKilobytesPerSecond} from '../utils/format';
 import {useTopologyPalette, type TopologyPalette} from '../utils/topologyColors';
-import {useFullscreen} from '../hooks/useFullscreen';
 import {useCommand, PaneActiveContext} from '../hooks/useKeybindings';
+import PageShell from '../components/common/PageShell';
+import StateBlock from '../components/common/StateBlock';
+import ErrorBanner from '../components/common/ErrorBanner';
+import ChartCard from '../components/metrics/ChartCard';
 
 const {RangePicker} = DatePicker;
-const {Text} = Typography;
 
 interface MetricsData {
     timestamp: number;
@@ -55,6 +40,14 @@ interface AggregatedStats {
     totalThroughputOut: number;
     totalBacklog: number;
 }
+
+const EMPTY_HISTORY: MultiMetricsHistory = {
+    msgRateIn: [],
+    msgRateOut: [],
+    throughputIn: [],
+    throughputOut: [],
+    backlog: [],
+};
 
 // 三套主题共用的 ECharts 基色：文字/坐标轴/分割线/tooltip 全部从 CSS 变量读，
 // 否则暗色主题下轴标签是默认深灰，整张图糊成一片。
@@ -194,44 +187,14 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
     const updateSettings = useSettingsStore(state => state.update);
     const refreshInterval = autoRefresh ? refreshIntervalSeconds : 0;
     const [dateRange, setDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null);
-    const [metricsHistory, setMetricsHistory] = useState<MultiMetricsHistory>({
-        msgRateIn: [],
-        msgRateOut: [],
-        throughputIn: [],
-        throughputOut: [],
-        backlog: [],
-    });
+    const [metricsHistory, setMetricsHistory] = useState<MultiMetricsHistory>(EMPTY_HISTORY);
     const [error, setError] = useState<string | null>(null);
     const [peakMsgRate, setPeakMsgRate] = useState(0);
-    // 每张图各持一个 ref：原来四张图共用一个，点任意一张卡片的"全屏"都会把整页放大。
-    const msgRateInRef = useRef<ReactECharts>(null);
-    const msgRateOutRef = useRef<ReactECharts>(null);
-    const throughputRef = useRef<ReactECharts>(null);
-    const resourceRef = useRef<ReactECharts>(null);
     const intervalRef = useRef<NodeJS.Timeout | null>(null);
     // 单调递增的请求代次：切换集群后，旧集群的晚到响应不能覆盖新集群的数据
     const loadRequestRef = useRef(0);
     // 外层页签切走后组件仍挂载（display:none），定时器得跟着激活态停掉
     const paneActive = useContext(PaneActiveContext);
-
-    const EMPTY_HISTORY: MultiMetricsHistory = {
-        msgRateIn: [],
-        msgRateOut: [],
-        throughputIn: [],
-        throughputOut: [],
-        backlog: [],
-    };
-
-    // 全屏切换后容器尺寸变了，ECharts 不会自己重算画布，必须显式 resize
-    const resizeCharts = useCallback(() => {
-        for (const chart of [msgRateInRef, msgRateOutRef, throughputRef, resourceRef]) {
-            chart.current?.getEchartsInstance().resize();
-        }
-    }, []);
-    const inChartFullscreen = useFullscreen<HTMLDivElement>(resizeCharts);
-    const outChartFullscreen = useFullscreen<HTMLDivElement>(resizeCharts);
-    const throughputFullscreen = useFullscreen<HTMLDivElement>(resizeCharts);
-    const resourceFullscreen = useFullscreen<HTMLDivElement>(resizeCharts);
 
     const {clusters, fetchClusters} = useClusterStore();
 
@@ -355,7 +318,6 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
         setPeakMsgRate(0);
         setError(null);
         setLoading(false);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [selectedCluster]);
 
     useCommand('refreshMetrics', () => {
@@ -449,21 +411,12 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
     }, [metricsHistory.msgRateIn, autoRefresh, refreshIntervalSeconds]);
 
     return (
-        <div style={{padding: 'var(--spacing-lg)', height: '100%', overflow: 'auto'}}>
-            {/* 页面标题和工具栏 */}
-            <div
-                style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    marginBottom: 'var(--spacing-lg)',
-                    flexWrap: 'wrap',
-                    gap: 'var(--spacing-sm)',
-                }}
-            >
-                <h2 style={{fontSize: 20, fontWeight: 600}}>监控仪表盘</h2>
-                <Space wrap size="small">
+        <PageShell
+            title="监控仪表盘"
+            actions={
+                <>
                     <Select
+                        aria-label="监控目标集群"
                         value={selectedCluster}
                         onChange={setSelectedCluster}
                         style={{width: 200}}
@@ -483,6 +436,7 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                         }
                     />
                     <Select
+                        aria-label="自动刷新间隔"
                         value={refreshInterval}
                         onChange={async (value: number) => {
                             const result = await updateSettings({
@@ -503,285 +457,171 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                             {label: '手动', value: 0},
                         ]}
                     />
-                    <Button icon={<ReloadOutlined />} onClick={() => loadAggregatedStats()} loading={loading}>
+                    <Button icon={<ReloadOutlined />} onClick={() => void loadAggregatedStats()} loading={loading}>
                         刷新
                     </Button>
-                </Space>
-            </div>
+                </>
+            }
+        >
+            <ErrorBanner error={error} onClose={() => setError(null)} />
 
-            {clusters.length === 0 && (
-                <Alert
-                    message="暂无集群"
-                    description="请先添加集群配置"
-                    type="warning"
-                    showIcon
-                    style={{marginBottom: 16}}
-                />
-            )}
-
-            {error && (
-                <Alert
-                    message="加载失败"
-                    description={error}
-                    type="error"
-                    showIcon
-                    closable
-                    onClose={() => setError(null)}
-                    style={{marginBottom: 16}}
-                />
-            )}
-
-            <Spin spinning={loading && !stats}>
-                <Spin spinning={loading && !!stats} size="small">
-                    {/* 集群统计卡片 */}
-                    <Row gutter={16} style={{marginBottom: 'var(--spacing-lg)'}}>
-                        <Col span={6}>
-                            <Card>
-                                <Statistic
-                                    title="总 Topics"
-                                    value={stats?.totalTopics || 0}
-                                    suffix="个"
-                                    valueStyle={{color: 'var(--color-primary)'}}
-                                />
-                                <div style={{marginTop: 8}}>
-                                    <Text type="secondary">分区: {stats?.totalPartitions || 0}</Text>
-                                </div>
-                            </Card>
-                        </Col>
-                        <Col span={6}>
-                            <Card>
-                                <Statistic
-                                    title="消息输入速率"
-                                    value={stats?.totalMsgRateIn || 0}
-                                    suffix="msg/s"
-                                    valueStyle={{color: 'var(--color-success)'}}
-                                    precision={2}
-                                />
-                                <Progress
-                                    percent={Math.min(
-                                        ((stats?.totalMsgRateIn || 0) / (peakMsgRate * 1.2 || 100)) * 100,
-                                        100,
-                                    )}
-                                    showInfo={false}
-                                    strokeColor="var(--color-success)"
-                                    size="small"
-                                />
-                            </Card>
-                        </Col>
-                        <Col span={6}>
-                            <Card>
-                                <Statistic
-                                    title="消息输出速率"
-                                    value={stats?.totalMsgRateOut || 0}
-                                    suffix="msg/s"
-                                    valueStyle={{color: 'var(--color-warning)'}}
-                                    precision={2}
-                                />
-                                <Progress
-                                    percent={Math.min(
-                                        ((stats?.totalMsgRateOut || 0) / (peakMsgRate * 1.2 || 100)) * 100,
-                                        100,
-                                    )}
-                                    showInfo={false}
-                                    strokeColor="var(--color-warning)"
-                                    size="small"
-                                />
-                            </Card>
-                        </Col>
-                        <Col span={6}>
-                            <Card>
-                                <Statistic
-                                    title="积压消息"
-                                    value={stats?.totalBacklog || 0}
-                                    valueStyle={{
-                                        color:
-                                            stats?.totalBacklog && stats.totalBacklog > 5000
-                                                ? 'var(--color-danger)'
-                                                : 'var(--color-text-secondary)',
-                                    }}
-                                />
-                                <div style={{marginTop: 8}}>
-                                    <Text type="secondary">吞吐量: {formatThroughput(stats?.totalThroughputIn)}</Text>
-                                </div>
-                            </Card>
-                        </Col>
-                    </Row>
-
-                    {/* Broker 和连接统计 */}
-                    <Row gutter={16} style={{marginBottom: 'var(--spacing-lg)'}}>
-                        <Col span={8}>
-                            <Card>
-                                <Statistic
-                                    title="活跃 Brokers"
-                                    value={brokers.length}
-                                    suffix="个"
-                                    valueStyle={{color: 'var(--color-primary)'}}
-                                />
-                                <div style={{marginTop: 8}}>
-                                    {brokers.map((broker, idx) => (
-                                        <Tag key={idx} color="blue">
-                                            {broker}
-                                        </Tag>
-                                    ))}
-                                </div>
-                            </Card>
-                        </Col>
-                        <Col span={8}>
-                            <Card>
-                                <Statistic
-                                    title="生产者"
-                                    value={stats?.totalProducers || 0}
-                                    suffix="个"
-                                    valueStyle={{color: 'var(--color-success)'}}
-                                />
-                            </Card>
-                        </Col>
-                        <Col span={8}>
-                            <Card>
-                                <Statistic
-                                    title="消费者"
-                                    value={stats?.totalConsumers || 0}
-                                    suffix="个"
-                                    valueStyle={{color: 'var(--color-warning)'}}
-                                />
-                            </Card>
-                        </Col>
-                    </Row>
-
-                    {/* 消息速率趋势 */}
-                    <Row gutter={16} style={{marginBottom: 'var(--spacing-lg)'}}>
-                        <Col span={12}>
-                            <Card
-                                ref={inChartFullscreen.ref}
-                                title="消息输入速率趋势"
-                                extra={
-                                    <Button
-                                        type="text"
-                                        icon={<FullscreenOutlined />}
-                                        onClick={inChartFullscreen.toggle}
-                                    />
-                                }
-                            >
-                                {metricsHistory.msgRateIn.length === 0 ? (
-                                    <Empty
-                                        description="暂无监控数据，请等待数据采集"
-                                        style={{
-                                            height: 300,
-                                            display: 'flex',
-                                            flexDirection: 'column',
-                                            justifyContent: 'center',
-                                        }}
-                                    />
-                                ) : (
-                                    <ReactECharts
-                                        ref={msgRateInRef}
-                                        option={msgRateInChartOption}
-                                        style={{height: 300}}
-                                    />
+            <StateBlock
+                loading={loading && !stats}
+                empty={clusters.length === 0}
+                emptyText="暂无集群配置，请先在首页添加并连接集群"
+            >
+                {/* 集群统计卡片 */}
+                <Row gutter={[16, 16]}>
+                    <Col span={6}>
+                        <Card>
+                            <Statistic
+                                title="总 Topics"
+                                value={stats?.totalTopics || 0}
+                                suffix="个"
+                                valueStyle={{color: 'var(--color-primary)'}}
+                            />
+                            <div className="stat-subline">分区: {stats?.totalPartitions || 0}</div>
+                        </Card>
+                    </Col>
+                    <Col span={6}>
+                        <Card>
+                            <Statistic
+                                title="消息输入速率"
+                                value={stats?.totalMsgRateIn || 0}
+                                suffix="msg/s"
+                                valueStyle={{color: 'var(--color-success)'}}
+                                precision={2}
+                            />
+                            <Progress
+                                percent={Math.min(
+                                    ((stats?.totalMsgRateIn || 0) / (peakMsgRate * 1.2 || 100)) * 100,
+                                    100,
                                 )}
-                            </Card>
-                        </Col>
-                        <Col span={12}>
-                            <Card
-                                ref={outChartFullscreen.ref}
-                                title="消息输出速率趋势"
-                                extra={
-                                    <Button
-                                        type="text"
-                                        icon={<FullscreenOutlined />}
-                                        onClick={outChartFullscreen.toggle}
-                                    />
-                                }
-                            >
-                                {metricsHistory.msgRateOut.length === 0 ? (
-                                    <Empty
-                                        description="暂无监控数据，请等待数据采集"
-                                        style={{
-                                            height: 300,
-                                            display: 'flex',
-                                            flexDirection: 'column',
-                                            justifyContent: 'center',
-                                        }}
-                                    />
-                                ) : (
-                                    <ReactECharts
-                                        ref={msgRateOutRef}
-                                        option={msgRateOutChartOption}
-                                        style={{height: 300}}
-                                    />
+                                showInfo={false}
+                                strokeColor="var(--color-success)"
+                                size="small"
+                            />
+                        </Card>
+                    </Col>
+                    <Col span={6}>
+                        <Card>
+                            <Statistic
+                                title="消息输出速率"
+                                value={stats?.totalMsgRateOut || 0}
+                                suffix="msg/s"
+                                valueStyle={{color: 'var(--color-warning)'}}
+                                precision={2}
+                            />
+                            <Progress
+                                percent={Math.min(
+                                    ((stats?.totalMsgRateOut || 0) / (peakMsgRate * 1.2 || 100)) * 100,
+                                    100,
                                 )}
-                            </Card>
-                        </Col>
-                    </Row>
+                                showInfo={false}
+                                strokeColor="var(--color-warning)"
+                                size="small"
+                            />
+                        </Card>
+                    </Col>
+                    <Col span={6}>
+                        <Card>
+                            <Statistic
+                                title="积压消息"
+                                value={stats?.totalBacklog || 0}
+                                valueStyle={{
+                                    color:
+                                        stats?.totalBacklog && stats.totalBacklog > 5000
+                                            ? 'var(--color-danger)'
+                                            : 'var(--color-text-secondary)',
+                                }}
+                            />
+                            <div className="stat-subline">吞吐量: {formatThroughput(stats?.totalThroughputIn)}</div>
+                        </Card>
+                    </Col>
+                </Row>
 
-                    {/* 吞吐量和资源分布 */}
-                    <Row gutter={16}>
-                        <Col span={12}>
-                            <Card
-                                ref={throughputFullscreen.ref}
-                                title="吞吐量对比"
-                                extra={
-                                    <Button
-                                        type="text"
-                                        icon={<FullscreenOutlined />}
-                                        onClick={throughputFullscreen.toggle}
-                                    />
-                                }
-                            >
-                                {metricsHistory.throughputIn.length === 0 ? (
-                                    <Empty
-                                        description="暂无监控数据，请等待数据采集"
-                                        style={{
-                                            height: 300,
-                                            display: 'flex',
-                                            flexDirection: 'column',
-                                            justifyContent: 'center',
-                                        }}
-                                    />
-                                ) : (
-                                    <ReactECharts
-                                        ref={throughputRef}
-                                        option={throughputChartOption}
-                                        style={{height: 300}}
-                                    />
-                                )}
-                            </Card>
-                        </Col>
-                        <Col span={12}>
-                            <Card
-                                ref={resourceFullscreen.ref}
-                                title="资源分布"
-                                extra={
-                                    <Button
-                                        type="text"
-                                        icon={<FullscreenOutlined />}
-                                        onClick={resourceFullscreen.toggle}
-                                    />
-                                }
-                            >
-                                {!stats ? (
-                                    <Empty
-                                        description="暂无监控数据，请等待数据采集"
-                                        style={{
-                                            height: 300,
-                                            display: 'flex',
-                                            flexDirection: 'column',
-                                            justifyContent: 'center',
-                                        }}
-                                    />
-                                ) : (
-                                    <ReactECharts
-                                        ref={resourceRef}
-                                        option={resourceChartOption}
-                                        style={{height: 300}}
-                                    />
-                                )}
-                            </Card>
-                        </Col>
-                    </Row>
-                </Spin>
-            </Spin>
-        </div>
+                {/* Broker 和连接统计 */}
+                <Row gutter={[16, 16]}>
+                    <Col span={8}>
+                        <Card>
+                            <Statistic
+                                title="活跃 Brokers"
+                                value={brokers.length}
+                                suffix="个"
+                                valueStyle={{color: 'var(--color-primary)'}}
+                            />
+                            <div style={{marginTop: 'var(--spacing-sm)'}}>
+                                {brokers.map((broker, idx) => (
+                                    <Tag key={idx} color="blue">
+                                        {broker}
+                                    </Tag>
+                                ))}
+                            </div>
+                        </Card>
+                    </Col>
+                    <Col span={8}>
+                        <Card>
+                            <Statistic
+                                title="生产者"
+                                value={stats?.totalProducers || 0}
+                                suffix="个"
+                                valueStyle={{color: 'var(--color-success)'}}
+                            />
+                        </Card>
+                    </Col>
+                    <Col span={8}>
+                        <Card>
+                            <Statistic
+                                title="消费者"
+                                value={stats?.totalConsumers || 0}
+                                suffix="个"
+                                valueStyle={{color: 'var(--color-warning)'}}
+                            />
+                        </Card>
+                    </Col>
+                </Row>
+
+                {/* 消息速率趋势 */}
+                <Row gutter={[16, 16]}>
+                    <Col span={12}>
+                        <ChartCard
+                            title="消息输入速率趋势"
+                            option={msgRateInChartOption}
+                            isEmpty={metricsHistory.msgRateIn.length === 0}
+                            emptyText="暂无监控数据，请等待数据采集"
+                        />
+                    </Col>
+                    <Col span={12}>
+                        <ChartCard
+                            title="消息输出速率趋势"
+                            option={msgRateOutChartOption}
+                            isEmpty={metricsHistory.msgRateOut.length === 0}
+                            emptyText="暂无监控数据，请等待数据采集"
+                        />
+                    </Col>
+                </Row>
+
+                {/* 吞吐量和资源分布 */}
+                <Row gutter={[16, 16]}>
+                    <Col span={12}>
+                        <ChartCard
+                            title="吞吐量对比"
+                            option={throughputChartOption}
+                            isEmpty={metricsHistory.throughputIn.length === 0}
+                            emptyText="暂无监控数据，请等待数据采集"
+                        />
+                    </Col>
+                    <Col span={12}>
+                        <ChartCard
+                            title="资源分布"
+                            option={resourceChartOption}
+                            isEmpty={!stats}
+                            emptyText="暂无监控数据，请等待数据采集"
+                        />
+                    </Col>
+                </Row>
+            </StateBlock>
+        </PageShell>
     );
 };
 

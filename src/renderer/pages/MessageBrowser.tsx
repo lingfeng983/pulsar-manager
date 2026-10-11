@@ -8,11 +8,9 @@ import {
     AutoComplete,
     Space,
     message,
-    Alert,
     Modal,
     Tooltip,
     Tag,
-    Empty,
     Dropdown,
     Segmented,
     Switch,
@@ -35,6 +33,8 @@ import dayjs from 'dayjs';
 import {downloadBlob} from '../utils/download';
 import {useCommand} from '../hooks/useKeybindings';
 import {useSettingsStore} from '../store/settings';
+import StateBlock from '../components/common/StateBlock';
+import ErrorBanner from '../components/common/ErrorBanner';
 
 const {TextArea} = Input;
 
@@ -572,13 +572,16 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
         },
     ];
 
-    const fieldLabel = {marginRight: 8, fontSize: 13, fontWeight: 500} as const;
+    const fieldLabel = {marginRight: 'var(--spacing-sm)', fontWeight: 500} as const;
 
     const sendPanel = (
         <Space direction="vertical" style={{width: '100%'}} size="middle">
             <div>
-                <div style={{marginBottom: 6, fontSize: 13, fontWeight: 500}}>消息内容</div>
+                <div className="field-label" style={{marginBottom: 'var(--spacing-sm)'}}>
+                    消息内容
+                </div>
                 <TextArea
+                    aria-label="消息内容"
                     value={sendText}
                     onChange={e => setSendText(e.target.value)}
                     placeholder="输入要发送的消息内容..."
@@ -586,13 +589,14 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                 />
             </div>
             <div>
-                <div style={{marginBottom: 6, fontSize: 13, fontWeight: 500}}>
+                <div className="field-label" style={{marginBottom: 'var(--spacing-sm)'}}>
                     属性（可选，JSON 对象）
                     <Tooltip title="作为 message properties 一起发出，接收列表里会显示出来">
-                        <span style={{marginLeft: 6, color: 'var(--color-text-tertiary)'}}>?</span>
+                        <span style={{marginLeft: 'var(--spacing-sm)', color: 'var(--color-text-tertiary)'}}>?</span>
                     </Tooltip>
                 </div>
                 <Input
+                    aria-label="消息属性 JSON"
                     value={sendProperties}
                     onChange={e => setSendProperties(e.target.value)}
                     placeholder='{"env":"test","trace":"abc"}'
@@ -619,6 +623,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                 <div>
                     <label style={fieldLabel}>订阅:</label>
                     <AutoComplete
+                        aria-label="订阅名称"
                         value={subscription}
                         onChange={value => setSubscription(value)}
                         options={subscriptions.map(s => ({value: s, label: s}))}
@@ -630,6 +635,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                 <div>
                     <label style={fieldLabel}>类型:</label>
                     <Select
+                        aria-label="订阅类型"
                         value={subscriptionType}
                         onChange={setSubscriptionType}
                         style={{width: 120}}
@@ -645,6 +651,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                 <div>
                     <label style={fieldLabel}>起始:</label>
                     <Select
+                        aria-label="起始消费位置"
                         value={initialPosition}
                         onChange={setInitialPosition}
                         style={{width: 110}}
@@ -657,12 +664,13 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                 </div>
                 <div>
                     <label style={fieldLabel}>自动 ack:</label>
-                    <Switch checked={autoAck} onChange={setAutoAck} disabled={!!sessionId} />
+                    <Switch aria-label="自动 ack" checked={autoAck} onChange={setAutoAck} disabled={!!sessionId} />
                 </div>
                 <Tooltip title="0 表示不限量，一直收到手动停止为止">
                     <div>
                         <label style={fieldLabel}>限量:</label>
                         <InputNumber
+                            aria-label="消费消息限量"
                             min={0}
                             max={10000}
                             value={consumeMax}
@@ -678,6 +686,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                 <div>
                     <label style={fieldLabel}>起始位置:</label>
                     <Select
+                        aria-label="读取起始位置"
                         value={readFrom}
                         onChange={setReadFrom}
                         style={{width: 130}}
@@ -691,6 +700,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                 </div>
                 {readFrom === 'timestamp' && (
                     <DatePicker
+                        aria-label="读取起始时间"
                         showTime
                         value={readTimestamp}
                         onChange={setReadTimestamp}
@@ -702,6 +712,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                     <div>
                         <label style={fieldLabel}>限量:</label>
                         <InputNumber
+                            aria-label="读取消息限量"
                             min={1}
                             max={10000}
                             value={readMax}
@@ -717,8 +728,8 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
     const isRunning = !!sessionId;
 
     return (
-        <div style={{padding: 'var(--spacing-lg)', height: '100%', display: 'flex', flexDirection: 'column'}}>
-            <Card style={{marginBottom: 'var(--spacing-md)'}}>
+        <div className="stack">
+            <Card>
                 <Space wrap size="middle" style={{width: '100%', justifyContent: 'space-between'}}>
                     <Segmented
                         value={mode}
@@ -762,7 +773,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                     <div style={{marginTop: 'var(--spacing-md)'}}>
                         {streamControls}
                         {mode === 'consume' && !autoAck && (
-                            <div style={{marginTop: 8, fontSize: 12, color: 'var(--color-text-tertiary)'}}>
+                            <div className="hint-text" style={{marginTop: 'var(--spacing-sm)'}}>
                                 已关闭自动 ack：未确认的消息会在客户端重连后重投，重投列会显示次数。
                             </div>
                         )}
@@ -770,24 +781,13 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                 )}
             </Card>
 
-            {error && (
-                <Alert
-                    message="操作失败"
-                    description={error}
-                    type="error"
-                    showIcon
-                    closable
-                    onClose={() => setError(null)}
-                    style={{marginBottom: 'var(--spacing-md)'}}
-                />
-            )}
+            <ErrorBanner error={error} title="操作失败" onClose={() => setError(null)} />
 
             {mode === 'send' ? (
                 <Card title="发送消息">{sendPanel}</Card>
             ) : (
                 <Card
                     title={`消息列表 - ${messages.length} 条${isRunning ? '（实时推送中）' : ''}`}
-                    style={{flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column'}}
                     extra={
                         <Dropdown.Button
                             size="small"
@@ -807,22 +807,20 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                         </Dropdown.Button>
                     }
                 >
-                    <div style={{flex: 1, overflow: 'auto'}}>
-                        {messages.length === 0 ? (
-                            <div style={{textAlign: 'center', padding: '40px 0'}}>
-                                <Empty description={isRunning ? '等待消息...' : '点击「开始」接收消息'} />
-                            </div>
-                        ) : (
-                            <Table
-                                dataSource={messages}
-                                columns={columns}
-                                rowKey={(record, index) => `${record.messageId}-${index}`}
-                                pagination={false}
-                                size="small"
-                                scroll={{x: 'max-content'}}
-                            />
-                        )}
-                    </div>
+                    <StateBlock
+                        empty={messages.length === 0}
+                        emptyText={isRunning ? '等待消息...' : '点击「开始」接收消息'}
+                        height={160}
+                    >
+                        <Table
+                            dataSource={messages}
+                            columns={columns}
+                            rowKey={(record, index) => `${record.messageId}-${index}`}
+                            pagination={false}
+                            size="small"
+                            scroll={{x: 'max-content'}}
+                        />
+                    </StateBlock>
                 </Card>
             )}
 
@@ -834,33 +832,32 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                 footer={null}
             >
                 {showFullMessage && (
-                    <div>
-                        <div style={{marginBottom: 16}}>
-                            <label style={{fontWeight: 500}}>Message ID:</label>
-                            <code style={{marginLeft: 8, fontSize: 12}}>{showFullMessage.messageId}</code>
+                    <div className="stack" style={{gap: 'var(--spacing-md)'}}>
+                        <div>
+                            <label className="field-label">Message ID:</label>
+                            <code className="field-value hint-text">{showFullMessage.messageId}</code>
                         </div>
-                        <div style={{marginBottom: 16}}>
-                            <label style={{fontWeight: 500}}>Producer:</label>
-                            <span style={{marginLeft: 8}}>{showFullMessage.producerName}</span>
+                        <div>
+                            <label className="field-label">Producer:</label>
+                            <span className="field-value">{showFullMessage.producerName}</span>
                         </div>
-                        <div style={{marginBottom: 16}}>
-                            <label style={{fontWeight: 500}}>Publish Time:</label>
-                            <span style={{marginLeft: 8}}>
+                        <div>
+                            <label className="field-label">Publish Time:</label>
+                            <span className="field-value">
                                 {dayjs(showFullMessage.publishTime).format('YYYY-MM-DD HH:mm:ss.SSS')}
                             </span>
                         </div>
-                        <div style={{marginBottom: 16}}>
-                            <label style={{fontWeight: 500}}>Properties:</label>
-                            <pre style={{marginLeft: 8, fontSize: 12, maxHeight: 100, overflow: 'auto'}}>
+                        <div>
+                            <label className="field-label">Properties:</label>
+                            <pre className="field-value hint-text" style={{maxHeight: 100, overflow: 'auto'}}>
                                 {JSON.stringify(showFullMessage.properties, null, 2)}
                             </pre>
                         </div>
                         <div>
-                            <label style={{fontWeight: 500}}>Data:</label>
+                            <label className="field-label">Data:</label>
                             <pre
+                                className="field-value hint-text"
                                 style={{
-                                    marginLeft: 8,
-                                    fontSize: 12,
                                     maxHeight: 400,
                                     overflow: 'auto',
                                     whiteSpace: 'pre-wrap',

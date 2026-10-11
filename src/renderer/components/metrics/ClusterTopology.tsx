@@ -1,24 +1,10 @@
 import React, {useEffect, useRef, useState, useCallback, useMemo} from 'react';
-import {
-    Card,
-    Button,
-    Space,
-    Select,
-    Spin,
-    Empty,
-    message,
-    Statistic,
-    Row,
-    Col,
-    Input,
-    Switch,
-    Alert,
-    Tooltip,
-} from 'antd';
+import {Card, Button, Space, Select, Spin, message, Statistic, Row, Col, Input, Switch, Alert, Tooltip} from 'antd';
 import {
     ReloadOutlined,
     ZoomInOutlined,
     ZoomOutOutlined,
+    UndoOutlined,
     FullscreenOutlined,
     CompressOutlined,
     DatabaseOutlined,
@@ -37,6 +23,9 @@ import {useEchartsResize, zoomGraph, resetGraphView} from '../../hooks/useEchart
 import {useElementSize} from '../../hooks/useElementSize';
 import {useCommand} from '../../hooks/useKeybindings';
 import {useTopologyPalette} from '../../utils/topologyColors';
+import PageShell from '../common/PageShell';
+import StateBlock from '../common/StateBlock';
+import IconButton from '../common/IconButton';
 import {
     ALL_NODE_TYPES,
     NODE_TYPE_LABELS,
@@ -319,42 +308,26 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
               : undefined;
 
     return (
-        <div
-            ref={chartContainerRef}
+        <PageShell
+            rootRef={chartContainerRef}
+            title={
+                initialClusterId ? `${clusters.find(c => c.id === initialClusterId)?.name || '集群'}拓扑` : '集群拓扑'
+            }
+            subtitle={
+                visibleNodes.length > 0
+                    ? `节点: ${visibleNodes.length}/${rawNodes.length} · 连接: ${visibleEdges.length}`
+                    : undefined
+            }
             style={{
-                padding: 'var(--spacing-lg)',
-                height: '100%',
-                display: 'flex',
-                flexDirection: 'column',
                 overflow: 'hidden',
                 backgroundColor: isFullscreen ? palette.surface : undefined,
             }}
-        >
-            {/* 页面标题和工具栏 */}
-            <div
-                style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    marginBottom: 'var(--spacing-md)',
-                    flexWrap: 'wrap',
-                    gap: 'var(--spacing-sm)',
-                }}
-            >
-                <h2 style={{fontSize: 20, fontWeight: 600, margin: 0}}>
-                    {initialClusterId
-                        ? `${clusters.find(c => c.id === initialClusterId)?.name || '集群'}拓扑`
-                        : '集群拓扑'}
-                    {visibleNodes.length > 0 && (
-                        <span style={{fontSize: 12, color: palette.label, marginLeft: 12}}>
-                            节点: {visibleNodes.length}/{rawNodes.length} | 连接: {visibleEdges.length}
-                        </span>
-                    )}
-                </h2>
-                <Space wrap size="small">
+            actions={
+                <>
                     {/* 如果没有传入特定集群，显示集群选择器 */}
                     {!initialClusterId && clusters.length > 0 && (
                         <Select
+                            aria-label="监控目标集群"
                             value={selectedCluster}
                             onChange={value => {
                                 setSelectedClusterId(value);
@@ -368,6 +341,7 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
                         />
                     )}
                     <Select
+                        aria-label="显示的节点类型"
                         mode="multiple"
                         value={visibleTypes}
                         onChange={value => setVisibleTypes(value)}
@@ -381,6 +355,7 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
                     />
                     <Input.Search
                         allowClear
+                        aria-label="按名称或租户筛选节点"
                         placeholder="按名称/租户筛选"
                         style={{width: 180}}
                         onSearch={value => setQuery(value)}
@@ -391,6 +366,7 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
                         }}
                     />
                     <Select<TopologyLayout>
+                        aria-label="拓扑布局"
                         value={layout}
                         onChange={value => setLayout(value)}
                         style={{width: 170}}
@@ -398,31 +374,31 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
                     />
                     <Tooltip title={`分区节点上限 ${MAX_PARTITION_NODES}`}>
                         <Space size={4}>
-                            <Switch size="small" checked={showPartitions} onChange={setShowPartitions} />
-                            <span style={{fontSize: 12, color: palette.label}}>显示分区</span>
+                            <Switch
+                                size="small"
+                                aria-label="显示分区节点"
+                                checked={showPartitions}
+                                onChange={setShowPartitions}
+                            />
+                            <span className="hint-text">显示分区</span>
                         </Space>
                     </Tooltip>
-                    <Button icon={<ZoomInOutlined />} onClick={handleZoomIn} title="放大视图" />
-                    <Button icon={<ZoomOutOutlined />} onClick={handleZoomOut} title="缩小视图" />
-                    <Button icon={<ReloadOutlined />} onClick={handleResetView} title="重置视图" />
-                    <Button
+                    <IconButton icon={<ZoomInOutlined />} label="放大视图" onClick={handleZoomIn} />
+                    <IconButton icon={<ZoomOutOutlined />} label="缩小视图" onClick={handleZoomOut} />
+                    <IconButton icon={<UndoOutlined />} label="重置视图" onClick={handleResetView} />
+                    <IconButton
                         icon={isFullscreen ? <CompressOutlined /> : <FullscreenOutlined />}
+                        label={isFullscreen ? '退出全屏' : '全屏'}
                         onClick={toggleFullscreen}
-                        title={isFullscreen ? '退出全屏' : '全屏'}
                     />
-                    <Button
-                        icon={<ReloadOutlined spin={loading} />}
-                        onClick={loadTopology}
-                        loading={loading}
-                        title="刷新数据"
-                    >
+                    <Button icon={<ReloadOutlined />} onClick={loadTopology} loading={loading}>
                         刷新
                     </Button>
-                </Space>
-            </div>
-
+                </>
+            }
+        >
             {/* 统计概览 */}
-            <Row gutter={16} style={{marginBottom: 'var(--spacing-md)'}}>
+            <Row gutter={[16, 16]}>
                 <Col span={6}>
                     <Card>
                         <Statistic
@@ -466,14 +442,7 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
             </Row>
 
             {ownershipAlert && (
-                <Alert
-                    type="warning"
-                    showIcon
-                    closable
-                    message="Topic 归属信息受限"
-                    description={ownershipAlert}
-                    style={{marginBottom: 12}}
-                />
+                <Alert type="warning" showIcon closable message="Topic 归属信息受限" description={ownershipAlert} />
             )}
             {truncatedPartitions && (
                 <Alert
@@ -481,7 +450,6 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
                     showIcon
                     closable
                     message={`分区节点过多，仅展示前 ${MAX_PARTITION_NODES} 个。可用筛选缩小范围。`}
-                    style={{marginBottom: 12}}
                 />
             )}
 
@@ -506,23 +474,18 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
                 >
                     <div ref={chartAreaRef} style={{flex: 1, minHeight: 320, position: 'relative'}}>
                         {rawNodes.length === 0 ? (
-                            <div
-                                style={{
-                                    display: 'flex',
-                                    flexDirection: 'column',
-                                    alignItems: 'center',
-                                    justifyContent: 'center',
-                                    height: '100%',
-                                    gap: 16,
-                                }}
-                            >
-                                <Empty description="暂无拓扑数据" />
-                                <Button type="primary" onClick={loadTopology}>
-                                    加载拓扑
-                                </Button>
-                            </div>
+                            <StateBlock
+                                empty
+                                height="100%"
+                                emptyText="暂无拓扑数据"
+                                action={
+                                    <Button type="primary" onClick={loadTopology}>
+                                        加载拓扑
+                                    </Button>
+                                }
+                            />
                         ) : visibleNodes.length === 0 ? (
-                            <Empty description="当前筛选条件下没有节点" style={{marginTop: 80}} />
+                            <StateBlock empty height="100%" emptyText="当前筛选条件下没有节点" />
                         ) : (
                             <ReactECharts
                                 ref={chartRef}
@@ -542,7 +505,7 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
                     </div>
                 </Spin>
             </Card>
-        </div>
+        </PageShell>
     );
 };
 
