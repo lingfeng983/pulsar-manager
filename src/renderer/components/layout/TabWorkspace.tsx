@@ -11,6 +11,8 @@ import TopicDetail from '../../pages/TopicDetail';
 import TenantDetail from '../../pages/TenantDetail';
 import NamespaceDetail from '../../pages/NamespaceDetail';
 import MetricsDashboard from '../../pages/MetricsDashboard';
+import ProducerWorkspace from '../../pages/ProducerWorkspace';
+import ConsumerWorkspace from '../../pages/ConsumerWorkspace';
 import ShortcutConfig from '../../pages/ShortcutConfig';
 import ConfigCenter from '../../pages/ConfigCenter';
 import PluginMarket from '../../pages/PluginMarket';
@@ -139,6 +141,30 @@ const TabWorkspace: React.FC = () => {
                 const {clusterId, tenant, namespace, topic, persistent} = tab.data || {};
                 return (
                     <TopicDetail
+                        clusterId={clusterId}
+                        tenant={tenant}
+                        namespace={namespace}
+                        topic={topic}
+                        persistent={persistent}
+                    />
+                );
+            }
+            case 'producer': {
+                const {clusterId, tenant, namespace, topic, persistent} = tab.data || {};
+                return (
+                    <ProducerWorkspace
+                        clusterId={clusterId}
+                        tenant={tenant}
+                        namespace={namespace}
+                        topic={topic}
+                        persistent={persistent}
+                    />
+                );
+            }
+            case 'consumer': {
+                const {clusterId, tenant, namespace, topic, persistent} = tab.data || {};
+                return (
+                    <ConsumerWorkspace
                         clusterId={clusterId}
                         tenant={tenant}
                         namespace={namespace}

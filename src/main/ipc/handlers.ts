@@ -7,6 +7,9 @@ import {registerConfigHandlers} from './config-handlers';
 import {registerPluginHandlers} from './plugin-handlers';
 import {registerSystemHandlers} from './system-handlers';
 import {registerUpdateHandlers} from './update-handlers';
+import {registerTemplateHandlers} from './template-handlers';
+import {registerProducerHandlers} from './producer-handlers';
+import {registerConsumerHandlers} from './consumer-handlers';
 import {ensureDbInitialized, cleanupDatabase} from './_shared';
 import {cleanupOrphanSshTunnels} from '../database/sqlite';
 import {createLogger} from '../utils/logger';
@@ -38,4 +41,7 @@ export function registerIPCHandlers() {
     registerPluginHandlers();
     registerSystemHandlers();
     registerUpdateHandlers();
+    registerTemplateHandlers();
+    registerProducerHandlers();
+    registerConsumerHandlers();
 }

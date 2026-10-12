@@ -64,11 +64,73 @@ CREATE TABLE IF NOT EXISTS user_settings (
     updated_at TEXT NOT NULL
 );
 
+-- 报文模板表（生产者工作台）。body 存未解析态，占位符原样保留，
+-- 变量侧表单独一列而不是塞进正文头部：混在一段里格式化后顺序会漂、复制时容易一起粘走。
+-- topic_uri 用空串而不是 NULL 表示「通用模板」：SQLite 唯一索引里 NULL 互不相等，
+-- 用 NULL 的话同名通用模板能无限重复插入。
+CREATE TABLE IF NOT EXISTS message_templates (
+    id TEXT PRIMARY KEY,
+    cluster_id TEXT NOT NULL,
+    topic_uri TEXT NOT NULL DEFAULT '',
+    name TEXT NOT NULL,
+    body TEXT NOT NULL,
+    variables_json TEXT NOT NULL DEFAULT '[]',
+    properties_json TEXT NOT NULL DEFAULT '{}',
+    producer_options_json TEXT NOT NULL DEFAULT '{}',
+    schema_mode TEXT NOT NULL DEFAULT 'none',
+    use_count INTEGER NOT NULL DEFAULT 0,
+    last_used_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (cluster_id, topic_uri, name),
+    FOREIGN KEY (cluster_id) REFERENCES clusters(id) ON DELETE CASCADE
+);
+
+-- 消费者会话配置表（消费者工作台）。config_json 是订阅类型/确认方式/死信这一组，
+-- 整份存取、不按列查，所以不必拆成列。
+CREATE TABLE IF NOT EXISTS consumer_session_configs (
+    id TEXT PRIMARY KEY,
+    cluster_id TEXT NOT NULL,
+    topic_uri TEXT NOT NULL DEFAULT '',
+    subscription TEXT NOT NULL DEFAULT '',
+    name TEXT NOT NULL,
+    config_json TEXT NOT NULL,
+    use_count INTEGER NOT NULL DEFAULT 0,
+    last_used_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (cluster_id, topic_uri, subscription, name),
+    FOREIGN KEY (cluster_id) REFERENCES clusters(id) ON DELETE CASCADE
+);
+
+-- 发送历史：只记正文前缀与字节数，不存解析后的载荷（单条上限 5MB，落库就是几十 GB）。
+-- template_name 冗余存一份，删模板不丢历史；cluster_id 与 template_id 学 operation_logs
+-- 走 SET NULL，因为「消息发过」这件事不该随集群消失而被抹掉。
+CREATE TABLE IF NOT EXISTS send_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cluster_id TEXT,
+    topic_uri TEXT NOT NULL,
+    template_id TEXT,
+    template_name TEXT NOT NULL,
+    body_preview TEXT NOT NULL,
+    body_bytes INTEGER NOT NULL,
+    message_count INTEGER NOT NULL DEFAULT 1,
+    message_id TEXT,
+    status TEXT NOT NULL,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (cluster_id) REFERENCES clusters(id) ON DELETE SET NULL
+);
+
 -- 创建索引
 CREATE INDEX IF NOT EXISTS idx_clusters_status ON clusters(status);
 CREATE INDEX IF NOT EXISTS idx_operation_logs_cluster_id ON operation_logs(cluster_id);
 CREATE INDEX IF NOT EXISTS idx_operation_logs_created_at ON operation_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_ssh_tunnels_status ON ssh_tunnels(status);
+CREATE INDEX IF NOT EXISTS idx_message_templates_scope ON message_templates(cluster_id, topic_uri);
+CREATE INDEX IF NOT EXISTS idx_consumer_configs_scope ON consumer_session_configs(cluster_id, topic_uri);
+CREATE INDEX IF NOT EXISTS idx_send_history_scope ON send_history(cluster_id, topic_uri);
+CREATE INDEX IF NOT EXISTS idx_send_history_created_at ON send_history(created_at);
 
 -- 出厂默认设置（INSERT OR IGNORE：用户改过的值不会被启动流程覆盖回去）
 INSERT OR IGNORE INTO user_settings (key, value, updated_at) VALUES

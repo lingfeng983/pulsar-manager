@@ -1,6 +1,7 @@
 import {app, ipcMain} from 'electron';
 import type {IpcMainInvokeEvent} from 'electron';
 import {z} from 'zod';
+import {defaultProducerOptions} from '../../shared/producer-defaults';
 import {v4 as uuidv4} from 'uuid';
 import {
     initDatabase,
@@ -296,6 +297,92 @@ export const CreateTopicSchema = z.object({
     partitions: z.number().int().min(0).max(1000).default(0),
 });
 
+// ========== 生产者 / 消费者工作台的公共构件 ==========
+// 这几份要放在 MessageSendSchema 之前：属性与变量两侧（单发与模板）共用同一份
+// 上限，各写一遍迟早漂移成两条不同的校验规则。
+
+// 模板与会话配置的作用域地址：形如 persistent://public/default/orders。
+// 空串是「通用」——模板与会话配置可以不绑定某个具体 topic 复用。
+// 这里只查形状不做 admin 校验：工作台允许为还没建出来的 topic 预先存模板。
+export const TopicUriSchema = z
+    .string()
+    .max(500)
+    .refine(
+        value =>
+            value === '' ||
+            /^(?:non-)?persistent:\/\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.|:|-]+$/.test(value),
+        {message: 'topicUri 需为空串或 persistent://租户/命名空间/topic 形式'},
+    );
+
+export const TemplateVariableSchema = z.object({
+    name: z
+        .string()
+        .min(1)
+        .max(64)
+        .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, {message: '变量名只能用字母、数字、下划线，且不以数字开头'}),
+    expr: z.string().min(1).max(2000),
+});
+
+export const TemplateVariablesSchema = z.array(TemplateVariableSchema).max(50);
+
+export const MessagePropertiesSchema = z
+    .record(z.string().max(1024), z.string().max(1024))
+    .refine(props => Object.keys(props).length <= 100, {message: '属性条目最多 100 个'});
+
+// 模板正文限 1MB；解析后的单条消息另有 5MB 上限，在服务层拦——
+// $each 配大 count 能把 1MB 的模板撑到几十 MB。
+export const TemplateBodySchema = z.object({
+    body: z
+        .string()
+        .min(1)
+        .max(1024 * 1024),
+    variables: TemplateVariablesSchema.default([]),
+    properties: MessagePropertiesSchema.optional(),
+});
+
+// 报文级参数：原生 producer 建好之后配置改不了（绑定没有修改入口），一次发送
+// 能逐条决定的只有路由键、事件时间与延时这几项，见 pulsar-client 的 ProducerMessage。
+// eventTimeMode / delayMode 不给默认值——"没填"在这里是有意义的（沿用会话参数），
+// 填了默认值就等于把它覆盖成"不带事件时间"，回落永远不生效。
+// 放在 MessageSendSchema 之前：消息浏览器那张发送面板与工作台的模板共用这一份，
+// 单开一份就会出现"面板能过、工作台被拒"。
+export const ProducerMessageOptionsSchema = z
+    .object({
+        partitionKey: z.string().max(1024).optional(),
+        usePartitionKeyFromField: z.boolean().optional(),
+        partitionKeyField: z.string().min(1).max(100).optional(),
+        eventTimeMode: z.enum(['none', 'now', 'fromField', 'fixed']).optional(),
+        eventTimeField: z.string().min(1).max(100).optional(),
+        eventTimeFixed: z.number().int().nonnegative().optional(),
+        delayMode: z.enum(['none', 'deliverAfter', 'deliverAt']).optional(),
+        deliverAfterMs: z
+            .number()
+            .int()
+            .min(1)
+            .max(7 * 24 * 3600 * 1000)
+            .optional(),
+        deliverAt: z.number().int().positive().optional(),
+        seed: z.number().int().optional(),
+    })
+    .refine(options => !options.usePartitionKeyFromField || !!options.partitionKeyField, {
+        message: '按字段取路由键需要 partitionKeyField',
+    })
+    .refine(options => !(options.partitionKey && options.usePartitionKeyFromField), {
+        message: '固定路由键与按字段取路由键只能选一个',
+    })
+    .refine(options => (options.eventTimeMode === 'fromField' ? !!options.eventTimeField : true), {
+        message: '事件时间取字段需要 eventTimeField',
+    })
+    .refine(options => (options.eventTimeMode === 'fixed' ? options.eventTimeFixed !== undefined : true), {
+        message: '固定事件时间需要 eventTimeFixed',
+    })
+    .refine(options => (options.delayMode === 'deliverAfter' ? !!options.deliverAfterMs : true), {
+        message: '延时投递需要 deliverAfterMs',
+    })
+    .refine(options => (options.delayMode === 'deliverAt' ? !!options.deliverAt : true), {
+        message: '定时投递需要 deliverAt',
+    });
+
 export const MessageSendSchema = TopicPathSchema.extend({
     // 5MB 是 broker 默认的单条消息上限，超过直接被拒；在参数校验阶段就拦住
     message: z
@@ -304,10 +391,8 @@ export const MessageSendSchema = TopicPathSchema.extend({
         .max(5 * 1024 * 1024),
     // 键与值的长度都限了，条数不限的话同样能绕过 5MB：一万个属性就是几百 MB，
     // 而且这些键值会原样进原生 producer.send 并在 broker 侧长期存储。
-    properties: z
-        .record(z.string().max(1024), z.string().max(1024))
-        .optional()
-        .refine(props => !props || Object.keys(props).length <= 100, '属性条目最多 100 个'),
+    properties: MessagePropertiesSchema.optional(),
+    options: ProducerMessageOptionsSchema.optional(),
 });
 
 // maxMessages = 0 表示一直收到手动停止为止；默认给一个上限，
@@ -319,10 +404,51 @@ export const ConsumeStartSchema = SubscriptionPathSchema.extend({
     maxMessages: z.number().int().min(0).max(10000).default(500),
 });
 
+// 消费者工作台的建会话参数：在旧的三态面板那几项之外，再放开原生确实支持的
+// 一组（接收队列、ack 超时、nack 重投超时、消费者名、死信）。这些都有默认值，
+// 界面不填就等于不传，原生层用绑定自己的默认，而不是我们猜一个。
+const DeadLetterSchema = z.object({
+    // 死信主题必须是全路径：原生层拿到什么就投什么，缺前缀 broker 会静默丢掉死信
+    topicName: z
+        .string()
+        .min(1)
+        .max(300)
+        .regex(/^(persistent|non-persistent):\/\/[A-Za-z0-9._\-/]+$/, {
+            message: '死信主题需要完整路径，例如 persistent://public/default/t1-DLQ',
+        }),
+    maxRedeliverCount: z.number().int().min(1).max(100),
+    initialSubscriptionName: SubscriptionSchema.optional(),
+});
+
+export const ConsumerStartSchema = ConsumeStartSchema.extend({
+    receiverQueueSize: z.number().int().min(1).max(10000).optional(),
+    ackTimeoutMs: z
+        .number()
+        .int()
+        .min(1000)
+        .max(24 * 60 * 60 * 1000)
+        .optional(),
+    nAckRedeliverTimeoutMs: z
+        .number()
+        .int()
+        .min(100)
+        .max(60 * 60 * 1000)
+        .optional(),
+    consumerName: z
+        .string()
+        .min(1)
+        .max(255)
+        .regex(/^[a-zA-Z0-9._-]+$/)
+        .optional(),
+    deadLetter: DeadLetterSchema.optional(),
+});
+
 export const ReadStartSchema = TopicPathSchema.extend({
-    from: z.enum(['earliest', 'latest', 'timestamp']).default('earliest'),
+    from: z.enum(['earliest', 'latest', 'timestamp', 'recent']).default('earliest'),
     timestamp: z.number().int().positive().optional(),
     maxMessages: z.number().int().min(0).max(10000).default(500),
+    // 「最近 N 条」的 N：上限 1000 是因为主进程要把这 N 条都留在内存里再一次性推给界面
+    recentCount: z.number().int().min(1).max(1000).default(20),
 })
     // 起点与时间戳必须二选一：两个都给的话服务层会拿 timestamp 去 seek，
     // 用户选"最新位置"却看到从旧时间开始回放，而且界面报成功。
@@ -362,6 +488,188 @@ export const LoadTestStartSchema = TopicPathSchema.extend({
 export const LoadTestStopSchema = z.object({
     runId: z.string().uuid(),
 });
+
+// ========== 生产者 / 消费者工作台 ==========
+
+// 字段一一对上 pulsar-client 1.18 的 ProducerConfig / ProducerMessage。
+// 绑定里没有事务、没有 getStats、没有分区定向 API，所以也不提供这些开关。
+// 默认值全部取自 shared/producer-defaults：界面表单初值与原生建 producer 的参数
+// 与这里必须是同一组数，否则同一个 Topic 上两边的数字对不上。
+const PRODUCER_DEFAULTS = defaultProducerOptions();
+
+export const ProducerOptionsSchema = z
+    .object({
+        producerName: z.string().min(1).max(255).optional(),
+        sendTimeoutMs: z.number().int().min(1000).max(600_000).default(PRODUCER_DEFAULTS.sendTimeoutMs),
+        maxPendingMessages: z.number().int().min(1).max(50_000).default(PRODUCER_DEFAULTS.maxPendingMessages),
+        blockIfQueueFull: z.boolean().default(PRODUCER_DEFAULTS.blockIfQueueFull),
+        batchingEnabled: z.boolean().default(PRODUCER_DEFAULTS.batchingEnabled),
+        batchingMaxMessages: z.number().int().min(1).max(100_000).default(PRODUCER_DEFAULTS.batchingMaxMessages),
+        batchingMaxPublishDelayMs: z
+            .number()
+            .int()
+            .min(1)
+            .max(10_000)
+            .default(PRODUCER_DEFAULTS.batchingMaxPublishDelayMs),
+        batchingMaxAllowedSizeInBytes: z
+            .number()
+            .int()
+            .min(1024)
+            .max(10 * 1024 * 1024)
+            .optional(),
+        compressionType: z.enum(['None', 'Zlib', 'LZ4', 'ZSTD', 'SNAPPY']).default(PRODUCER_DEFAULTS.compressionType),
+        chunkingEnabled: z.boolean().default(PRODUCER_DEFAULTS.chunkingEnabled),
+        messageRoutingMode: z.enum(['UseSinglePartition', 'RoundRobinDistribution', 'CustomPartition']).optional(),
+        hashingScheme: z.enum(['Murmur3_32Hash', 'BoostHash', 'JavaStringHash']).optional(),
+        accessMode: z.enum(['Shared', 'Exclusive', 'WaitForExclusive', 'ExclusiveWithFencing']).optional(),
+        partitionKey: z.string().max(1024).optional(),
+        // 路由键从报文某字段取（而不是固定一个），分区主题的热点因此可控
+        usePartitionKeyFromField: z.boolean().optional(),
+        partitionKeyField: z.string().min(1).max(100).optional(),
+        eventTimeMode: z.enum(['none', 'now', 'fromField', 'fixed']).default(PRODUCER_DEFAULTS.eventTimeMode),
+        eventTimeField: z.string().min(1).max(100).optional(),
+        eventTimeFixed: z.number().int().nonnegative().optional(),
+        delayMode: z.enum(['none', 'deliverAfter', 'deliverAt']).default(PRODUCER_DEFAULTS.delayMode),
+        deliverAfterMs: z
+            .number()
+            .int()
+            .min(1)
+            .max(7 * 24 * 3600 * 1000)
+            .optional(),
+        deliverAt: z.number().int().positive().optional(),
+        seed: z.number().int().optional(),
+    })
+    // 跨字段依赖全部在这里钉住：这些组合在服务层没有兜底分支，漏过去就是
+    // 「界面选了 fromField 但实际 eventTime 为空」。
+    .refine(options => !options.usePartitionKeyFromField || !!options.partitionKeyField, {
+        message: '按字段取路由键需要 partitionKeyField',
+    })
+    .refine(options => !(options.partitionKey && options.usePartitionKeyFromField), {
+        message: '固定路由键与按字段取路由键只能选一个',
+    })
+    .refine(options => (options.eventTimeMode === 'fromField' ? !!options.eventTimeField : true), {
+        message: '事件时间取字段需要 eventTimeField',
+    })
+    .refine(options => (options.eventTimeMode === 'fixed' ? options.eventTimeFixed !== undefined : true), {
+        message: '固定事件时间需要 eventTimeFixed',
+    })
+    .refine(options => (options.delayMode === 'deliverAfter' ? !!options.deliverAfterMs : true), {
+        message: '延时投递需要 deliverAfterMs',
+    })
+    .refine(options => (options.delayMode === 'deliverAt' ? !!options.deliverAt : true), {
+        message: '定时投递需要 deliverAt',
+    })
+    // 原生绑定（pulsar-client 1.18 的 C++ 层）在批量与分块同开时直接 abort 掉整个主进程：
+    // 实测没有 JS 异常、没有转储，进程凭空消失，所以这条组合必须在进原生层之前拒掉。
+    .refine(options => !(options.batchingEnabled && options.chunkingEnabled), {
+        message: '批量发送与分块不能同时开启，请先关闭其中一项',
+        path: ['chunkingEnabled'],
+    });
+
+export const MessageTemplateBodySchema = TemplateBodySchema.extend({
+    id: z.string().uuid().optional(),
+    clusterId: ClusterIdSchema,
+    topicUri: TopicUriSchema,
+    name: z.string().min(1).max(100),
+    producerOptions: ProducerOptionsSchema.optional(),
+    schemaMode: z.enum(['none', 'inline', 'broker']).default('none'),
+});
+
+export const TemplateScopeSchema = z.object({
+    clusterId: ClusterIdSchema,
+    // 不传 = 该集群全部模板；传了 = 该 topic 可用的（含通用模板）
+    topicUri: TopicUriSchema.optional(),
+});
+
+export const TemplateIdSchema = z.object({id: z.string().uuid()});
+
+export const TemplateCopySchema = z.object({
+    id: z.string().uuid(),
+    // 留空时由服务层按「原名 副本」生成，同作用域重名会直接拒绝
+    name: z.string().min(1).max(100).optional(),
+    topicUri: TopicUriSchema.optional(),
+});
+
+export const ConsumerConfigDraftSchema = z.object({
+    subscriptionType: z.enum(['Exclusive', 'Shared', 'Failover', 'Key_Shared']).default('Shared'),
+    initialPosition: InitialPositionSchema.default('Earliest'),
+    autoAck: z.boolean().default(true),
+    maxMessages: z.number().int().min(0).max(10_000).default(500),
+    receiverQueueSize: z.number().int().min(1).max(10_000).optional(),
+    ackTimeoutMs: z.number().int().min(1000).max(3_600_000).optional(),
+    nAckRedeliverTimeoutMs: z.number().int().min(1000).max(3_600_000).optional(),
+    consumerName: z.string().min(1).max(255).optional(),
+    deadLetter: z
+        .object({
+            topicName: z.string().min(1).max(500),
+            maxRedeliverCount: z.number().int().min(1).max(100),
+            initialSubscriptionName: z.string().min(1).max(255).optional(),
+        })
+        .optional(),
+});
+
+export const ConsumerConfigUpsertSchema = ConsumerConfigDraftSchema.extend({
+    id: z.string().uuid().optional(),
+    clusterId: ClusterIdSchema,
+    topicUri: TopicUriSchema,
+    subscription: SubscriptionSchema,
+    name: z.string().min(1).max(100),
+});
+
+export const ConsumerConfigCopySchema = TemplateCopySchema.extend({
+    subscription: SubscriptionSchema.optional(),
+});
+
+export const SendHistoryListSchema = z.object({
+    clusterId: ClusterIdSchema,
+    topicUri: TopicUriSchema,
+    limit: z.number().int().min(1).max(1000).default(200),
+});
+
+export const ProducerStartSchema = TopicPathSchema.extend({
+    options: ProducerOptionsSchema.default({}),
+});
+
+// 模板正文只取 body/variables/properties 三项：发送方传的是"这次要发的报文"，
+// 不是数据库里的那一行，名称与作用域跟这次发送无关。
+export const ProducerSendSchema = TopicPathSchema.extend({
+    sessionId: z.string().uuid(),
+    template: TemplateBodySchema,
+    // 一次点"发送"投几条。上限 1000：每条最坏 5MB，再大就该走连续发送而不是这里。
+    count: z.number().int().min(1).max(1000).default(1),
+    options: ProducerMessageOptionsSchema.optional(),
+});
+
+export const ProducerSendOnceSchema = TopicPathSchema.extend({
+    template: TemplateBodySchema,
+    count: z.number().int().min(1).max(1000).default(1),
+    options: ProducerOptionsSchema.default({}),
+});
+
+export const ProducerFlushSchema = z.object({sessionId: z.string().uuid()});
+
+// 连续发送：模板在主进程逐条解析（页签可能已经切走，主进程必须自足），
+// 所以这里带的是模板正文而不是已解析的报文。
+export const ProducerFlowSchema = z.object({
+    sessionId: z.string().uuid(),
+    template: TemplateBodySchema,
+    // 0 = 不限速全速投；上限对齐压测的速率上限
+    ratePerSecond: z.number().int().min(0).max(200_000).default(0),
+    // 0 = 一直投到手动停止
+    totalMessages: z.number().int().min(0).max(10_000_000).default(0),
+    // 在途窗口：与 producer 自己的 maxPendingMessages 同量级才有意义，
+    // 调得比它大只会让原生队列先满，然后由 blockIfQueueFull 排队
+    maxInFlight: z.number().int().min(1).max(2000).default(500),
+    stopOnError: z.boolean().default(true),
+    options: ProducerMessageOptionsSchema.optional(),
+});
+
+export const ProducerSetRateSchema = z.object({
+    sessionId: z.string().uuid(),
+    ratePerSecond: z.number().int().min(0).max(200_000),
+});
+
+export const ProducerSessionsSchema = z.object({clusterId: ClusterIdSchema.optional()});
 
 // 初始化数据库
 let dbInitialized = false;
@@ -797,7 +1105,10 @@ function registerResolvedHandler<S extends z.ZodTypeAny, R, T>(
             if (!parsed.success) {
                 const fields = parsed.error.issues.map(issue => issue.path.join('.')).join(', ');
                 log.warn(`${channel}: invalid input parameters`, fields);
-                return {success: false, error: 'Invalid input parameters'};
+                // 只回一句 "Invalid input parameters" 等于让用户自己猜哪项错了：跨字段约束
+                // （批量与分块互斥、事件时间取字段要字段名）的说明全写在 refine 的 message 里，
+                // 丢掉它就等于把校验的价值抵消了。formatError 已经会截断长文本。
+                return {success: false, error: formatError(parsed.error)};
             }
 
             ensureDbInitialized();

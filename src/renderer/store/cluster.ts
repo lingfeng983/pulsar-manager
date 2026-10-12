@@ -9,6 +9,9 @@ interface ClusterState {
     expandedClusterId: string | null;
     loading: boolean;
     error: string | null;
+    // 探活进行中。与 loading 分开：列表读的是本地库，一直很快；探活要打 broker，
+    // 慢的时候不能把整页压成加载态把人挡在外面。
+    checking: boolean;
 
     // Actions
     setClusters: (clusters: ClusterConfig[]) => void;
@@ -22,6 +25,7 @@ interface ClusterState {
 
     // Async actions
     fetchClusters: () => Promise<void>;
+    refreshClusterStatus: () => Promise<boolean>;
     addClusterAsync: (config: Omit<ClusterConfig, 'id'>) => Promise<ClusterConfig | null>;
     updateClusterAsync: (id: string, config: Partial<ClusterConfig>) => Promise<boolean>;
     deleteClusterAsync: (id: string) => Promise<boolean>;
@@ -33,6 +37,7 @@ export const useClusterStore = create<ClusterState>((set, get) => ({
     activeClusterId: null,
     expandedClusterId: null,
     loading: false,
+    checking: false,
     error: null,
 
     setClusters: clusters => set({clusters}),
@@ -69,6 +74,29 @@ export const useClusterStore = create<ClusterState>((set, get) => ({
             }
         } catch (error) {
             set({error: String(error), loading: false});
+        }
+    },
+
+    // 逐集群探活并回整份列表。已经在探的时候直接复用这一轮：首屏挂载与用户点刷新
+    // 挨得极近，起两轮就是双倍打 broker。
+    refreshClusterStatus: async () => {
+        if (get().checking) {
+            return true;
+        }
+        set({checking: true});
+        try {
+            const response = await window.electronAPI.cluster.checkStatus();
+            if (response.success && response.data) {
+                set({clusters: response.data as ClusterConfig[]});
+                return true;
+            }
+            // 不写 error：列表已经在页面上显示着，探活这一轮失败不该把它换成整页错误块，
+            // 由调用方弹一条 toast 就够了。
+            return false;
+        } catch {
+            return false;
+        } finally {
+            set({checking: false});
         }
     },
 

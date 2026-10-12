@@ -23,6 +23,8 @@ import {
     formatError,
     registerRawHandler,
     ensureDbInitialized,
+    getAdminClient,
+    markClusterStatus,
     persistSshConfig,
     reuseSshConfig,
     establishTunnel,
@@ -129,6 +131,42 @@ export function registerClusterHandlers() {
             };
         } catch (error) {
             log.error('cluster:list failed', formatError(error));
+            return {success: false, error: formatError(error)};
+        }
+    });
+
+    // 首屏与刷新图标走这条通道：clusters.status 是落库列，cluster:list 只把它原样读出来，
+    // 于是上次退出时"在线"的集群会一直绿着，哪怕 broker 早停了。这里逐集群并发探活
+    // （单集群内 healthCheck 的四个候选端点是顺序试的，per-client 信号量已经限好并发），
+    // 探完再回整份列表，渲染层一次 set 就能把徽标刷成真实状态。
+    registerRawHandler('cluster:checkStatus', async () => {
+        try {
+            ensureDbInitialized();
+            const clusters = getAllClusters();
+            await Promise.all(
+                clusters.map(async cluster => {
+                    try {
+                        const client = await getAdminClient(cluster.id);
+                        if (!client) {
+                            // 集群在探活途中被删掉了，不是"连不上"
+                            return;
+                        }
+                        markClusterStatus(cluster.id, (await client.healthCheck()) ? 'connected' : 'disconnected');
+                    } catch {
+                        // 建连本身失败（隧道起不来、配置坏掉）与连不上等价
+                        markClusterStatus(cluster.id, 'disconnected');
+                    }
+                }),
+            );
+            const tunnels = new Map(getAllSSHTunnels().map(tunnel => [tunnel.id, tunnel]));
+            return {
+                success: true,
+                data: getAllClusters().map(cluster =>
+                    normalizeCluster(cluster, tunnels.get(cluster.ssh_config_id || '')),
+                ),
+            };
+        } catch (error) {
+            log.error('cluster:checkStatus failed', formatError(error));
             return {success: false, error: formatError(error)};
         }
     });

@@ -7,28 +7,41 @@ Apache Pulsar 集群的桌面运维客户端，基于 Electron + React + TypeScr
 ### 集群管理
 
 - 集群增删改查、连接测试（走 Admin API 健康检查，并尝试读取集群版本）
+- 首屏进入即对所有集群探活一次（不阻塞页面渲染），列表与资源树的状态点因此反映的是本次启动的实测结果，而不是上次退出时留在库里的那份；顶部导航「刷新集群状态」走同一轮探活
 - 凭据以 AES-256 加密后落库，加密密钥由 Electron `safeStorage`（OS 密钥库）保护；平台不支持时默认**拒绝降级**为明文，需显式设置 `ALLOW_PLAINTEXT_KEY=1` 才会写明文密钥文件
 - 单实例锁：重复启动会把焦点交回已有窗口，而不是再起一个进程
 
 ### 资源浏览与管理
 
 - 资源树按 租户 → 命名空间 → Topic 三层懒加载，带模块级缓存与竞态保护（订阅在 Topic 详情页里管理）
+- 树顶部的「筛选 topic」按空白分词，每个词都要命中；词内先试连续子串、再退到跳字子序列（`tns` 能命中 `tenant-ns`），命中的节点保留其所在分支，筛空时明确提示而不是显一棵空树
 - **Topic**：详情（stats / 生产者 / 消费者 / 订阅）、创建（分区与非分区、持久与非持久）、删除、配置读取与修改
     - 配置是**逐策略端点**并发读取的（retention、backlog-quota、ttl、max-producers、max-consumers、message-ttl、deduplication、permissions），单个端点缺失只降级该项，不会让整个表单空白
     - 写入是 read-modify-write 后**只 PUT 变更过的键**
+    - 「配置」页签直接编辑，不套弹窗：保留时间、保留大小、分区数三项摆在页内，留空即不修改；生效积压配额、去重状态、归属 Broker 是本 broker 没有 topic 级写入口的只读值，放在同一张卡的只读块里，不给能改了却不生效的输入框
 - **租户 / 命名空间**：创建、更新、删除
-- **订阅**：创建、删除、重置游标、跳过消息
+- **订阅**：创建、删除、重置游标、跳过消息；订阅列表除积压外还显示**速率**（`msgRateOut`）与**吞吐量**（`msgThroughputOut`），列名与数值都可悬浮看原始读数
 - 上述资源类变更都会写入操作日志，可从顶部导航导出最近 100 条为 JSON
 
 ### 消息收发
 
-三种模式互不混淆（不是一个列表里塞所有东西）：
+Topic 详情页的「消息浏览器」有三种模式，互不混淆（不是一个列表里塞所有东西）：
 
-- **发送测试**：通过原生客户端向指定 topic 发一条消息，返回真实 messageId
+- **发送测试**：向当前 topic 发一条消息并返回真实 messageId。正文按 JSON / XML / 文本 三种语法着色与缩进（可编辑的 CodeMirror 框，带格式化按钮，非法 JSON/XML 会明确拒绝而不是原样"格式化成功"）；单条消息能自带的那几项参数按字段列出——路由键、事件时间（不带/当前/指定时刻）、延时投递（不带/若干秒后/定时）、自定义属性（JSON），每项都有悬浮说明，不需要手拼一段 JSON。批大小、压缩、发送超时是 producer 级的，这里不出现，去生产者工作台建常驻会话时配
 - **订阅消费**：以指定订阅消费，支持从 earliest / latest / 指定时间戳开始；自动 ack 可关闭（关闭后消息不被确认，用于观察 backlog 累积），但界面没有逐条手动 ack 的入口
-- **Reader 按位置读**：不占用订阅、不影响 backlog 的只读浏览
+- **Reader 按位置读**：不占用订阅、不影响 backlog 的只读浏览。起始位置除最早 / 最新 / 指定时间外还有**最近 N 条**：原生 Reader 没有尾部锚点，这条是从最早往后扫、只保留最后 N 条，扫完自动结束，护栏是最多扫 2 万条 / 15 秒 / 8 MB（撞护栏时结束提示会写明"扫过多少、取了几条"，不假装拿到的是真正的尾部）
+
+消息列表（Reader 与订阅消费共用）默认按 Publish Time 倒序、点表头切换升降序，所有列可拖宽（宽度只存在组件状态里，刷新回默认），载荷自动判定类型：JSON 看能否 `JSON.parse`，XML 交给 `DOMParser` 实测能否成树，其余按纯文本——判不出结构就不装作判得出。详情弹窗里同一份正文按判定出的语法着色缩进。
 
 消息由主进程按批推送（攒够 50 条或 300ms 一批），载荷为 base64；界面会尝试解回文本，判定为二进制时才保留 base64。支持导出 JSON / CSV。
+
+### 生产者与消费者工作台
+
+消息浏览器解决"发一条看看"，工作台解决"挂着跑一段"：
+
+- **生产者工作台**：一个 topic 可挂多条常驻会话。报文是**模板**——正文必须是合法 JSON，`${...}` 是占位符，支持 `int/float/bool/string/uuid/choice/seq/index/now/date/timestamp` 这些生成函数与具名变量，整体占位符保留原类型（数字不会被写成字符串），`$each{count,of}` 按列表展开。单发（1–1000 条）走常驻会话，连续发送是可运行时改速率的限速流（`ratePerSecond` 0 为不限、总量 0 为到手动停止、在途上限、出错即停可选），统计给已发/失败/字节、msg/s、MB/s 与 P50/P99 确认延迟；`flush` 只把原生队列最后一段推出，`stop` 才断会话。另有"直接发送"一条现开现关、不留连接的通道
+- **消费者工作台**：同样多会话并存（Exclusive 除外，重复开时先弹确认）。订阅设置可配类型（Shared/Key_Shared/Failover/Exclusive）、起始（Latest/Earliest）、自动确认开关、限量、`receiverQueueSize`、`ackTimeoutMs`/`nAckRedeliverTimeoutMs`（关掉自动确认才出现）、消费者名与死信策略（死信 topic、最大重投次数、初始订阅）。消息按会话分桶显示、每秒自算速率，可暂停渲染、限制保留条数（1–5000）、导出 JSON/CSV、清空
+- 模板、消费者会话配置、发送历史各一张本地表，支持增删改查与复制，用过几次、最后一次什么时候用过都记着
 
 ### 快速压测
 
@@ -48,8 +61,9 @@ Apache Pulsar 集群的桌面运维客户端，基于 Electron + React + TypeScr
 
 - 多 Tab 工作区，同一资源不会重复开 Tab
 - 快捷键自定义：`ShortcutConfig` 页面按分组列出所有可绑定命令，绑定持久化到本地设置；只有当前页面真的注册了处理器的命令才会响应按键，不会出现"按了没反应"的假绑定；进入捕获态后切走页签会自动退出捕获，不会在看不见的页面里截走按键
-- 三套主题：亮色（默认）、暗色、护眼，全部走 CSS 变量，禁止硬编码颜色
+- 三套主题：亮色（默认）、暗色、护眼，全部走 CSS 变量，禁止硬编码颜色。CodeMirror 的编辑器主题同样只引用变量，所以切主题与切字号时代码框跟着走，不会留下一个白底的编辑器
 - 字号四档：小 / 中 / 大（默认）/ 特大。DOM 文字走 `--font-size-*` 梯度，antd 组件的字号族与控件尺寸按同一档位重算（compact 算法会把 ConfigProvider 的 fontSize 种子覆盖掉，所以是自定义算法在它之后再补一层），ECharts 的画布文字同比缩放
+- 表格列宽可拖拽（消息列表），拖拽宽度不入库，刷新即回默认
 
 ### 配置中心与在线更新
 
@@ -96,12 +110,12 @@ pulsar-manager/
 │   ├── preload.ts             # 沙箱 preload：唯一暴露给渲染进程的接口面
 │   ├── shared/types.ts        # 跨进程共享的领域类型（单一事实来源）
 │   └── renderer/              # React 渲染进程
-│       ├── components/        # 布局、资源树、拓扑、各类表单弹窗
-│       ├── hooks/             # 资源缓存、ECharts、快捷键、全屏、尺寸监听
-│       ├── pages/             # 首页、集群配置、Topic/租户/命名空间详情、消息浏览器、监控、
-│       │                      # 配置中心、插件市场、快捷键
+│       ├── components/        # 布局、资源树、拓扑、编辑器（CodeMirror 封装）、生产/消费表单、各类弹窗
+│       ├── hooks/             # 资源缓存、ECharts、快捷键、全屏、尺寸监听、列宽拖拽
+│       ├── pages/             # 首页、集群配置、Topic/租户/命名空间详情、消息浏览器、生产者工作台、
+│       │                      # 消费者工作台、监控、配置中心、插件市场、快捷键
 │       ├── store/             # Zustand：集群、Tab、主题、命令、快捷键、应用设置、插件
-│       └── utils/             # 格式化、导出、拓扑配色、按键解析
+│       └── utils/             # 格式化、导出、拓扑配色、按键解析、模糊匹配
 ├── docs/DATA_SOURCES.md       # 每个页面的数据来源说明
 ├── release.sh                 # 一键出包 + 发布 Gitee 发行版
 ├── scripts/release-publish.mjs# 调 Gitee API 建/更新发行版并上传附件
@@ -181,10 +195,12 @@ npm run build:main && npm run build
 6. **分区 topic 的删除走 `.../{topic}/partitions`**，`/partition/-1` 在部分版本上 404。
 7. **聚合有上限。** `AGGREGATION_LIMITS` 限制租户/命名空间/topic 数量，聚合内部扇出用 `mapWithConcurrency` 固定并发窗口（外层已持有信号量许可，内部再 acquire 会死锁）。
 8. **渲染层依赖必须留在 `devDependencies`。** antd / echarts / react 等由 Vite 打进 `dist/renderer`，主进程编译产物只 `require` axios、better-sqlite3、pulsar-client、uuid、zod。把渲染层依赖挪回 `dependencies`，electron-builder 会把它们的源码再塞进 asar（实测 157 MiB），安装包随即越过 Gitee 附件 100 MB 上限而被拒。
+9. **`batchingEnabled` 与 `chunkingEnabled` 不能同时为 true。** 原生绑定（pulsar-client 1.18 的 C++ 层）在这两项都开时直接 abort 整个主进程，实测没有 JS 异常也没有 crashpad 转储。三处同时挡：Zod 校验 `refine` 拒绝、构造 producer 时 `chunkingEnabled && !batchingEnabled`、界面上开了批发送就把分块开关置灰。
+10. **代码框的颜色与字号只能写 CSS 变量。** CodeMirror 主题经 style-mod 原样塞进生成的样式表，变量在浏览器里按当前 `<html>` 解析，所以三套主题与四档字号都自动跟随；写成 `#fff` 或固定 px，实测就是"整页变暗了只有编辑器还白底"。
 
 ## 本地数据
 
-- SQLite 位于 `app.getPath('userData')/pulsar-manager.db`，存集群配置、SSH 配置、操作日志、界面设置与快捷键绑定；表结构以 `PRAGMA user_version` 跟踪并增量迁移
+- SQLite 位于 `app.getPath('userData')/pulsar-manager.db`，存集群配置、SSH 配置、操作日志、界面设置与快捷键绑定、报文模板、消费者会话配置、发送历史；表结构以 `PRAGMA user_version` 跟踪并增量迁移
 - 已安装的插件是 `app.getPath('userData')/plugins/*.json`（或 `plugins/<目录>/plugin.json`），启用状态记在 `user_settings` 的 `disabledPlugins` 里
 - 调试时可以另起一个实例：`npx electron . --user-data-dir=<临时目录>`（单实例锁按 userData 路径判定）
 
@@ -196,6 +212,9 @@ npm run build:main && npm run build
 - **在线更新依赖 Gitee 私有仓库 API**：设置→检查更新 会拉取最新发行版并对比版本号，下载其 exe 附件后静默安装重启；私有仓库必须先在更新弹窗里配置只读 access_token（本机加密存储）。仓库地址写死为 `lingfeng983/pulsar-manager`，换仓库需改 `src/main/services/update-service.ts`
 - **快速压测的延迟口径**：统计的是 `send()` 调用到 broker 确认的时间，包含客户端在途队列的排队；单生产者并发调大时 P50 会显著上升，这不是 broker 变慢
 - **消费没有逐条手动 ack**：只有"自动 ack"开关，关掉之后消息就一直不确认
+- **消息浏览器没有 peek / 重投 / 按 ID 定位**：只能从头或从某个时间点开始读，不能"看一眼订阅游标下一条再决定消不消费"，也不能把一条已收到的消息原样再发一次
+- **发送历史有表无界面**：`send_history` 每次发送都在写，`sendHistory:list` 也通了，但界面上还没有查询入口
+- **模板的 schema 校验未实现**：`message_templates.schema_mode` 只是存下来的字段，发送时不做任何结构校验
 - **插件只贡献数据**：插件市场里的插件是本地 JSON 声明，只能提供压测预设与 Topic 创建模板，不能新增界面、不能访问 broker、不能执行代码；需要这类能力请直接把需求提为应用功能
 - 未实现：Schema 管理、权限管理、告警、时序降采样、国际化、K8s 端口转发
 - broker→topic 归属在多 broker 集群下没有廉价来源（`/admin/v2/broker-stats/{broker}/topics` 在部分部署上不可用），只能逐 topic 走 `/lookup`；单 broker（standalone）场景下归属是确定的

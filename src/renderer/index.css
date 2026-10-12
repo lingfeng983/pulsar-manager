@@ -539,3 +539,221 @@ pre,
 .main-workspace-tabs .ant-tabs-content-holder > .ant-tabs-content > .ant-tabs-tabpane {
     height: 100%;
 }
+
+/* ===== 报文编辑器（CodeMirror 6）===== */
+/* 容器只管尺寸与圆角，配色全部在 cmTheme.ts 里按 CSS 变量走，
+   这里再写一遍就会在切主题时出现"边框变了、底色没变"。 */
+.json-editor {
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+}
+
+/* 占位符底色。用 color-mix 而不是写死的半透明 hex：主题改的是 --color-primary
+   与 --color-danger 本身，混出来的底色跟着主题走，三套主题下都不会糊成一片。 */
+.cm-pm-placeholder {
+    background-color: color-mix(in srgb, var(--color-primary) 16%, transparent);
+    border-radius: 2px;
+}
+
+/* 红底 = 主进程一定会拒绝这一段，与编辑器左侧的 lint 标记同一个判据 */
+.cm-pm-placeholder-invalid {
+    background-color: color-mix(in srgb, var(--color-danger) 22%, transparent);
+    border-radius: 2px;
+}
+
+/* ===== 生产者工作台 ===== */
+/* 左正文右会话：会话那一栏只放卡片，300px 就够读完 producerName 与三个按钮，
+   再宽是在压缩正文的可视列数。窗口收窄时并成单列，否则编辑器被压到看不清 JSON。 */
+.producer-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 300px;
+    gap: var(--spacing-lg);
+    align-items: start;
+}
+
+@media (max-width: 1100px) {
+    .producer-layout {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+.producer-main {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-sm);
+    min-width: 0;
+}
+
+.producer-side {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-sm);
+    min-width: 0;
+}
+
+.session-card {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-xs);
+    padding: var(--spacing-sm);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    background: var(--color-bg-elevated);
+}
+
+/* 连续发送面板：卡片右栏只有约 300px 宽，控件排不下就整行换行，
+   第二行再缩会挤成竖排，所以这里允许换行但把数字框钉成固定宽。 */
+.flow-panel {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-xs);
+    padding-top: var(--spacing-xs);
+    border-top: 1px dashed var(--color-border);
+}
+
+.flow-panel .summary-line {
+    flex-wrap: wrap;
+}
+
+.flow-panel .ant-input-number {
+    flex: 0 0 auto;
+}
+
+.danger-text {
+    color: var(--color-danger);
+}
+
+/* 参数表单两列：连接参数与报文参数各占一列。用 auto-fit 会在宽窗口下排出第三列
+   空着，两组开关反而被拉得更开，所以列数按组数钉死，窄窗口才并成一列。 */
+.options-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--spacing-lg);
+    align-items: start;
+}
+
+@media (max-width: 900px) {
+    .options-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+.opt-group {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-xs);
+}
+
+.opt-group-title {
+    font-size: var(--font-size-sm);
+    font-weight: 500;
+    color: var(--color-text-secondary);
+}
+
+.opt-row {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    min-height: 24px;
+}
+
+/* 标签占固定宽度、控件吃剩下的：不钉住的话每行控件起始位置都跟着标签字数跳，
+   一列开关就看不出哪个属于哪个参数。 */
+.opt-row > .field-label {
+    flex: 0 0 96px;
+}
+
+.opt-control {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-xs);
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.opt-control .ant-input,
+.opt-control .ant-input-number,
+.opt-control .ant-select,
+.opt-control .ant-picker {
+    width: 120px;
+}
+
+/* 只读生效值块：与可编辑控件区分开，避免人以为这几项也能改 */
+.readonly-block {
+    padding: var(--spacing-sm) var(--spacing-md);
+    background: var(--color-bg-secondary);
+    border-radius: var(--radius-md);
+    font-size: var(--font-size-xs);
+    line-height: 1.9;
+}
+
+/* ===== 表头拖宽（react-resizable）===== */
+/* 不 import 包里的 styles.css：那份的把手是右下角一个黑色斜纹小三角，颜色写死，
+   暗色主题下看不见，而且角上的把手正好压在排序图标上。这里只留一条右边缘的
+   纵向把手，颜色走主题变量，悬停才显形。 */
+.react-resizable {
+    position: relative;
+}
+
+.react-resizable-handle {
+    position: absolute;
+    right: -3px;
+    bottom: 0;
+    z-index: 1;
+    width: 7px;
+    height: 100%;
+    cursor: col-resize;
+    border-radius: 2px;
+    background: transparent;
+    transition: background-color 0.15s;
+}
+
+.react-resizable-handle:hover,
+th:hover .react-resizable-handle {
+    background: var(--color-border);
+}
+
+/* ===== 消费者工作台 ===== */
+/* 左参数右会话，消息列表横跨整行：列表那一张表要看 Message ID 与正文，
+   被压在两列里的右栏宽度下只能横向滚动，所以它不属于上面那层网格。 */
+.consumer-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 320px;
+    gap: var(--spacing-lg);
+    align-items: start;
+}
+
+@media (max-width: 1100px) {
+    .consumer-layout {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+.consumer-form,
+.consumer-side {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-sm);
+    min-width: 0;
+}
+
+.consumer-stream {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-sm);
+    min-width: 0;
+}
+
+/* 工具条里的分段器可能排到第二条会话名就换行，间距按 xs 才不会把一行撑成两行 */
+.stream-toolbar {
+    gap: var(--spacing-xs) var(--spacing-md);
+    margin-bottom: 0;
+}
+
+.stream-empty {
+    padding: var(--spacing-lg);
+    border: 1px dashed var(--color-border);
+    border-radius: var(--radius-sm);
+    text-align: center;
+}

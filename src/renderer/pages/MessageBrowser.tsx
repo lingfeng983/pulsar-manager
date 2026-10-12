@@ -1,4 +1,4 @@
-import React, {useState, useEffect, useCallback, useMemo, useRef} from 'react';
+import React, {useState, useEffect, useCallback, useMemo, useRef, type ReactNode} from 'react';
 import {
     Card,
     Table,
@@ -8,7 +8,6 @@ import {
     AutoComplete,
     Space,
     message,
-    Modal,
     Tooltip,
     Tag,
     Dropdown,
@@ -26,8 +25,10 @@ import {
     DownloadOutlined,
     SendOutlined,
     ReloadOutlined,
+    AlignLeftOutlined,
 } from '@ant-design/icons';
-import type {Message, MessageBatch, SessionEndEvent} from '../types';
+import type {TableColumnsType} from 'antd';
+import type {Message, MessageBatch, ProducerMessageOptions, SessionEndEvent} from '../types';
 import {formatBytes} from '../utils/format';
 import dayjs from 'dayjs';
 import {downloadBlob} from '../utils/download';
@@ -35,8 +36,29 @@ import {useCommand} from '../hooks/useKeybindings';
 import {useSettingsStore} from '../store/settings';
 import StateBlock from '../components/common/StateBlock';
 import ErrorBanner from '../components/common/ErrorBanner';
+import MessageDetailModal from '../components/message/MessageDetailModal';
+import CodePane, {type CodePaneHandle} from '../components/editor/CodePane';
+import {
+    decodeMessageBatch,
+    formatMessageData,
+    truncateText,
+    type PayloadKind,
+} from '../components/message/messageFormat';
+import {useResizableColumns} from '../hooks/useResizableColumns';
 
-const {TextArea} = Input;
+// 一行"标签 + 问号说明 + 控件"。标签钉宽、控件吃剩下，与工作台那两张参数表同构，
+// 说明挂在标签上而不是控件后面：控件右边往往还跟着第二个控件（选择 + 时间），
+// 文字挤在中间会把两样都挡住。
+const OptRow: React.FC<{label: ReactNode; hint: string; children: ReactNode}> = ({label, hint, children}) => (
+    <div className="opt-row">
+        <span className="field-label">
+            <Tooltip title={hint}>
+                <span>{label}</span>
+            </Tooltip>
+        </span>
+        <span className="opt-control">{children}</span>
+    </div>
+);
 
 type StreamMode = 'consume' | 'read';
 type PanelMode = 'send' | StreamMode;
@@ -51,35 +73,6 @@ interface MessageBrowserProps {
     // antd 切走的页签只是 display:none，会话不会自己停，切到概览后还在后台持续收消息。
     active?: boolean;
 }
-
-// 主进程传来的 data 是 base64（原生载荷可能是任意二进制）。
-// 直接展示 base64 等于没展示内容，所以先解回文本；解出控制字符说明是二进制，保留 base64。
-const asText = (base64: string): string | null => {
-    let decoded: string;
-    try {
-        const binary = atob(base64);
-        decoded = new TextDecoder().decode(Uint8Array.from(binary, ch => ch.charCodeAt(0)));
-    } catch {
-        return null;
-    }
-    for (let index = 0; index < decoded.length; index += 1) {
-        const code = decoded.charCodeAt(index);
-        const isControl = code < 32 && code !== 9 && code !== 10 && code !== 13;
-        if (isControl || code === 0xfffd) {
-            return null;
-        }
-    }
-    return decoded;
-};
-
-const formatMessageData = (data: string): string => {
-    const text = asText(data) ?? data;
-    try {
-        return JSON.stringify(JSON.parse(text), null, 2);
-    } catch {
-        return text;
-    }
-};
 
 interface ActiveSession {
     sessionId: string;
@@ -108,9 +101,19 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
     const [subscription, setSubscription] = useState('');
 
     const [sendText, setSendText] = useState('');
+    const [sendKind, setSendKind] = useState<PayloadKind>('json');
     const [sendProperties, setSendProperties] = useState('');
     const [sendLoading, setSendLoading] = useState(false);
     const [lastMessageId, setLastMessageId] = useState<string | null>(null);
+
+    // 逐条报文参数。只列这四个入口（路由键 / 事件时间 / 延时投递）：原生一条消息
+    // 能自带的就这些，其余（批大小、压缩）是 producer 级的，单发用默认值。
+    const [sendPartitionKey, setSendPartitionKey] = useState('');
+    const [sendEventMode, setSendEventMode] = useState<'none' | 'now' | 'fixed'>('none');
+    const [sendEventTime, setSendEventTime] = useState<dayjs.Dayjs | null>(null);
+    const [sendDelayMode, setSendDelayMode] = useState<'none' | 'after' | 'at'>('none');
+    const [sendDeliverAfterSec, setSendDeliverAfterSec] = useState(10);
+    const [sendDeliverAt, setSendDeliverAt] = useState<dayjs.Dayjs | null>(null);
 
     const [subscriptionType, setSubscriptionType] = useState<'Exclusive' | 'Shared' | 'Failover' | 'Key_Shared'>(
         'Shared',
@@ -119,9 +122,10 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
     const [autoAck, setAutoAck] = useState(true);
     const [consumeMax, setConsumeMax] = useState(0);
 
-    const [readFrom, setReadFrom] = useState<'earliest' | 'latest' | 'timestamp'>('earliest');
+    const [readFrom, setReadFrom] = useState<'earliest' | 'latest' | 'timestamp' | 'recent'>('earliest');
     const [readTimestamp, setReadTimestamp] = useState<dayjs.Dayjs | null>(null);
     const [readMax, setReadMax] = useState(20);
+    const [recentCount, setRecentCount] = useState(20);
 
     const [backlog, setBacklog] = useState<{messageCount: number; sizeInBytes: number} | null>(null);
     const [backlogLoading, setBacklogLoading] = useState(false);
@@ -132,6 +136,8 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
     // 会话 id 同时放 ref：推送回调与卸载清理都要读最新值，
     // 放 state 会让 effect 依赖来回变化，反而漏停或重复停。
     const sessionRef = useRef<ActiveSession | null>(null);
+
+    const sendPaneRef = useRef<CodePaneHandle | null>(null);
 
     const stopActiveSession = useCallback(async (notify: boolean) => {
         const session = sessionRef.current;
@@ -207,7 +213,9 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
             if (event.reason === 'error') {
                 setError(event.detail || '会话异常终止');
             } else if (event.reason === 'completed') {
-                message.info('已达到消息数量上限，会话结束');
+                // 主进程对一次性回溯扫描会带一句 detail（扫了多少、取了几条、有没有撞护栏），
+                // 没有 detail 才是按限量收满的那种结束。
+                message.info(event.detail || '已达到消息数量上限，会话结束');
             }
         });
 
@@ -283,6 +291,44 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
         return parsed;
     };
 
+    // 格式化失败几乎都是"正文本来就不是合法 JSON"，说清这一点而不是只说失败：
+    // 用户接下来要发的是文本或没写完的片段时，报错内容比报错动作更有用。
+    const handleFormatBody = () => {
+        if (!sendPaneRef.current?.format()) {
+            message.warning(sendKind === 'json' ? '正文不是合法 JSON，无法格式化' : '正文格式不符合 XML，无法缩进');
+        }
+    };
+
+    // 面板上的四个入口拼成报文参数。空值一律不写字段而不是写 undefined：
+    // 主进程那侧的回落规则认"没这个键"，写进去一个 undefined 会把会话参数盖掉。
+    const buildSendOptions = (): ProducerMessageOptions | undefined => {
+        const options: ProducerMessageOptions = {};
+        const key = sendPartitionKey.trim();
+        if (key) {
+            options.partitionKey = key;
+        }
+        if (sendEventMode === 'now') {
+            options.eventTimeMode = 'now';
+        } else if (sendEventMode === 'fixed') {
+            if (!sendEventTime) {
+                return undefined;
+            }
+            options.eventTimeMode = 'fixed';
+            options.eventTimeFixed = sendEventTime.valueOf();
+        }
+        if (sendDelayMode === 'after') {
+            options.delayMode = 'deliverAfter';
+            options.deliverAfterMs = sendDeliverAfterSec * 1000;
+        } else if (sendDelayMode === 'at') {
+            if (!sendDeliverAt) {
+                return undefined;
+            }
+            options.delayMode = 'deliverAt';
+            options.deliverAt = sendDeliverAt.valueOf();
+        }
+        return Object.keys(options).length > 0 ? options : undefined;
+    };
+
     const handleSendMessage = async () => {
         if (!sendText.trim()) {
             return;
@@ -293,6 +339,18 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
             properties = parseProperties();
         } catch {
             message.error('属性必须是合法的 JSON 对象，例如 {"k":"v"}');
+            return;
+        }
+        if (sendEventMode === 'fixed' && !sendEventTime) {
+            message.warning('事件时间选了「指定」，还需要选一个时间');
+            return;
+        }
+        if (sendDelayMode === 'at' && !sendDeliverAt) {
+            message.warning('延时投递选了「定时」，还需要选一个时间');
+            return;
+        }
+        if (sendDelayMode === 'after' && sendDeliverAfterSec < 1) {
+            message.warning('延时秒数至少 1 秒');
             return;
         }
 
@@ -307,6 +365,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                 persistent,
                 message: sendText,
                 properties,
+                options: buildSendOptions(),
             });
             if (response.success && response.data) {
                 setLastMessageId(response.data.messageId);
@@ -384,6 +443,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                 // 带着它提交会被主进程按「起点与时间戳二选一」拒掉，用户只看到一句参数错误。
                 timestamp: readFrom === 'timestamp' ? readTimestamp?.valueOf() : undefined,
                 maxMessages: readMax,
+                recentCount,
             }),
         );
     };
@@ -416,21 +476,10 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
         );
     }, []);
 
-    // 列表里每条消息都要展示格式化后的正文，解 base64 + JSON.parse 是逐条开销；
+    // 列表里每条消息都要展示格式化后的正文（还要判类型），解 base64 + JSON.parse 是逐条开销；
     // 之前放在列渲染里做，任何一次重渲染（例如展开一条消息）都会对全部 500 条重跑。
     // 按原始 data 缓存（同一条消息重复出现也只需算一次）。
-    const formattedData = useMemo(() => {
-        const cache = new Map<string, string>();
-        for (const msg of messages) {
-            if (!cache.has(msg.data)) {
-                cache.set(msg.data, formatMessageData(msg.data));
-            }
-        }
-        return cache;
-    }, [messages]);
-
-    const truncateMessage = (content: string, maxLength: number = truncateLength): string =>
-        content.length <= maxLength ? content : content.substring(0, maxLength) + '...';
+    const decodedData = useMemo(() => decodeMessageBatch(messages.map(msg => msg.data)), [messages]);
 
     const handleExportMessages = async (format: 'json' | 'csv') => {
         if (messages.length === 0) {
@@ -479,7 +528,9 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
         }
     };
 
-    const columns = [
+    const KIND_LABEL = {json: 'JSON', xml: 'XML', text: '文本'} as const;
+
+    const columns: TableColumnsType<Message> = [
         {
             title: 'Message ID',
             dataIndex: 'messageId',
@@ -495,6 +546,8 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
             dataIndex: 'publishTime',
             key: 'publishTime',
             width: 150,
+            defaultSortOrder: 'descend',
+            sorter: (a, b) => a.publishTime - b.publishTime,
             render: (timestamp: number) => (
                 <span title={dayjs(timestamp).format('YYYY-MM-DD HH:mm:ss.SSS')}>
                     {dayjs(timestamp).format('MM-DD HH:mm:ss')}
@@ -529,18 +582,21 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
             title: 'Data',
             dataIndex: 'data',
             key: 'data',
+            width: 320,
             render: (data: string, record: Message) => {
-                const formatted = formattedData.get(data) ?? formatMessageData(data);
+                const payload = decodedData.get(data);
+                const formatted = payload?.formatted ?? '';
                 const isExpanded = expandedMessages.includes(record.messageId);
-                const displayContent = isExpanded ? formatted : truncateMessage(formatted);
+                const displayContent = isExpanded ? formatted : truncateText(formatted, truncateLength);
 
                 return (
                     <div>
+                        <Tag>{payload ? KIND_LABEL[payload.kind] : '文本'}</Tag>
                         <div
                             style={{
                                 maxHeight: isExpanded ? 200 : 'auto',
                                 overflow: 'auto',
-                                fontFamily: 'monospace',
+                                fontFamily: 'var(--font-mono)',
                                 fontSize: 'var(--font-size-xs)',
                                 wordBreak: 'break-all',
                                 color: 'var(--color-text-secondary)',
@@ -574,36 +630,153 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
         },
     ];
 
+    // 列宽能拖：Message ID 那列固定 190px 时末尾被截断，想看清整条 ID 只能拖宽，
+    // 而拖完这一屏就这样停着，比每次点开都重排要稳。
+    const {resizableColumns, components} = useResizableColumns(columns);
+
     const fieldLabel = {marginRight: 'var(--spacing-sm)', fontWeight: 500} as const;
 
     const sendPanel = (
-        <Space direction="vertical" style={{width: '100%'}} size="small">
+        <div className="stack" style={{gap: 'var(--spacing-md)'}}>
             <div>
-                <div className="field-label" style={{marginBottom: 'var(--spacing-sm)'}}>
-                    消息内容
+                <div
+                    className="field-label"
+                    style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 'var(--spacing-sm)',
+                        marginBottom: 'var(--spacing-sm)',
+                    }}
+                >
+                    <span>消息内容</span>
+                    <Segmented
+                        size="small"
+                        value={sendKind}
+                        onChange={value => setSendKind(value as PayloadKind)}
+                        options={[
+                            {value: 'json', label: 'JSON'},
+                            {value: 'xml', label: 'XML'},
+                            {value: 'text', label: '文本'},
+                        ]}
+                    />
+                    {sendKind !== 'text' && (
+                        <Button size="small" type="text" icon={<AlignLeftOutlined />} onClick={handleFormatBody}>
+                            格式化
+                        </Button>
+                    )}
+                    <span className="hint-text">只决定这一段按哪套语法着色与缩进，发出去的就是框里的文本本身</span>
                 </div>
-                <TextArea
-                    aria-label="消息内容"
+                <CodePane
+                    ref={sendPaneRef}
                     value={sendText}
-                    onChange={e => setSendText(e.target.value)}
-                    placeholder="输入要发送的消息内容..."
-                    rows={4}
+                    kind={sendKind}
+                    editable
+                    height={220}
+                    ariaLabel="消息内容"
+                    onChange={setSendText}
                 />
             </div>
-            <div>
-                <div className="field-label" style={{marginBottom: 'var(--spacing-sm)'}}>
-                    属性（可选，JSON 对象）
-                    <Tooltip title="作为 message properties 一起发出，接收列表里会显示出来">
-                        <span style={{marginLeft: 'var(--spacing-sm)', color: 'var(--color-text-tertiary)'}}>?</span>
-                    </Tooltip>
+
+            <div className="options-grid">
+                <div className="opt-group">
+                    <div className="opt-group-title">常用属性</div>
+                    <OptRow
+                        label="路由键"
+                        hint="partitionKey。分区 topic 上同一个键固定落到同一个分区，用来保证同一实体的消息有序；不填则按 producer 的分布策略投。"
+                    >
+                        <Input
+                            size="small"
+                            aria-label="路由键"
+                            value={sendPartitionKey}
+                            onChange={event => setSendPartitionKey(event.target.value)}
+                            placeholder="不带"
+                        />
+                    </OptRow>
+                    <OptRow
+                        label="事件时间"
+                        hint="eventTimestamp。是 broker 存进 ledger 的业务时间，与 publishTime（broker 收到那一刻）是两回事；窗口计算、时间序订阅读的是它。"
+                    >
+                        <Select
+                            size="small"
+                            aria-label="事件时间方式"
+                            value={sendEventMode}
+                            onChange={setSendEventMode}
+                            options={[
+                                {value: 'none', label: '不带'},
+                                {value: 'now', label: '当前时间'},
+                                {value: 'fixed', label: '指定'},
+                            ]}
+                        />
+                        {sendEventMode === 'fixed' && (
+                            <DatePicker
+                                size="small"
+                                aria-label="事件时间"
+                                showTime
+                                value={sendEventTime}
+                                onChange={setSendEventTime}
+                            />
+                        )}
+                    </OptRow>
+                    <OptRow
+                        label="延时投递"
+                        hint="deliverAfter / deliverAt。消息先进 broker 的延时投递队列，到点才投给订阅；到点之前积压数里能看到它。"
+                    >
+                        <Select
+                            size="small"
+                            aria-label="延时投递方式"
+                            value={sendDelayMode}
+                            onChange={setSendDelayMode}
+                            options={[
+                                {value: 'none', label: '立即'},
+                                {value: 'after', label: '延时'},
+                                {value: 'at', label: '定时'},
+                            ]}
+                        />
+                        {sendDelayMode === 'after' && (
+                            <>
+                                <InputNumber
+                                    size="small"
+                                    min={1}
+                                    max={604800}
+                                    aria-label="延时秒数"
+                                    value={sendDeliverAfterSec}
+                                    onChange={value => setSendDeliverAfterSec(value ?? 1)}
+                                />
+                                <span className="hint-text">秒</span>
+                            </>
+                        )}
+                        {sendDelayMode === 'at' && (
+                            <DatePicker
+                                size="small"
+                                aria-label="定时投递时间"
+                                showTime
+                                value={sendDeliverAt}
+                                onChange={setSendDeliverAt}
+                            />
+                        )}
+                    </OptRow>
                 </div>
-                <Input
-                    aria-label="消息属性 JSON"
-                    value={sendProperties}
-                    onChange={e => setSendProperties(e.target.value)}
-                    placeholder='{"env":"test","trace":"abc"}'
-                />
+                <div className="opt-group">
+                    <div className="opt-group-title">自定义属性（JSON）</div>
+                    <OptRow
+                        label="properties"
+                        hint="任意键值的字符串属性，随消息一起存进 broker，接收列表的 Properties 列就是它。值只会是字符串：数字与布尔要发出去得写成 “1”，对面自己转。"
+                    >
+                        <Input
+                            size="small"
+                            aria-label="消息属性 JSON"
+                            value={sendProperties}
+                            onChange={event => setSendProperties(event.target.value)}
+                            placeholder='{"env":"test","trace":"abc"}'
+                        />
+                    </OptRow>
+                    <div className="hint-text">
+                        这里给的是单条消息能自带的那几项参数。批大小、压缩、发送超时这些是 producer
+                        级的，单次发送每次现建一条 producer，用默认值；要调它们去生产者工作台建常驻会话。
+                    </div>
+                </div>
             </div>
+
             <Space size={4}>
                 <Button
                     type="primary"
@@ -616,7 +789,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                 </Button>
                 {lastMessageId && <Tag color="green">最后一条 ID: {lastMessageId}</Tag>}
             </Space>
-        </Space>
+        </div>
     );
 
     const streamControls =
@@ -697,6 +870,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                             {value: 'earliest', label: '最早'},
                             {value: 'latest', label: '最新之后'},
                             {value: 'timestamp', label: '指定时间'},
+                            {value: 'recent', label: '最近 N 条'},
                         ]}
                     />
                 </div>
@@ -710,20 +884,38 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                         disabled={!!sessionId}
                     />
                 )}
-                <Tooltip title="Reader 只读不确认，不影响任何订阅的游标">
+                {readFrom === 'recent' && (
                     <div>
-                        <label style={fieldLabel}>限量:</label>
-                        <InputNumber
-                            aria-label="读取消息限量"
-                            min={1}
-                            max={10000}
-                            value={readMax}
-                            onChange={value => setReadMax(value ?? 1)}
-                            style={{width: 90}}
-                            disabled={!!sessionId}
-                        />
+                        <label style={fieldLabel}>条数:</label>
+                        <Tooltip title="原生 Reader 没有尾部锚点，这条是从最早开始扫、只留最后 N 条，扫完自动结束（最多扫 2 万条或 15 秒）。">
+                            <InputNumber
+                                aria-label="最近多少条"
+                                min={1}
+                                max={1000}
+                                value={recentCount}
+                                onChange={value => setRecentCount(value ?? 20)}
+                                style={{width: 90}}
+                                disabled={!!sessionId}
+                            />
+                        </Tooltip>
                     </div>
-                </Tooltip>
+                )}
+                {readFrom !== 'recent' && (
+                    <Tooltip title="Reader 只读不确认，不影响任何订阅的游标">
+                        <div>
+                            <label style={fieldLabel}>限量:</label>
+                            <InputNumber
+                                aria-label="读取消息限量"
+                                min={1}
+                                max={10000}
+                                value={readMax}
+                                onChange={value => setReadMax(value ?? 1)}
+                                style={{width: 90}}
+                                disabled={!!sessionId}
+                            />
+                        </div>
+                    </Tooltip>
+                )}
             </Space>
         );
 
@@ -818,7 +1010,8 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                         >
                             <Table
                                 dataSource={messages}
-                                columns={columns}
+                                columns={resizableColumns}
+                                components={components}
                                 rowKey={(record, index) => `${record.messageId}-${index}`}
                                 pagination={false}
                                 size="small"
@@ -829,52 +1022,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                 )}
             </Card>
 
-            <Modal
-                title="消息详情"
-                open={showFullMessage !== null}
-                onCancel={() => setShowFullMessage(null)}
-                width={800}
-                footer={null}
-            >
-                {showFullMessage && (
-                    <div className="stack" style={{gap: 'var(--spacing-md)'}}>
-                        <div>
-                            <label className="field-label">Message ID:</label>
-                            <code className="field-value hint-text">{showFullMessage.messageId}</code>
-                        </div>
-                        <div>
-                            <label className="field-label">Producer:</label>
-                            <span className="field-value">{showFullMessage.producerName}</span>
-                        </div>
-                        <div>
-                            <label className="field-label">Publish Time:</label>
-                            <span className="field-value">
-                                {dayjs(showFullMessage.publishTime).format('YYYY-MM-DD HH:mm:ss.SSS')}
-                            </span>
-                        </div>
-                        <div>
-                            <label className="field-label">Properties:</label>
-                            <pre className="field-value hint-text" style={{maxHeight: 100, overflow: 'auto'}}>
-                                {JSON.stringify(showFullMessage.properties, null, 2)}
-                            </pre>
-                        </div>
-                        <div>
-                            <label className="field-label">Data:</label>
-                            <pre
-                                className="field-value hint-text"
-                                style={{
-                                    maxHeight: 400,
-                                    overflow: 'auto',
-                                    whiteSpace: 'pre-wrap',
-                                    wordBreak: 'break-all',
-                                }}
-                            >
-                                {formatMessageData(showFullMessage.data)}
-                            </pre>
-                        </div>
-                    </div>
-                )}
-            </Modal>
+            <MessageDetailModal message={showFullMessage} onClose={() => setShowFullMessage(null)} />
         </div>
     );
 };

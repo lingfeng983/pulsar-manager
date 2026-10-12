@@ -13,6 +13,9 @@ import {
     DeleteOutlined,
     PlusOutlined,
     EditOutlined,
+    SendOutlined,
+    DownloadOutlined,
+    SearchOutlined,
 } from '@ant-design/icons';
 import {useClusterStore} from '../../store/cluster';
 import {useTabStore} from '../../store/tabs';
@@ -29,7 +32,8 @@ import {
     type ResourceChangeTarget,
 } from '../../hooks/resourceCache';
 import {shortName} from '../../utils/format';
-import {topicTab, tenantTab, namespaceTab, topologyTab, metricsTab} from '../../utils/tabIds';
+import {fuzzyMatch} from '../../utils/fuzzyMatch';
+import {topicTab, tenantTab, namespaceTab, topologyTab, metricsTab, producerTab, consumerTab} from '../../utils/tabIds';
 import {useCommand} from '../../hooks/useKeybindings';
 import TenantFormModal from '../tenant/TenantFormModal';
 import TopicFormModal from '../topic/TopicFormModal';
@@ -56,6 +60,10 @@ const SIDEBAR_MAX_WIDTH = 640;
 const SIDEBAR_WIDTH_KEY = 'pulsar-manager.sidebar-width';
 // 折叠态只放一个图标按钮
 const SIDEBAR_COLLAPSED_WIDTH = 40;
+// 集群状态探活整个应用只自动跑一次：StrictMode 会把挂载走两遍，侧边栏也不会因为
+// 切页签重新挂载，所以用模块级标记而不是组件 ref。手动点刷新图标不受它限制。
+let statusProbed = false;
+
 // 节点菜单最长的一支（集群：查看/拓扑/监控/分隔/新建租户/分隔/删除）用于定位时估算高度
 const MAX_MENU_ITEMS = 7;
 
@@ -103,7 +111,8 @@ const ResourceTree: React.FC = () => {
     // 每个节点 key 的加载代次，用于丢弃迟到的旧响应
     const reloadEpochRef = useRef(new Map<string, number>());
     const [contextMenu, setContextMenu] = useState<{x: number; y: number; node: ResourceTreeNode | null} | null>(null);
-    const {clusters, fetchClusters, setActiveCluster, deleteClusterAsync, expandedClusterId} = useClusterStore();
+    const {clusters, fetchClusters, refreshClusterStatus, setActiveCluster, deleteClusterAsync, expandedClusterId} =
+        useClusterStore();
     const {addTab} = useTabStore();
     const confirmDanger = useConfirmDanger();
     // 键盘打开菜单时用得上：右键有 node，纯键盘只有"最后一次选中的节点"
@@ -121,6 +130,13 @@ const ResourceTree: React.FC = () => {
         tenant: string;
         namespace: string;
     }>({open: false, clusterId: '', tenant: '', namespace: ''});
+
+    // 主题名筛选：只对 topic 叶子生效，父级节点按"有没有留下东西"决定去留。
+    const [topicFilter, setTopicFilter] = useState('');
+    // 这一轮筛选里已经补拉过 topic 清单的命名空间，防止键入过程中反复自重发请求。
+    const filterLoadedRef = useRef<{query: string; done: Set<string>}>({query: '', done: new Set()});
+    // 进入筛选前的展开状态，清空筛选要还回去
+    const preFilterExpandedRef = useRef<React.Key[] | null>(null);
 
     // 将集群转换为树节点
     const clusterToTreeData = useMemo(() => {
@@ -287,6 +303,136 @@ const ResourceTree: React.FC = () => {
         dataRef: {type: 'namespace', clusterId, tenant, namespace},
     });
 
+    // 筛选只按 topic 叶子的名字裁；父级节点自己命中就整支留下（搜 "prod" 的人想要的
+    // 就是那套环境下面所有 topic），否则按有没有幸存子节点决定去留。
+    const visibleTreeData = useMemo(() => {
+        const query = topicFilter.trim();
+        if (!query) {
+            return treeData;
+        }
+        const filterNodes = (nodes: DataNode[]): DataNode[] => {
+            const kept: DataNode[] = [];
+            for (const node of nodes) {
+                const ref = (node as ResourceTreeNode).dataRef;
+                if (ref?.type === 'topic') {
+                    if (fuzzyMatch(ref.topic, query)) {
+                        kept.push(node);
+                    }
+                    continue;
+                }
+                const ownName =
+                    ref?.type === 'namespace'
+                        ? ref.namespace
+                        : ref?.type === 'tenant'
+                          ? ref.tenant
+                          : String(ref?.cluster?.name ?? '');
+                if (fuzzyMatch(ownName, query)) {
+                    kept.push(node);
+                    continue;
+                }
+                const children = node.children ? filterNodes(node.children) : [];
+                if (children.length > 0) {
+                    kept.push({...node, children});
+                    continue;
+                }
+                // 还没加载过子节点的分支没有清单可筛，留着才能继续展开下钻
+                if (!node.children || node.children.length === 0) {
+                    kept.push(node);
+                }
+            }
+            return kept;
+        };
+        return filterNodes(treeData);
+    }, [treeData, topicFilter]);
+
+    const matchedTopicCount = useMemo(() => {
+        if (!topicFilter.trim()) {
+            return 0;
+        }
+        const count = (nodes: DataNode[]): number =>
+            nodes.reduce(
+                (sum, node) =>
+                    sum +
+                    ((node as ResourceTreeNode).dataRef?.type === 'topic' ? 1 : 0) +
+                    (node.children ? count(node.children) : 0),
+                0,
+            );
+        return count(visibleTreeData);
+    }, [visibleTreeData, topicFilter]);
+
+    // 节点是懒加载的：没展开过的命名空间手上根本没有 topic 清单可筛。一开始输入就把
+    // 树里已有的命名空间补齐（走 resourceCache，命中缓存时不发请求），否则
+    // "只有展开过的分支才筛得出来"读起来就像筛选坏了。
+    useEffect(() => {
+        const query = topicFilter.trim();
+        if (!query) {
+            filterLoadedRef.current = {query: '', done: new Set()};
+            return;
+        }
+        if (filterLoadedRef.current.query !== query) {
+            filterLoadedRef.current = {query, done: new Set()};
+        }
+        const visited = filterLoadedRef.current.done;
+        const targets: ResourceTreeNode[] = [];
+        const collect = (nodes: DataNode[]) => {
+            for (const node of nodes) {
+                if ((node as ResourceTreeNode).dataRef?.type === 'namespace' && !visited.has(String(node.key))) {
+                    targets.push(node as ResourceTreeNode);
+                }
+                if (node.children) {
+                    collect(node.children);
+                }
+            }
+        };
+        collect(treeData);
+        if (targets.length === 0) {
+            return;
+        }
+        let cancelled = false;
+        const pool = [...targets];
+        const worker = async () => {
+            while (!cancelled && pool.length > 0) {
+                const node = pool.shift();
+                if (!node) {
+                    break;
+                }
+                // 先记再拉：补拉会写 treeData，本效果随之重跑，不占住这个坑就会自己转圈
+                visited.add(String(node.key));
+                await reloadNodeChildren(node);
+            }
+        };
+        void Promise.all(Array.from({length: Math.min(6, pool.length)}, worker));
+        return () => {
+            cancelled = true;
+        };
+    }, [topicFilter, treeData, reloadNodeChildren]);
+
+    // 命中项要一眼看见：进入筛选就展开全部幸存分支，清空时还原本来的展开状态。
+    useEffect(() => {
+        const query = topicFilter.trim();
+        if (!query) {
+            if (preFilterExpandedRef.current) {
+                setExpandedKeys(preFilterExpandedRef.current);
+                preFilterExpandedRef.current = null;
+            }
+            return;
+        }
+        if (!preFilterExpandedRef.current) {
+            preFilterExpandedRef.current = expandedKeysRef.current;
+        }
+        const keys: React.Key[] = [];
+        const collect = (nodes: DataNode[]) => {
+            for (const node of nodes) {
+                if (node.children && node.children.length > 0) {
+                    keys.push(node.key);
+                    collect(node.children);
+                }
+            }
+        };
+        collect(visibleTreeData);
+        setExpandedKeys(keys);
+    }, [topicFilter, visibleTreeData]);
+
     // 订阅缓存失效事件：别的页面（Topic 详情页删 Topic、命名空间页建 Topic）改完
     // 数据只清缓存，而本组件把子节点存在自己的 treeData 里，不重读就永远显示旧列表。
     // 只有已在树里的分支才值得重载，未展开的节点交给下一次 handleLoadData。
@@ -331,6 +477,16 @@ const ResourceTree: React.FC = () => {
             return kept.length === keys.length ? keys : kept;
         });
     }, [clusterToTreeData]);
+
+    // 首屏自动探活：树里的状态徽标读的是落库列，不探的话上次退出时"在线"的集群
+    // 会一直绿着。探活在后台跑，回来的时候由 store 更新 clusters 触发本组件重渲染。
+    useEffect(() => {
+        if (statusProbed) {
+            return;
+        }
+        statusProbed = true;
+        void refreshClusterStatus();
+    }, [refreshClusterStatus]);
 
     // 响应集群展开事件
     useEffect(() => {
@@ -515,6 +671,32 @@ const ResourceTree: React.FC = () => {
                         );
                     } else if (dataRef?.type === 'cluster') {
                         setActiveCluster(dataRef.clusterId ?? '');
+                    }
+                    break;
+                case 'producer':
+                    if (dataRef?.type === 'topic') {
+                        addTab(
+                            producerTab({
+                                clusterId: dataRef.clusterId ?? '',
+                                tenant: dataRef.tenant ?? '',
+                                namespace: dataRef.namespace ?? '',
+                                topic: dataRef.topic ?? '',
+                                persistent: dataRef.persistent,
+                            }),
+                        );
+                    }
+                    break;
+                case 'consumer':
+                    if (dataRef?.type === 'topic') {
+                        addTab(
+                            consumerTab({
+                                clusterId: dataRef.clusterId ?? '',
+                                tenant: dataRef.tenant ?? '',
+                                namespace: dataRef.namespace ?? '',
+                                topic: dataRef.topic ?? '',
+                                persistent: dataRef.persistent,
+                            }),
+                        );
                     }
                     break;
                 case 'topology':
@@ -744,6 +926,8 @@ const ResourceTree: React.FC = () => {
         if (dataRef?.type === 'topic') {
             return [
                 ...baseItems,
+                {key: 'producer', label: '生产者工作台', icon: <SendOutlined />, onSelect: run('producer')},
+                {key: 'consumer', label: '消费者工作台', icon: <DownloadOutlined />, onSelect: run('consumer')},
                 {key: 'metrics', label: '查看监控', icon: <BarChartOutlined />, onSelect: run('metrics')},
                 {key: 'sep-1', separator: true},
                 {
@@ -783,6 +967,9 @@ const ResourceTree: React.FC = () => {
         setLoading(true);
         // 强制刷新时清空资源缓存，确保拉取到最新的租户/命名空间/Topic
         invalidateResourceCache();
+        // 顺带探活，但不 await：不可达集群的探活最坏要试完四个候选端点，
+        // 把它串进来会让整棵树转十几秒圈，而人等的明明是树的重新加载。
+        void refreshClusterStatus();
         try {
             await fetchClusters();
             await reloadExpandedNodes();
@@ -793,7 +980,7 @@ const ResourceTree: React.FC = () => {
         } finally {
             setLoading(false);
         }
-    }, [fetchClusters, reloadExpandedNodes]);
+    }, [fetchClusters, refreshClusterStatus, reloadExpandedNodes]);
 
     useCommand('refreshResources', () => {
         void handleRefresh();
@@ -903,6 +1090,21 @@ const ResourceTree: React.FC = () => {
                             onClick={() => setCollapsed(true)}
                         />
                     </Space>
+                    <Input
+                        size="small"
+                        allowClear
+                        aria-label="按名称模糊筛选 topic"
+                        placeholder="筛选 topic"
+                        prefix={<SearchOutlined style={{color: 'var(--color-text-tertiary)'}} />}
+                        value={topicFilter}
+                        onChange={event => setTopicFilter(event.target.value)}
+                        style={{width: '100%', marginTop: 'var(--spacing-xs)'}}
+                    />
+                    {topicFilter.trim() ? (
+                        <div className="hint-text" style={{marginTop: 2}}>
+                            命中 {matchedTopicCount} 个 topic
+                        </div>
+                    ) : null}
                 </div>
             )}
 
@@ -925,7 +1127,7 @@ const ResourceTree: React.FC = () => {
                             renderEmpty()
                         ) : (
                             <Tree
-                                treeData={treeData}
+                                treeData={visibleTreeData}
                                 loadData={handleLoadData}
                                 expandedKeys={expandedKeys}
                                 onExpand={handleExpand}

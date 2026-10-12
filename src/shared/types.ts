@@ -264,6 +264,14 @@ export interface Message {
     data: string;
     partitionKey?: string;
     redeliveryCount?: number;
+    // 手动确认会话里主进程发的句柄：确认要拿它找回原生 Message 对象。
+    // 不用 messageId 当键——批消息里多条的 id 字符串可能相同，会串消息。
+    ackSeq?: number;
+    // MessageId.serialize() 的 base64：绑定只有 deserialize，没有 fromString，
+    // 想按 id 回放就必须把字节带出来。
+    messageIdBytes?: string;
+    // 超出可确认窗口被淘汰后为 false：界面据此提示"将由 broker 重投"而不是假装能确认
+    ackable?: boolean;
 }
 
 // 与主进程的 TopicPathSchema / SubscriptionPathSchema 一一对应
@@ -282,6 +290,17 @@ export interface SubscriptionPathParams extends TopicPathParams {
 export interface MessageSendParams extends TopicPathParams {
     message: string;
     properties?: Record<string, string>;
+    // 路由键 / 事件时间 / 延时投递这些逐条参数。消息浏览器的发送面板与工作台的
+    // 单发用同一份，界面列出来的就是这里能传的，不会多出一个填不了也没生效的字段。
+    options?: ProducerMessageOptions;
+}
+
+// 死信策略：原生绑定确认存在 ConsumerConfig.deadLetterPolicy。
+// deadLetterTopic 给的是 topic 名，落到哪个 tenant/ns 由主进程按当前 topic 补全。
+export interface DeadLetterConfig {
+    topicName: string;
+    maxRedeliverCount: number;
+    initialSubscriptionName?: string;
 }
 
 export interface ConsumeStartParams extends SubscriptionPathParams {
@@ -290,12 +309,22 @@ export interface ConsumeStartParams extends SubscriptionPathParams {
     autoAck: boolean;
     // 0 表示不限条数，一直收到手动停止为止
     maxMessages?: number;
+    // 以下都是可选的，缺省沿用原生默认值——旧的三态面板不传也能继续工作。
+    receiverQueueSize?: number;
+    ackTimeoutMs?: number;
+    nAckRedeliverTimeoutMs?: number;
+    consumerName?: string;
+    deadLetter?: DeadLetterConfig;
 }
 
 export interface ReadStartParams extends TopicPathParams {
-    from: 'earliest' | 'latest' | 'timestamp';
+    // recent = 回溯尾部：原生 Reader 没有"从末尾倒数 N 条"的锚点，broker 也没有
+    // lastMessageId 的 REST 路由，主进程只能从 earliest 扫过去留最后 N 条，
+    // 所以它带的是一次性扫描的量（recentCount），不是持续读取的上限（maxMessages）。
+    from: 'earliest' | 'latest' | 'timestamp' | 'recent';
     timestamp?: number;
     maxMessages?: number;
+    recentCount?: number;
 }
 
 export interface MessageBatch {
@@ -312,11 +341,316 @@ export interface SessionEndEvent {
     detail?: string;
 }
 
+// ========== 报文模板与变量 ==========
+
+// 模板正文里的占位符只允许出现在 JSON 字符串值内部，所以模板永远是合法 JSON，
+// 编辑器能高亮、能格式化；解析时"整个值恰好是一个占位符"会替换整个值（保住
+// 数字/布尔类型），否则做字符串插值。类型定义随引擎放在一起，避免两处各写一份。
+export type {TemplateVariable} from './template-engine';
+import type {TemplateVariable} from './template-engine';
+
+export type TemplateSchemaMode = 'none' | 'inline' | 'broker';
+
+export interface MessageTemplateBody {
+    body: string;
+    variables: TemplateVariable[];
+    properties?: Record<string, string>;
+}
+
+// 落库后的模板行（渲染层看到的形状，字段名已从 snake_case 转过）。
+export interface MessageTemplate extends MessageTemplateBody {
+    id: string;
+    clusterId: string;
+    // '' 表示不绑定 topic 的通用模板
+    topicUri: string;
+    name: string;
+    producerOptions?: ProducerOptions;
+    schemaMode: TemplateSchemaMode;
+    useCount: number;
+    lastUsedAt?: string | null;
+    createdAt: string;
+    updatedAt: string;
+}
+
+export interface MessageTemplateUpsertParams extends MessageTemplateBody {
+    id?: string;
+    clusterId: string;
+    topicUri: string;
+    name: string;
+    producerOptions?: ProducerOptions;
+    schemaMode: TemplateSchemaMode;
+}
+
+// 模板与会话配置的取数范围：不传 topicUri 拿该集群全部；传了拿「这个 topic 能用
+// 的」，即该 topic 自己的加上通用条目（topic_uri = ''）。
+export interface WorkbenchScopeParams {
+    clusterId: string;
+    topicUri?: string;
+}
+
+export interface WorkbenchCopyParams {
+    id: string;
+    // 留空由主进程按「原名 副本」生成，同作用域重名直接拒绝
+    name?: string;
+    topicUri?: string;
+}
+
+export interface ConsumerConfigCopyParams extends WorkbenchCopyParams {
+    subscription?: string;
+}
+
+export interface SendHistoryListParams {
+    clusterId: string;
+    topicUri: string;
+    limit?: number;
+}
+
+// ========== 生产者工作台 ==========
+
+// 字段与原生 ProducerConfig / ProducerMessage 一一对应（pulsar-client 1.18 绑定实测）。
+// 注意绑定里没有事务、没有 getStats、没有分区定向 API，所以这些不在选项里。
+export interface ProducerOptions {
+    producerName?: string;
+    sendTimeoutMs: number;
+    maxPendingMessages: number;
+    blockIfQueueFull: boolean;
+    batchingEnabled: boolean;
+    batchingMaxMessages: number;
+    batchingMaxPublishDelayMs: number;
+    batchingMaxAllowedSizeInBytes?: number;
+    compressionType: LoadTestCompression;
+    chunkingEnabled: boolean;
+    messageRoutingMode?: 'UseSinglePartition' | 'RoundRobinDistribution' | 'CustomPartition';
+    hashingScheme?: 'Murmur3_32Hash' | 'BoostHash' | 'JavaStringHash';
+    accessMode?: 'Shared' | 'Exclusive' | 'WaitForExclusive' | 'ExclusiveWithFencing';
+    // 每条消息的固定路由键；不带则按消息自身字段决定
+    partitionKey?: string;
+    usePartitionKeyFromField?: boolean;
+    partitionKeyField?: string;
+    eventTimeMode: 'none' | 'now' | 'fromField' | 'fixed';
+    eventTimeField?: string;
+    eventTimeFixed?: number;
+    delayMode: 'none' | 'deliverAfter' | 'deliverAt';
+    deliverAfterMs?: number;
+    deliverAt?: number;
+    // 带 seed 时随机走可复现的 xorshift，预览与实发才能逐字节一致
+    seed?: number;
+}
+
+export interface ProducerStartParams extends TopicPathParams {
+    options: ProducerOptions;
+}
+
+export interface ProducerSessionInfo {
+    sessionId: string;
+    clusterId: string;
+    topicUri: string;
+    producerName: string;
+    connected: boolean;
+    flowRunning: boolean;
+}
+
+// 工作台自己统计的发送速率与延迟。名字不能叫 ProducerStats：那已经是 broker
+// /stats 里单个生产者的结构，同名接口在同一个文件里会静默合并成一个大对象。
+export interface ProducerRunStats {
+    sessionId: string;
+    sent: number;
+    failed: number;
+    bytesSent: number;
+    elapsedMs: number;
+    msgPerSec: number;
+    mbPerSec: number;
+    latency: LoadTestLatency | null;
+    lastError?: string;
+    flowRunning: boolean;
+    // 终态原因（会话已被停止/出错结束时给出）
+    error?: string;
+}
+
+// 逐条报文级别的参数：producer 的配置在 createProducer 时就定死了（原生绑定没有
+// 提供修改入口），一条报文自己能动只有这几项，见 pulsar-client 的 ProducerMessage。
+// 单列一个接口而不是从 ProducerOptions 里 Pick：工作台每次发送都要重新决定
+// 「路由键取哪个字段」「事件时间取哪个字段」，这两个开关本就属于报文层。
+export interface ProducerMessageOptions {
+    partitionKey?: string;
+    usePartitionKeyFromField?: boolean;
+    partitionKeyField?: string;
+    // 这几项故意留成可选而不是 'none' 默认：工作台不填表示"沿用建会话时的设置"，
+    // 填了才覆盖。给它一个默认值等于把"没填"这个信息抹掉，回落就永远不生效。
+    eventTimeMode?: 'none' | 'now' | 'fromField' | 'fixed';
+    eventTimeField?: string;
+    eventTimeFixed?: number;
+    delayMode?: 'none' | 'deliverAfter' | 'deliverAt';
+    deliverAfterMs?: number;
+    deliverAt?: number;
+    // 带 seed 时随机走可复现的 xorshift，预览与实发才能逐字节一致
+    seed?: number;
+}
+
+export interface ProducerSendParams extends TopicPathParams {
+    sessionId: string;
+    template: MessageTemplateBody;
+    // 一次点"发送"投几条（每条重新解析占位符）
+    count: number;
+    options?: ProducerMessageOptions;
+}
+
+export interface ProducerSendResult {
+    messageIds: string[];
+    bytes: number;
+    // 解析后超过 broker 单条上限时给出，界面提示而不是静默丢
+    failures: {index: number; error: string}[];
+    // 一次性发送收尾（flush → close）失败时给出：前面的 messageIds 仍然有效，
+    // 但批量队列里的最后一段可能没走完，界面必须把这句单独说出来。
+    closeError?: string;
+}
+
+export interface ProducerFlowParams {
+    sessionId: string;
+    template: MessageTemplateBody;
+    // 0 = 不限速，全速投
+    ratePerSecond: number;
+    // 0 = 一直投到手动停止
+    totalMessages: number;
+    maxInFlight: number;
+    stopOnError: boolean;
+    options?: ProducerMessageOptions;
+}
+
+export interface ProducerSetRateParams {
+    sessionId: string;
+    ratePerSecond: number;
+}
+
+// 一次性单发（不建常驻会话）：给 TopicDetail 的轻量发送与新页面的"发一条试试"共用。
+export interface ProducerSendOnceParams extends TopicPathParams {
+    template: MessageTemplateBody;
+    count: number;
+    options?: ProducerOptions;
+}
+
+// ========== 消费者工作台 ==========
+
+export interface ConsumerConfigDraft {
+    subscriptionType: ConsumeStartParams['subscriptionType'];
+    initialPosition: ConsumeStartParams['initialPosition'];
+    autoAck: boolean;
+    maxMessages: number;
+    receiverQueueSize?: number;
+    ackTimeoutMs?: number;
+    nAckRedeliverTimeoutMs?: number;
+    consumerName?: string;
+    deadLetter?: DeadLetterConfig;
+}
+
+export interface ConsumerSessionConfig extends ConsumerConfigDraft {
+    id: string;
+    clusterId: string;
+    topicUri: string;
+    subscription: string;
+    name: string;
+    useCount: number;
+    lastUsedAt?: string | null;
+    createdAt: string;
+    updatedAt: string;
+}
+
+export interface ConsumerConfigUpsertParams extends ConsumerConfigDraft {
+    id?: string;
+    clusterId: string;
+    topicUri: string;
+    subscription: string;
+    name: string;
+}
+
+export interface ConsumerSessionInfo {
+    sessionId: string;
+    clusterId: string;
+    topicUri: string;
+    subscription: string;
+    consumerName?: string;
+    subscriptionType: ConsumeStartParams['subscriptionType'];
+    autoAck: boolean;
+    received: number;
+    pendingAcks: number;
+}
+
+export interface AckParams {
+    sessionId: string;
+    seqs: number[];
+    mode: 'individual' | 'cumulative';
+}
+
+export interface AckResult {
+    acked: number;
+    failures: {seq: number; error: string}[];
+}
+
+export interface SeekParams {
+    sessionId: string;
+    messageIdBytes?: string;
+    timestamp?: number;
+}
+
+// ========== peek / 重发 / 发送历史 ==========
+
+export interface PeekLatestParams extends TopicPathParams {
+    // 从 now - windowMinutes 起 seek 再向前扫，取最近这么多分钟内的消息
+    windowMinutes: number;
+    count: number;
+    // 扫描条数上限：分区多、积压大时不能无限读
+    scanLimit: number;
+    deadlineMs: number;
+}
+
+export interface PeekResult {
+    messages: Message[];
+    // 达到 scanLimit/deadline 还没凑够 count：界面要说明是"没扫到"而不是"没有"
+    scanned: number;
+    truncated: boolean;
+    reason?: string;
+}
+
+export interface MessageResendParams extends TopicPathParams {
+    dataBase64: string;
+    properties?: Record<string, string>;
+    // 不带表示回发到原 topic
+    targetTopic?: TopicPathParams;
+}
+
+export interface SendHistoryEntry {
+    id: number;
+    clusterId?: string | null;
+    topicUri: string;
+    templateId?: string | null;
+    templateName: string;
+    bodyPreview: string;
+    bodyBytes: number;
+    messageCount: number;
+    messageId?: string | null;
+    status: 'success' | 'failure';
+    errorMessage?: string | null;
+    createdAt: string;
+}
+
+// ========== Topic schema ==========
+
+// broker 侧 schema 注册表是否可用是未知数（本仓库此前完全没碰过 schema 路由），
+// 所以取不到时必须给出原因并让界面退回本地校验，而不是抛红色错误。
+export interface TopicSchemaInfo {
+    available: boolean;
+    reason?: string;
+    schemaType?: string;
+    definition?: string;
+    version?: number;
+}
+
 // 主进程 → 渲染进程的推送通道名（preload 与 ipc/stream 共用，避免两处各写一份字面量）
 export const MESSAGE_STREAM_CHANNELS = {
     consumeBatch: 'msg:consume-batch',
     readBatch: 'msg:read-batch',
     sessionEnd: 'msg:session-end',
+    producerStats: 'msg:producer-stats',
 } as const;
 
 export const LOAD_TEST_CHANNEL = 'benchmark:progress' as const;

@@ -10,7 +10,7 @@ let db: Database.Database | null = null;
 // schema 版本以 user_version 跟踪。改基线 DDL 时：升 SCHEMA_VERSION，
 // 并把该版本的增量 DDL 写进 migrate()——CREATE TABLE IF NOT EXISTS 对已存在的
 // 旧库什么都不做，没有这套机制，加列只会对新装用户生效，旧库静默落后。
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 function migrate(database: Database.Database, from: number): void {
     // v2：refreshInterval 那行出厂值是 30000，而监控页的刷新间隔单位是秒，
@@ -27,6 +27,9 @@ function migrate(database: Database.Database, from: number): void {
     if (from < 4) {
         database.prepare('DROP TABLE IF EXISTS keyboard_shortcuts').run();
     }
+    // v5：生产者/消费者工作台的三张表（模板、会话配置、发送历史）只新增 DDL，
+    // 老库靠每次启动的基线语句补齐，这里没有数据要修补——留这段是为了下次加列时
+    // 不必回头猜 v5 到底做没做事。
 }
 
 // 每次启动都执行基线再补迁移：基线全是幂等语句，因此旧库缺的表和出厂设置行
@@ -92,6 +95,7 @@ export function initDatabase(): Database.Database {
 
     // 启动时清理过期操作日志
     cleanupOperationLogs();
+    cleanupSendHistory();
 
     const orphans = cleanupOrphanSshTunnels();
     if (orphans > 0) {
@@ -313,6 +317,297 @@ export function deleteSSHTunnel(id: string): void {
     const database = getDatabase();
     const stmt = database.prepare('DELETE FROM ssh_tunnels WHERE id = ?');
     stmt.run(id);
+}
+
+// 报文模板（生产者工作台）
+export interface MessageTemplateRecord {
+    id: string;
+    cluster_id: string;
+    topic_uri: string;
+    name: string;
+    body: string;
+    variables_json: string;
+    properties_json: string;
+    producer_options_json: string;
+    schema_mode: string;
+    use_count: number;
+    last_used_at?: string | null;
+    created_at: string;
+    updated_at: string;
+}
+
+export function listMessageTemplates(clusterId: string, topicUri?: string): MessageTemplateRecord[] {
+    const database = getDatabase();
+    // 传了 topicUri 就带上通用模板（topic_uri = ''）：工作台列出的应当是
+    // 「这个 topic 能用的」，而不是「恰好为该 topic 建过的」。
+    if (topicUri === undefined) {
+        return database
+            .prepare('SELECT * FROM message_templates WHERE cluster_id = ? ORDER BY updated_at DESC')
+            .all(clusterId) as MessageTemplateRecord[];
+    }
+    return database
+        .prepare(
+            "SELECT * FROM message_templates WHERE cluster_id = ? AND topic_uri IN (?, '')" +
+                ' ORDER BY updated_at DESC',
+        )
+        .all(clusterId, topicUri) as MessageTemplateRecord[];
+}
+
+export function getMessageTemplateById(id: string): MessageTemplateRecord | undefined {
+    const database = getDatabase();
+    return database.prepare('SELECT * FROM message_templates WHERE id = ?').get(id) as
+        MessageTemplateRecord | undefined;
+}
+
+export function insertMessageTemplate(
+    template: Omit<MessageTemplateRecord, 'created_at' | 'updated_at' | 'use_count'> & {use_count?: number},
+): void {
+    const database = getDatabase();
+    const now = new Date().toISOString();
+    const stmt = database.prepare(`
+    INSERT INTO message_templates (
+      id, cluster_id, topic_uri, name, body, variables_json, properties_json,
+      producer_options_json, schema_mode, use_count, last_used_at, created_at, updated_at
+    ) VALUES (
+      @id, @cluster_id, @topic_uri, @name, @body, @variables_json, @properties_json,
+      @producer_options_json, @schema_mode, @use_count, @last_used_at, @created_at, @updated_at
+    )
+  `);
+    stmt.run({
+        ...template,
+        // 默认值写在展开之后：调用方传 last_used_at: undefined 时，展开会把
+        // null 顶掉，而 better-sqlite3 对 undefined 直接抛错而不是当 NULL。
+        last_used_at: template.last_used_at ?? null,
+        use_count: template.use_count ?? 0,
+        created_at: now,
+        updated_at: now,
+    });
+}
+
+const MESSAGE_TEMPLATE_ALLOWED_FIELDS = new Set([
+    'cluster_id',
+    'topic_uri',
+    'name',
+    'body',
+    'variables_json',
+    'properties_json',
+    'producer_options_json',
+    'schema_mode',
+    'last_used_at',
+]);
+
+export function updateMessageTemplate(id: string, updates: Partial<MessageTemplateRecord>): void {
+    const database = getDatabase();
+    const now = new Date().toISOString();
+
+    for (const key of Object.keys(updates)) {
+        if (key !== 'id' && !MESSAGE_TEMPLATE_ALLOWED_FIELDS.has(key)) {
+            throw new Error(`Invalid field for message template update: ${key}`);
+        }
+    }
+
+    const fields = Object.keys(updates)
+        .filter(k => k !== 'id' && MESSAGE_TEMPLATE_ALLOWED_FIELDS.has(k))
+        .map(k => `${k} = @${k}`)
+        .join(', ');
+
+    if (fields === '') {
+        throw new Error('No valid fields provided for message template update');
+    }
+
+    const stmt = database.prepare(`UPDATE message_templates SET ${fields}, updated_at = @updated_at WHERE id = @id`);
+    stmt.run({...updates, id, updated_at: now});
+}
+
+export function deleteMessageTemplate(id: string): void {
+    const database = getDatabase();
+    database.prepare('DELETE FROM message_templates WHERE id = ?').run(id);
+}
+
+// 发送/引用一次模板就记一笔，模板库按它排序「最近用过」。
+// 单独一个语句而不是并进 update：业务改名不该顺带把使用次数写回去。
+export function touchMessageTemplateUse(id: string): void {
+    const database = getDatabase();
+    const now = new Date().toISOString();
+    database
+        .prepare('UPDATE message_templates SET use_count = use_count + 1, last_used_at = ? WHERE id = ?')
+        .run(now, id);
+}
+
+// 消费者会话配置（消费者工作台）
+export interface ConsumerSessionConfigRecord {
+    id: string;
+    cluster_id: string;
+    topic_uri: string;
+    subscription: string;
+    name: string;
+    config_json: string;
+    use_count: number;
+    last_used_at?: string | null;
+    created_at: string;
+    updated_at: string;
+}
+
+export function listConsumerSessionConfigs(clusterId: string, topicUri?: string): ConsumerSessionConfigRecord[] {
+    const database = getDatabase();
+    if (topicUri === undefined) {
+        return database
+            .prepare('SELECT * FROM consumer_session_configs WHERE cluster_id = ? ORDER BY updated_at DESC')
+            .all(clusterId) as ConsumerSessionConfigRecord[];
+    }
+    return database
+        .prepare(
+            "SELECT * FROM consumer_session_configs WHERE cluster_id = ? AND topic_uri IN (?, '')" +
+                ' ORDER BY updated_at DESC',
+        )
+        .all(clusterId, topicUri) as ConsumerSessionConfigRecord[];
+}
+
+export function getConsumerSessionConfigById(id: string): ConsumerSessionConfigRecord | undefined {
+    const database = getDatabase();
+    return database.prepare('SELECT * FROM consumer_session_configs WHERE id = ?').get(id) as
+        ConsumerSessionConfigRecord | undefined;
+}
+
+export function insertConsumerSessionConfig(
+    config: Omit<ConsumerSessionConfigRecord, 'created_at' | 'updated_at' | 'use_count'> & {use_count?: number},
+): void {
+    const database = getDatabase();
+    const now = new Date().toISOString();
+    const stmt = database.prepare(`
+    INSERT INTO consumer_session_configs (
+      id, cluster_id, topic_uri, subscription, name, config_json,
+      use_count, last_used_at, created_at, updated_at
+    ) VALUES (
+      @id, @cluster_id, @topic_uri, @subscription, @name, @config_json,
+      @use_count, @last_used_at, @created_at, @updated_at
+    )
+  `);
+    stmt.run({
+        ...config,
+        last_used_at: config.last_used_at ?? null,
+        use_count: config.use_count ?? 0,
+        created_at: now,
+        updated_at: now,
+    });
+}
+
+const CONSUMER_CONFIG_ALLOWED_FIELDS = new Set([
+    'cluster_id',
+    'topic_uri',
+    'subscription',
+    'name',
+    'config_json',
+    'last_used_at',
+]);
+
+export function updateConsumerSessionConfig(id: string, updates: Partial<ConsumerSessionConfigRecord>): void {
+    const database = getDatabase();
+    const now = new Date().toISOString();
+
+    for (const key of Object.keys(updates)) {
+        if (key !== 'id' && !CONSUMER_CONFIG_ALLOWED_FIELDS.has(key)) {
+            throw new Error(`Invalid field for consumer session config update: ${key}`);
+        }
+    }
+
+    const fields = Object.keys(updates)
+        .filter(k => k !== 'id' && CONSUMER_CONFIG_ALLOWED_FIELDS.has(k))
+        .map(k => `${k} = @${k}`)
+        .join(', ');
+
+    if (fields === '') {
+        throw new Error('No valid fields provided for consumer session config update');
+    }
+
+    const stmt = database.prepare(
+        `UPDATE consumer_session_configs SET ${fields}, updated_at = @updated_at WHERE id = @id`,
+    );
+    stmt.run({...updates, id, updated_at: now});
+}
+
+export function deleteConsumerSessionConfig(id: string): void {
+    const database = getDatabase();
+    database.prepare('DELETE FROM consumer_session_configs WHERE id = ?').run(id);
+}
+
+export function touchConsumerSessionConfigUse(id: string): void {
+    const database = getDatabase();
+    const now = new Date().toISOString();
+    database
+        .prepare('UPDATE consumer_session_configs SET use_count = use_count + 1, last_used_at = ? WHERE id = ?')
+        .run(now, id);
+}
+
+// 发送历史（生产者工作台，只存预览）
+export interface SendHistoryRecord {
+    // 读出来的行一定有自增主键；写入走 Omit 去掉它
+    id: number;
+    cluster_id?: string | null;
+    topic_uri: string;
+    template_id?: string | null;
+    template_name: string;
+    body_preview: string;
+    body_bytes: number;
+    message_count: number;
+    message_id?: string | null;
+    status: string;
+    error_message?: string | null;
+    created_at: string;
+}
+
+export function insertSendHistory(
+    entry: Omit<SendHistoryRecord, 'id' | 'created_at' | 'message_count'> & {message_count?: number},
+): void {
+    const database = getDatabase();
+    const now = new Date().toISOString();
+    database
+        .prepare(
+            `INSERT INTO send_history (
+               cluster_id, topic_uri, template_id, template_name, body_preview,
+               body_bytes, message_count, message_id, status, error_message, created_at
+             ) VALUES (
+               @cluster_id, @topic_uri, @template_id, @template_name, @body_preview,
+               @body_bytes, @message_count, @message_id, @status, @error_message, @created_at
+             )`,
+        )
+        .run({
+            ...entry,
+            cluster_id: entry.cluster_id ?? null,
+            template_id: entry.template_id ?? null,
+            message_id: entry.message_id ?? null,
+            error_message: entry.error_message ?? null,
+            message_count: entry.message_count ?? 1,
+            created_at: now,
+        });
+}
+
+export function listSendHistory(clusterId: string, topicUri: string, limit = 200): SendHistoryRecord[] {
+    const database = getDatabase();
+    return database
+        .prepare(
+            `SELECT * FROM send_history
+             WHERE cluster_id = ? AND topic_uri = ?
+             ORDER BY created_at DESC LIMIT ?`,
+        )
+        .all(clusterId, topicUri, limit) as SendHistoryRecord[];
+}
+
+// 与操作日志同一套保留策略。不做 VACUUM：WAL 下 DELETE 本来就不缩文件，
+// 而定期 VACUUM 会把主进程卡在一个不可中断的整库重写上。
+export function cleanupSendHistory(maxRows: number = 2000): void {
+    const database = getDatabase();
+    const count = database.prepare('SELECT COUNT(*) as count FROM send_history').get() as {count: number};
+    if (count.count > maxRows) {
+        const deleteCount = count.count - maxRows;
+        database
+            .prepare(
+                `DELETE FROM send_history
+                 WHERE id IN (SELECT id FROM send_history ORDER BY created_at ASC LIMIT ?)`,
+            )
+            .run(deleteCount);
+        console.log(`[Database] Cleaned up ${deleteCount} old send history rows`);
+    }
 }
 
 // 用户设置相关操作

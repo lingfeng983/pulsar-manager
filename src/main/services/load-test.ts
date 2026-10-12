@@ -1,10 +1,19 @@
 import {randomUUID} from 'node:crypto';
 import {performance} from 'node:perf_hooks';
-import type {Client, Consumer, Producer, ProducerConfig} from 'pulsar-client';
+import type {Client, Consumer, Producer} from 'pulsar-client';
 import {nativeClientManager, topicFullName, type NativeConnectionConfig} from './pulsar-native-client';
+import {
+    SendWindow,
+    buildProducerConfig,
+    createLatencyStats,
+    createRateLimiter,
+    defaultProducerOptions,
+    isCapacityError,
+    round2,
+} from './native-flow-utils';
 import {createLogger} from '../utils/logger';
-import {isTimeoutError, sleep, withHardTimeout} from '../utils/promise';
-import type {LoadTestLatency, LoadTestParams, LoadTestPhase, LoadTestProgress} from '../../shared/types';
+import {isTimeoutError, withHardTimeout} from '../utils/promise';
+import type {LoadTestParams, LoadTestPhase, LoadTestProgress, ProducerOptions} from '../../shared/types';
 
 const log = createLogger('LoadTest');
 
@@ -22,10 +31,6 @@ const CLOSE_TIMEOUT_MS = 5000;
 // （停止要能推进到关闭分支，而关闭发生在循环退出之后）。
 const SEND_DEADLINE_MS = 10 * 60_000;
 const SEND_TIMEOUT_MS = 30_000;
-// 延迟样本上限：逐条留存的话 100 万条要占 8MB，且每次上报前排序会把主进程 CPU
-// 吃在统计本身之上（数字因此失真）。蓄水池抽样固定这么多条，分位数相对误差约 1%，
-// 每条消息多出的代价只有一次 Math.random。
-const LATENCY_SAMPLE_MAX = 20_000;
 // 一轮压测同时在途（已发出但未被 broker 确认）的总字节上限。原生发送队列会把
 // 这些载荷全留在内存里：32 生产者 × 2000 并发 × 1MB 就是 64GB，不拦的话应用会被
 // 自己压测的待确认队列撑爆，而现场表现为原生层崩溃而不是友好提示。
@@ -49,102 +54,10 @@ function validateLimits(params: LoadTestParams): void {
     }
 }
 
-function round2(value: number): number {
-    return Math.round(value * 100) / 100;
-}
-
-// 终止原因决定界面显示"完成 / 已停止 / 失败"，所以三类必须分开记录：
-// stopReason 是"被叫停"（用户、配置变更、超时），failure 是"出错了"。
-function createLatencyStats() {
-    const samples: number[] = [];
-    let seen = 0;
-    return {
-        add(elapsedMs: number) {
-            seen += 1;
-            if (samples.length < LATENCY_SAMPLE_MAX) {
-                samples.push(Math.max(0, elapsedMs));
-                return;
-            }
-            // 第 n 条以 LATENCY_SAMPLE_MAX/n 的概率替换某个槽位，抽样因此与到达次序无关
-            const index = Math.floor(Math.random() * seen);
-            if (index < LATENCY_SAMPLE_MAX) {
-                samples[index] = Math.max(0, elapsedMs);
-            }
-        },
-        summarize(): LoadTestLatency | null {
-            if (seen === 0) {
-                return null;
-            }
-            const sorted = [...samples].sort((a, b) => a - b);
-            // 分位取"不小于该分位的第一个样本"，读数偏保守而不是偏乐观
-            const at = (percent: number) =>
-                sorted[Math.min(sorted.length - 1, Math.ceil((percent / 100) * sorted.length) - 1)];
-            const total = sorted.reduce((sum, value) => sum + value, 0);
-            return {
-                count: seen,
-                avgMs: round2(total / sorted.length),
-                minMs: round2(sorted[0]),
-                p50Ms: round2(at(50)),
-                p95Ms: round2(at(95)),
-                p99Ms: round2(at(99)),
-                maxMs: round2(sorted[sorted.length - 1]),
-            };
-        },
-    };
-}
-
-// performance.now() 而不是 Date.now()：后者只有毫秒粒度，快链路下中位数会整片显示
-// 0，而延迟恰恰是压测里最需要看准的一项。
-function createRateLimiter(ratePerSecond: number) {
-    if (ratePerSecond <= 0) {
-        return async () => undefined;
-    }
-    const stepMs = 1000 / ratePerSecond;
-    let nextSlotAt = Date.now();
-    return async () => {
-        const waitMs = nextSlotAt - Date.now();
-        nextSlotAt += stepMs;
-        if (waitMs > 0) {
-            await sleep(waitMs);
-        }
-    };
-}
-
 // 载荷固定不变：随机字节压不出压缩收益，也不便于用户在 Topic 详情页核对消息内容，
 // 这里测的是链路吞吐而不是压缩算法。
 function messagePayload(sizeBytes: number): Buffer {
     return Buffer.alloc(sizeBytes, 'x');
-}
-
-// 每个生产者维持一个在途发送窗口。逐条 `await send()` 会把每条消息的完整往返
-// 延迟串进总耗时，吞吐上限就退化成"生产者数 ÷ 单条延迟"，批量化也形同关闭；
-// 窗口大小同时用作原生队列上限（maxPendingMessages），多出来的发送由
-// blockIfQueueFull 在原生侧排队，因此并发度始终由参数控制而不是失控增长。
-// 记账的 Promise 一律不 reject（发送异常在源头就吞掉并计入失败），否则
-// Promise.race 会把失败当停止信号。
-class SendWindow {
-    private pending = new Set<Promise<void>>();
-
-    constructor(private readonly size: number) {}
-
-    async waitForSlot(): Promise<void> {
-        while (this.pending.size >= this.size) {
-            await Promise.race([...this.pending]);
-        }
-    }
-
-    track(send: Promise<void>): void {
-        const task = send.then(() => {
-            this.pending.delete(task);
-        });
-        this.pending.add(task);
-    }
-
-    async drain(): Promise<void> {
-        while (this.pending.size > 0) {
-            await Promise.race([...this.pending]);
-        }
-    }
 }
 
 interface Run {
@@ -153,6 +66,8 @@ interface Run {
     clusterId: string;
     topic: string;
     params: LoadTestParams;
+    // 终止原因决定界面显示"完成 / 已停止 / 失败"，所以三类必须分开记录：
+    // stopReason 是"被叫停"（用户、配置变更、超时），failure 是"出错了"。
     stopped: boolean;
     stopReason: string | null;
     failure: string | null;
@@ -185,15 +100,15 @@ function runKey(params: LoadTestParams): string {
     return `${params.clusterId}|${params.persistent ? 'p' : 'n'}|${path}|${subscription}`;
 }
 
-function producerConfig(params: LoadTestParams, topic: string, index: number): ProducerConfig {
+// 压测的发送参数走工作台同一套 buildProducerConfig，同一个 Topic 上两边的数字才能比。
+// 批大小取原生默认（1000 条 / 10ms），与提取前的行为逐字一致。
+function producerOptions(params: LoadTestParams, index: number): ProducerOptions {
     return {
-        topic,
+        ...defaultProducerOptions(),
         producerName: `pm-bench-${index}`,
         sendTimeoutMs: SEND_TIMEOUT_MS,
-        // 队列上限即这条生产者允许的在途消息数：满了之后 blockIfQueueFull 让 send()
-        // 排队等待而不是丢消息，并发窗口因此由参数控制，不靠原生默认值。
         maxPendingMessages: params.maxInFlightPerProducer,
-        blockIfQueueFull: true,
+        batchingMaxMessages: 1000,
         batchingEnabled: params.batchingEnabled,
         compressionType: params.compression,
     };
@@ -354,7 +269,9 @@ class LoadTestManager {
             });
         }
         for (let index = 0; index < params.producers; index += 1) {
-            run.producers.push(await client.createProducer(producerConfig(params, run.topic, index)));
+            run.producers.push(
+                await client.createProducer(buildProducerConfig(run.topic, producerOptions(params, index))),
+            );
         }
     }
 
@@ -470,7 +387,7 @@ class LoadTestManager {
         run.failed += 1;
         const detail = error instanceof Error ? error.message : String(error);
         run.lastError = detail;
-        if (/backlog quota|publishing is terminated|is not allowed|too large|write-operation/i.test(detail)) {
+        if (isCapacityError(detail)) {
             run.failure = `集群拒绝了写入：${detail}`;
             this.halt(run, null);
         }

@@ -88,11 +88,18 @@
 - **API**: `window.electronAPI.resources.getSubscriptions()`
 - **IPC**: `resources:getSubscriptions`
 - **Pulsar API**: `GET /admin/v2/{...}/{topic}/subscriptions`
+- 表里的**速率**与**吞吐量**取自 `TopicStats.subscriptions[sub]` 的 `msgRateOut`（msg/s）与 `msgThroughputOut`（B/s），是 broker 采样窗口上的瞬时值，随 15 秒轮询刷新；列名悬浮说明口径，数值悬浮给 broker 报的原始数字（换算后的读数出问题时要看的是原始值）
 
 #### 2.3.3 生产者/消费者
 - **来源**: `TopicStats.producers` 和 `TopicStats.consumers`
 - **刷新机制**: 15 秒定时刷新，且只在当前页签激活时轮询
   - antd Tabs 关闭才销毁、切走的页签只是 `display:none` 仍然挂载，组件读 `PaneActiveContext` 决定是否启动定时器，避免后台页签一直打 IPC
+
+#### 2.3.4 「配置」页签
+- **读取**: `resources:getTopicConfig` 逐策略端点并发读，回填进页内表单（不套弹窗，改哪一项就在原地改）
+- **写入**: `resources:updateTopicConfig`，read-modify-write 后只 PUT 变更过的键；**留空表示不修改**，`-1` 与 `0` 是两种不同语义（-1 为忽略该项，两项同时 0 才是关闭保留），broker 拒绝只置一项为 0 时会把原始报错回显在页面上
+- **页内可编辑**: `retentionTimeInMinutes`、`retentionSizeInMB`、`numPartitions`
+- **只读展示**: 生效积压配额、去重状态、归属 Broker——本 broker 上这些只有命名空间级写入口，给输入框只会让人以为改成功了
 
 ---
 
@@ -120,17 +127,22 @@
     namespace: string
     topic: string
     persistent: boolean
-    from: 'earliest' | 'latest' | 'timestamp'
-    timestamp?: number   // 仅 from === 'timestamp' 时提交
-    maxMessages: number  // 上限 10000
+    from: 'earliest' | 'latest' | 'timestamp' | 'recent'
+    timestamp?: number    // 仅 from === 'timestamp' 时提交
+    recentCount?: number  // 仅 from === 'recent' 时提交，1–1000，默认 20
+    maxMessages: number   // 上限 10000；recent 模式下不出现（扫描自己收尾）
   }
   ```
+- **「最近 N 条」的实现口径**: Admin REST 没有 peek / lastMessageId 端点，原生 Reader 也没有尾部锚点，所以这条是从 earliest 往后扫、只保留最后 N 条的环形缓冲，扫完（或撞护栏）一次性推给界面。护栏在 `src/main/services/pulsar-native-client.ts`：`RECENT_SCAN_MAX_MESSAGES=20000`、`RECENT_SCAN_MS=15000`、`RECENT_SCAN_MAX_BYTES=8MB`、`RECENT_SCAN_IDLE_ROUNDS=2`（连续两轮无新消息才算读完）。撞护栏时 `msg:session-end` 的 `detail` 会写明"扫过多少、取了几条"，界面照实提示，不声称拿到的是真正的尾部
+- **列表交互**: `Publish Time` 列可排序（默认倒序，点表头在倒/正之间切），所有列可拖宽（`useResizableColumns` + react-resizable，宽度只存组件状态，不落库）；Reader 与订阅消费两个子模式共用同一套列定义
+- **正文类型判定**: `src/renderer/components/message/messageFormat.ts` 的 `detectPayloadKind` —— 以 `[`/`{` 开头且 `JSON.parse` 成功算 JSON；以 `<` 开头且 `DOMParser` 能成树（无 `parsererror`）算 XML；其余算纯文本。判出来的类型决定列表标签与详情弹窗里的着色缩进
 - **页签生命周期**: 切到内层其它页签（概览/订阅管理/配置）会停掉会话——页签是 `display:none` 而非卸载，不停的话它会一直在后台消费并把消息堆进看不见的列表
 
 #### 2.4.3 消息发送
 - **API**: `window.electronAPI.messages.send()`
 - **IPC**: `messages:send`
 - **实现**: 原生客户端 `producer.send()`，返回真实 `messageId`；属性为可选 JSON 对象（键值各限 1024 字符、条数上限 100）
+- **单条消息参数**（`options: ProducerMessageOptions`，界面按字段列出而非让人拼 JSON）: `partitionKey`、`eventTimeMode`（none/now/fixed）+ `eventTime`、`deliverAfterMs` 或 `deliverAt`、`properties`。批大小、压缩、发送超时是 producer 级参数，单次发送每次现建一条 producer 用默认值，要调它们去生产者工作台
 
 #### 2.4.4 消息数据结构
 ```typescript
@@ -228,6 +240,31 @@ interface ClusterTopology {
 - **边权重**: 基于 `msgRateIn`
 - **配色**: 运行时从 CSS 变量读取，跟随亮色/暗色/护眼三套主题
 
+### 2.7 资源树筛选与集群探活 (ResourceTree.tsx / store/cluster.ts)
+
+- **树顶部的 topic 筛选**是纯渲染层过滤，不额外发 IPC：查询串按空白分词，每个词都要命中；词内先试连续子串，退而求其次才允许跳字子序列（`tns` 命中 `tenant-ns`），实现见 `src/renderer/utils/fuzzyMatch.ts`。命中的 topic 保留其租户/命名空间分支，筛空时给出明确提示而不是显一棵空树
+- **首屏探活**：`Home` 挂载即 `fetchClusters()` 之后 fire-and-forget 调 `refreshClusterStatus()` → IPC `cluster:checkStatus`（`src/main/ipc/cluster-handlers.ts`），逐集群走 Admin 健康检查、把结果写回 `clusters.status` 并返回整份列表；页面不被它阻塞，`checking` 期间复用同一轮不重复发
+- **为什么必须探活**：`clusters.status` 是 SQLite 里的持久列，不探活的话首屏显的是上次退出时留在库里的那份，集群早就停了界面还是一片"在线"
+- 顶部导航/首页的「刷新集群状态」走同一个 `cluster:checkStatus`，成功与失败都出 toast
+
+---
+
+### 2.8 生产者工作台 (ProducerWorkspace.tsx)
+
+- **常驻会话**: `producer:startSession`（带 `ProducerOptions`）→ `producer:send`（单发 1–1000 条）→ `producer:flush`（只把原生队列最后一段推出，不关会话）→ `producer:stop`（断会话，回 `stopped` 不报错）；`producer:listSessions` 列当前会话
+- **不建会话的一次性发送**: `producer:sendOnce`，现开现关，用于"就发一条、别留连接"
+- **连续限速流**: `producer:startFlow`（`ratePerSecond` 0 为不限、`totalMessages` 0 为到手动停止、`maxInFlight`、`stopOnError`），运行中改速率走 `producer:setRate`（只换限速器，不重建 producer），停止走 `producer:stopFlow`
+- **统计推送**: `msg:producer-stats`（main → renderer），已发/失败/字节、msg/s、MB/s 与 P50/P99 确认延迟
+- **报文模板**: `template:list/get/create/update/delete/copy`，存 `message_templates`。正文必须是合法 JSON，`${...}` 为占位符，生成函数见 `src/renderer/utils/template-engine.ts` 的 `KNOWN_FUNCTIONS`（`int/float/bool/string/uuid/choice/seq/index/now/date/timestamp`），支持具名变量与 `$each{count,of}` 展开，整体占位符保留原类型，渲染结果上限 5MB
+- **producer 级参数**（`src/shared/producer-defaults.ts` 为唯一事实来源，主进程建 producer、IPC Zod 默认值、界面初值三处同源）: 发送超时、在途队列、队列满是否阻塞、压缩、批大小/批字节/批时间、`chunkingEnabled`。`batchingEnabled` 与 `chunkingEnabled` 同真会 abort 原生进程，Zod `refine` 与界面都拦
+
+### 2.9 消费者工作台 (ConsumerWorkspace.tsx)
+
+- **会话**: `consumer:start` / `consumer:stop` / `consumer:list`，多会话并存（Exclusive 除外，重复开先弹确认）；消息批次仍走 `msg:consume-batch`，结束走 `msg:session-end`
+- **订阅设置**（`ConsumerConfigForm`）: 类型 `Shared/Key_Shared/Failover/Exclusive`、起始 `Latest/Earliest`、自动确认开关、`maxMessages`（0 不限）、`receiverQueueSize`、`ackTimeoutMs` 与 `nAckRedeliverTimeoutMs`（关掉自动确认才出现）、消费者名、死信策略（`topicName`/`maxRedeliverCount`/`initialSubscriptionName`）
+- **消息列表**: 按会话分桶、每秒自算速率、可暂停渲染、保留条数 1–5000、导出 JSON/CSV、清空；积压走 `messages:getBacklog`
+- **配置库**: `consumerConfig:list/get/create/update/delete/copy`，存 `consumer_session_configs`，`config_json` 整份存取
+
 ---
 
 ## 三、数据库表结构
@@ -302,13 +339,79 @@ CREATE TABLE user_settings (
 ```
 键值表，应用设置、主题、快捷键方案、已停用的插件都存这里。出厂默认行用 `INSERT OR IGNORE` 写入（`theme`、`truncateLength`、`autoRefresh`、`refreshIntervalSeconds`、`fontSize`），改过的值不会被启动流程覆盖。
 
-### 3.5 索引
+### 3.5 message_templates 表
+```sql
+CREATE TABLE message_templates (
+    id TEXT PRIMARY KEY,
+    cluster_id TEXT NOT NULL,
+    topic_uri TEXT NOT NULL DEFAULT '',   -- 空串表示「通用模板」，不用 NULL：
+                                          -- SQLite 唯一索引里 NULL 互不相等，用 NULL 同名通用模板能无限重复插入
+    name TEXT NOT NULL,
+    body TEXT NOT NULL,                   -- JSON 正文，${...} 为占位符
+    variables_json TEXT NOT NULL DEFAULT '[]',
+    properties_json TEXT NOT NULL DEFAULT '{}',
+    producer_options_json TEXT NOT NULL DEFAULT '{}',
+    schema_mode TEXT NOT NULL DEFAULT 'none',
+    use_count INTEGER NOT NULL DEFAULT 0,
+    last_used_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (cluster_id, topic_uri, name),
+    FOREIGN KEY (cluster_id) REFERENCES clusters(id) ON DELETE CASCADE
+);
+```
+
+### 3.6 consumer_session_configs 表
+```sql
+CREATE TABLE consumer_session_configs (
+    id TEXT PRIMARY KEY,
+    cluster_id TEXT NOT NULL,
+    topic_uri TEXT NOT NULL DEFAULT '',
+    subscription TEXT NOT NULL DEFAULT '',
+    name TEXT NOT NULL,
+    config_json TEXT NOT NULL,            -- 订阅类型/确认方式/死信这一组，整份存取、不按列查
+    use_count INTEGER NOT NULL DEFAULT 0,
+    last_used_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (cluster_id, topic_uri, subscription, name),
+    FOREIGN KEY (cluster_id) REFERENCES clusters(id) ON DELETE CASCADE
+);
+```
+
+### 3.7 send_history 表
+```sql
+CREATE TABLE send_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cluster_id TEXT,
+    topic_uri TEXT NOT NULL,
+    template_id TEXT,
+    template_name TEXT NOT NULL,          -- 冗余存一份：删模板不丢历史
+    body_preview TEXT NOT NULL,           -- 只记正文前缀与字节数，不存解析后的载荷
+    body_bytes INTEGER NOT NULL,
+    message_count INTEGER NOT NULL DEFAULT 1,
+    message_id TEXT,
+    status TEXT NOT NULL,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (cluster_id) REFERENCES clusters(id) ON DELETE SET NULL
+);
+```
+单条报文上限 5MB，整份落库迟早几十 GB；`cluster_id` 与 `template_id` 学 `operation_logs` 走 `SET NULL`，"消息发过"这件事不该随集群删除而被抹掉。
+
+### 3.8 索引
 ```sql
 CREATE INDEX idx_clusters_status ON clusters(status);
 CREATE INDEX idx_operation_logs_cluster_id ON operation_logs(cluster_id);
 CREATE INDEX idx_operation_logs_created_at ON operation_logs(created_at);
 CREATE INDEX idx_ssh_tunnels_status ON ssh_tunnels(status);
+CREATE INDEX idx_message_templates_scope ON message_templates(cluster_id, topic_uri);
+CREATE INDEX idx_consumer_configs_scope ON consumer_session_configs(cluster_id, topic_uri);
+CREATE INDEX idx_send_history_scope ON send_history(cluster_id, topic_uri);
+CREATE INDEX idx_send_history_created_at ON send_history(created_at);
 ```
+
+表结构版本为 `PRAGMA user_version = 5`，基线 DDL 与增量迁移都在 `src/main/database/` 里，每次启动先跑幂等基线再按版本补做迁移。
 
 ---
 
@@ -322,6 +425,7 @@ CREATE INDEX idx_ssh_tunnels_status ON ssh_tunnels(status);
 | `cluster:update` | renderer → main | 更新集群 |
 | `cluster:delete` | renderer → main | 删除集群（连带清理其 SSH 隧道配置） |
 | `cluster:testConnection` | renderer → main | 测试连接并读取集群版本 |
+| `cluster:checkStatus` | renderer → main | 逐集群健康检查、把结果写回 `clusters.status` 并返回整份列表（首屏自动跑一次，「刷新集群状态」手动跑） |
 
 ### 4.2 资源管理（`resource-handlers.ts`）
 | IPC 通道 | 方向 | 功能 |
@@ -348,9 +452,9 @@ CREATE INDEX idx_ssh_tunnels_status ON ssh_tunnels(status);
 | `messages:startConsume` / `messages:stopConsume` | renderer → main | 启动 / 停止订阅消费会话 |
 | `messages:getBacklog` | renderer → main | 查询订阅积压 |
 | `msg:read-batch` / `msg:consume-batch` | main → renderer | 单向推送消息批次（攒够 50 条或 300ms） |
-| `msg:session-end` | main → renderer | 会话自行结束（读满上限或出错）时通知界面复位 |
+| `msg:session-end` | main → renderer | 会话自行结束（读满上限、扫描收尾或出错）时通知界面复位，`detail` 带结束原因 |
 
-Admin REST 没有发消息与 peek 的端点（真实 broker 上返回 HTML 404），消息收发只有原生客户端这一条路。
+Admin REST 没有发消息与 peek 的端点（真实 broker 上返回 HTML 404），消息收发只有原生客户端这一条路；同理"最近 N 条"也只能靠从 earliest 往后扫实现（见 2.4.2）。`messages:send` 的 `options` 是单条消息级参数（`partitionKey`、`eventTime`、`deliverAfterMs`/`deliverAt`、`properties`），与 producer 级参数分开放，避免界面上出现"改了不生效"的输入框。
 
 ### 4.4 监控与拓扑（`metrics-handlers.ts`）
 | IPC 通道 | 方向 | 功能 |
@@ -422,6 +526,40 @@ Admin REST 没有发消息与 peek 的端点（真实 broker 上返回 HTML 404�
 | `update:download` | renderer → main | 下载发行版 exe 附件 |
 | `update:install` | renderer → main | 静默安装并重启 |
 
+### 4.11 生产者（`producer-handlers.ts`）
+
+| IPC 通道 | 方向 | 功能 |
+|---------|------|------|
+| `producer:startSession` | renderer → main | 在指定 topic 上建常驻 producer 会话（带 `ProducerOptions`） |
+| `producer:send` | renderer → main | 走常驻会话发送 1–1000 条（模板渲染后逐条投） |
+| `producer:sendOnce` | renderer → main | 不建会话的一次性发送，现开现关 |
+| `producer:startFlow` / `producer:stopFlow` | renderer → main | 启动 / 停止连续限速流（`ratePerSecond` 0 不限、`totalMessages` 0 到手动停止、`maxInFlight`、`stopOnError`） |
+| `producer:setRate` | renderer → main | 运行中改速率，只换限速器不重建 producer |
+| `producer:flush` | renderer → main | 把原生队列最后一段立刻推出，不关会话 |
+| `producer:stop` | renderer → main | 断开会话并移除；已不在时返回 `stopped: false` 而不是报错 |
+| `producer:listSessions` | renderer → main | 列出当前常驻会话 |
+| `msg:producer-stats` | main → renderer | 单向推送运行统计（已发/失败/字节、msg/s、MB/s、P50/P99） |
+
+`batchingEnabled` 与 `chunkingEnabled` 同时为 true 会让原生绑定 abort 整个主进程，参数在 IPC 边界由 Zod `refine` 拒绝，构造 producer 时再兜一层 `chunkingEnabled && !batchingEnabled`。
+
+### 4.12 消费者（`consumer-handlers.ts`）
+
+| IPC 通道 | 方向 | 功能 |
+|---------|------|------|
+| `consumer:start` | renderer → main | 按订阅设置起一个消费会话（可多会话并存，Exclusive 除外） |
+| `consumer:list` | renderer → main | 列出运行中的会话及其计数 |
+| `consumer:stop` | renderer → main | 停止指定会话 |
+
+批次与结束事件复用消息浏览器那两条推送通道（`msg:consume-batch` / `msg:session-end`），渲染层按 `sessionId` 分桶，不额外开新通道。
+
+### 4.13 模板、消费配置与发送历史（`template-handlers.ts`）
+
+| IPC 通道 | 方向 | 功能 |
+|---------|------|------|
+| `template:list` / `get` / `create` / `update` / `delete` / `copy` | renderer → main | 报文模板增删改查与复制，落 `message_templates`，作用域为 集群 + topic（空 topic 为通用） |
+| `consumerConfig:list` / `get` / `create` / `update` / `delete` / `copy` | renderer → main | 消费者会话配置，落 `consumer_session_configs` |
+| `sendHistory:list` | renderer → main | 按 集群 + topic 分页读发送历史（有表有接口，界面暂无入口） |
+
 ---
 
 ## 五、数据流向图
@@ -464,13 +602,15 @@ Admin REST 没有发消息与 peek 的端点（真实 broker 上返回 HTML 404�
                         ↓
                   IPC:messages:startRead（Reader）/ messages:startConsume（订阅）
                         ↓
-                  主进程 pulsar-client 原生消费者
+                  主进程 pulsar-client 原生消费者 / Reader
+                        ↓
+                  「最近 N 条」= 从 earliest 往后扫 + 环形缓冲只留末 N 条（撞 2 万条 / 15 秒 / 8MB 任一护栏即收尾）
                         ↓
                   按批推送（攒够 50 条或 300ms）
                         ↓
-                  渲染层追加到消息列表（base64 尝试解回文本）
+                  渲染层追加到消息列表（base64 解回文本 → 判 json / xml / text → 着色与缩进）
 ```
-Admin REST 没有发消息与 peek 的端点，消息收发只有原生客户端这一条路。
+Admin REST 没有发消息与 peek 的端点，消息收发只有原生客户端这一条路；类型判定以"能不能真解析出来"为准，判不出结构就按纯文本显示，列表标签与详情弹窗读的是同一份判定结果。
 
 ---
 
@@ -523,9 +663,9 @@ Admin REST 没有发消息与 peek 的端点，消息收发只有原生客户端
 ## 八、总结
 
 ### 当前数据来源
-1. **本地存储**: SQLite 数据库 (集群配置、SSH 隧道、操作日志、应用设置、快捷键绑定)
-2. **Pulsar Admin API**: Topic 统计、资源配置与变更、聚合统计、集群拓扑、订阅积压
-3. **原生客户端 (pulsar-client)**: 消息发送、订阅消费、Reader 读取、快速压测
+1. **本地存储**: SQLite 数据库（集群配置、SSH 隧道、操作日志、应用设置、快捷键绑定、报文模板、消费者会话配置、发送历史）
+2. **Pulsar Admin API**: Topic 统计、资源配置与变更、聚合统计、集群拓扑、订阅积压、集群健康检查
+3. **原生客户端 (pulsar-client)**: 消息发送（单发、常驻会话、连续限速流）、订阅消费、Reader 读取（含"最近 N 条"的扫描收尾）、快速压测
 
 ### 优化方向
 1. 添加数据缓存层 (Redis/内存缓存)

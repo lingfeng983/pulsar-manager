@@ -20,19 +20,20 @@ import {
 import dayjs from 'dayjs';
 import {
     DatabaseOutlined,
+    DownloadOutlined,
     MessageOutlined,
     UserOutlined,
     SettingOutlined,
     BarChartOutlined,
-    EditOutlined,
     DeleteOutlined,
     PlusOutlined,
     ReloadOutlined,
+    SendOutlined,
 } from '@ant-design/icons';
-import type {TopicConfigPatch, TopicStats} from '../types';
+import type {TopicConfig, TopicConfigPatch, TopicStats} from '../types';
 import {useTabStore} from '../store/tabs';
 import {formatBytes, formatMessageRate, formatThroughput} from '../utils/format';
-import {topicTabId} from '../utils/tabIds';
+import {topicTabId, producerTab, consumerTab} from '../utils/tabIds';
 import {invalidateTopics, invalidateTopicStats} from '../hooks/resourceCache';
 import MessageBrowser from './MessageBrowser';
 import {useCommand, PaneActiveContext} from '../hooks/useKeybindings';
@@ -72,12 +73,13 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
     const [skippingSubscription, setSkippingSubscription] = useState<string | null>(null);
     const [skippingInProgress, setSkippingInProgress] = useState(false);
     const [skipCount, setSkipCount] = useState(0);
-    const [editConfigModalOpen, setEditConfigModalOpen] = useState(false);
+    const [topicConfig, setTopicConfig] = useState<TopicConfig | null>(null);
+    const [configError, setConfigError] = useState<string | null>(null);
     const [editConfigForm] = Form.useForm();
     const [configLoading, setConfigLoading] = useState(false);
     const [savingInProgress, setSavingInProgress] = useState(false);
 
-    const {removeTab} = useTabStore();
+    const {addTab, removeTab} = useTabStore();
     const confirmDanger = useConfirmDanger();
     const tabId = topicTabId({clusterId, tenant, namespace, topic, persistent});
     // 外层页签被切走时 antd 只是 display:none，组件仍然挂载，15s 轮询会在后台
@@ -301,9 +303,11 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
         }
     };
 
-    // 打开编辑配置弹窗
-    const handleOpenEditConfig = async () => {
+    // 配置直接摊在页签里编辑，不再走弹窗：切进「配置」页签就拉一次 topic 级配置。
+    // 每次进来都重拉，免得拿着上一轮的覆盖值去保存（broker 侧可能已被命名空间改动带偏）。
+    const loadTopicConfig = useCallback(async () => {
         setConfigLoading(true);
+        setConfigError(null);
         try {
             const response = await window.electronAPI.resources.getTopicConfig(
                 clusterId,
@@ -314,6 +318,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
             );
             if (response.success && response.data) {
                 const config = response.data;
+                setTopicConfig(config);
                 editConfigForm.setFieldsValue({
                     // 留空 = 不修改。broker 没给出 topic 级覆盖值时不填 0，
                     // 否则保存会把"继承命名空间"误写成"显式设为 0"。
@@ -321,16 +326,21 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                     retentionSizeInMB: config.retentionSizeInMB ?? null,
                     numPartitions: config.partitions.length > 0 ? config.partitions.length : null,
                 });
-                setEditConfigModalOpen(true);
             } else {
-                message.error(response.error || '获取配置失败');
+                setConfigError(response.error || '获取配置失败');
             }
-        } catch {
-            message.error('获取配置失败');
+        } catch (configFetchError) {
+            setConfigError(configFetchError instanceof Error ? configFetchError.message : '获取配置失败');
         } finally {
             setConfigLoading(false);
         }
-    };
+    }, [clusterId, tenant, namespace, topic, persistent, editConfigForm]);
+
+    useEffect(() => {
+        if (paneActive && activeTab === 'config') {
+            void loadTopicConfig();
+        }
+    }, [paneActive, activeTab, loadTopicConfig]);
 
     // 保存配置
     const handleSaveConfig = async () => {
@@ -364,12 +374,10 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
             );
             if (response.success) {
                 message.success('配置更新成功');
-                setEditConfigModalOpen(false);
-                editConfigForm.resetFields();
                 // 分区数变化会改变 topic 列表本身，只失效 stats 不够
                 invalidateTopics(clusterId, tenant, namespace);
                 invalidateTopicStats(clusterId, tenant, namespace, topic);
-                await fetchTopicStats();
+                await Promise.all([fetchTopicStats(), loadTopicConfig()]);
             } else {
                 message.error(response.error || '更新失败');
             }
@@ -421,7 +429,45 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
             title: '积压消息',
             dataIndex: 'msgBacklog',
             key: 'msgBacklog',
-            render: (value: number) => <Tag color={value > 0 ? 'warning' : 'success'}>{value.toLocaleString()}</Tag>,
+            render: (value: number, record: SubscriptionTableItem) => (
+                <Tooltip title={`未投递与未确认共 ${value.toLocaleString()} 条，占 ${formatBytes(record.backlogSize)}`}>
+                    <Tag color={value > 0 ? 'warning' : 'success'}>{value.toLocaleString()}</Tag>
+                </Tooltip>
+            ),
+        },
+        {
+            // 速率与吞吐量都是 broker 在采样窗口上的瞬时值，悬浮给原始数字：
+            // 表格里是换算后的读数，出问题时人要看的是 broker 报了什么。
+            title: (
+                <Tooltip title="该订阅每秒取走的消息数（msgRateOut）。为 0 表示当前没有消费者在拉，或没有可投递的消息。">
+                    速率
+                </Tooltip>
+            ),
+            dataIndex: 'msgRateOut',
+            key: 'msgRateOut',
+            render: (value: number | undefined) =>
+                value === undefined || value === null ? (
+                    '—'
+                ) : (
+                    <Tooltip title={`msgRateOut = ${value.toFixed(4)} msg/s（瞬时值，随 15s 轮询刷新）`}>
+                        <span>{formatMessageRate(value)}</span>
+                    </Tooltip>
+                ),
+        },
+        {
+            title: (
+                <Tooltip title="该订阅每秒流出的字节数（msgThroughputOut），等于速率 × 平均消息体积。">吞吐量</Tooltip>
+            ),
+            dataIndex: 'msgThroughputOut',
+            key: 'msgThroughputOut',
+            render: (value: number | undefined) =>
+                value === undefined || value === null ? (
+                    '—'
+                ) : (
+                    <Tooltip title={`msgThroughputOut = ${value.toFixed(1)} B/s（瞬时值，随 15s 轮询刷新）`}>
+                        <span>{formatThroughput(value)}</span>
+                    </Tooltip>
+                ),
         },
         {
             title: '消费者数',
@@ -518,7 +564,11 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
         key: string;
         name: string;
         msgBacklog: number;
+        backlogSize: number;
         msgRateExpired: number;
+        msgRateOut?: number;
+        msgThroughputOut?: number;
+        unackedMessages: number;
         consumerCount: number;
         type: string;
     }
@@ -530,7 +580,11 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                   key: name,
                   name,
                   msgBacklog: sub.msgBacklog || 0,
+                  backlogSize: sub.backlogSize || 0,
                   msgRateExpired: sub.msgRateExpired || 0,
+                  msgRateOut: sub.msgRateOut,
+                  msgThroughputOut: sub.msgThroughputOut,
+                  unackedMessages: sub.unackedMessages || 0,
                   consumerCount: sub.consumerCount || 0,
                   type: sub.type || 'exclusive',
               }))
@@ -541,9 +595,23 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
             title={`Topic ${topic}`}
             subtitle={`${topicUri} · ${persistent ? '持久化' : '非持久化'}`}
             actions={
-                <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void fetchTopicStats()}>
-                    刷新
-                </Button>
+                <Space wrap size="small">
+                    <Button
+                        icon={<SendOutlined />}
+                        onClick={() => addTab(producerTab({clusterId, tenant, namespace, topic, persistent}))}
+                    >
+                        生产者工作台
+                    </Button>
+                    <Button
+                        icon={<DownloadOutlined />}
+                        onClick={() => addTab(consumerTab({clusterId, tenant, namespace, topic, persistent}))}
+                    >
+                        消费者工作台
+                    </Button>
+                    <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void fetchTopicStats()}>
+                        刷新
+                    </Button>
+                </Space>
             }
         >
             {/* 顶部指标：一行读完。四个 Statistic 竖着排要吃 90px，而这页真正要看的是下面的
@@ -698,37 +766,112 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                         label: '配置',
                         icon: <SettingOutlined />,
                         children: (
-                            <Card title="Topic 配置">
-                                <div className="stack" style={{gap: 'var(--spacing-md)'}}>
-                                    <div>
-                                        <span className="field-label">Topic 名称:</span>
-                                        <code style={{marginLeft: 'var(--spacing-sm)'}}>{topicUri}</code>
-                                    </div>
-                                    <div>
-                                        <span className="field-label">分区数:</span>
-                                        <span style={{marginLeft: 'var(--spacing-sm)'}}>
-                                            {stats?.partitions?.length || 0}
-                                        </span>
-                                    </div>
-                                    <div>
-                                        <span className="field-label">是否持久化:</span>
-                                        <span style={{marginLeft: 'var(--spacing-sm)'}}>
-                                            {persistent ? '是' : '否'}
-                                        </span>
-                                    </div>
-                                    <Space size={4}>
+                            <Card
+                                title="Topic 配置"
+                                extra={
+                                    <Space size="small">
                                         <Button
-                                            icon={<EditOutlined />}
+                                            icon={<ReloadOutlined />}
                                             loading={configLoading}
-                                            onClick={handleOpenEditConfig}
+                                            onClick={() => void loadTopicConfig()}
                                         >
-                                            编辑配置
+                                            重新载入
+                                        </Button>
+                                        <Button
+                                            type="primary"
+                                            loading={savingInProgress}
+                                            disabled={!topicConfig}
+                                            onClick={() => void handleSaveConfig()}
+                                        >
+                                            保存配置
                                         </Button>
                                         <Button icon={<DeleteOutlined />} danger onClick={handleDeleteTopic}>
                                             删除 Topic
                                         </Button>
                                     </Space>
-                                </div>
+                                }
+                            >
+                                <StateBlock loading={configLoading} error={configError} onRetry={loadTopicConfig}>
+                                    <Form form={editConfigForm} layout="vertical" className="stack">
+                                        <div className="summary-line">
+                                            <span className="field-label">Topic 名称</span>
+                                            <code>{topicUri}</code>
+                                            <span className="field-label">是否持久化</span>
+                                            <span>{persistent ? '是' : '否'}</span>
+                                            <span className="field-label">当前分区数</span>
+                                            <span>{topicConfig?.partitions.length ?? 0}</span>
+                                        </div>
+                                        <div className="options-grid">
+                                            <div className="opt-group">
+                                                <div className="opt-group-title">保留策略（topic 级覆盖）</div>
+                                                <Form.Item
+                                                    name="retentionTimeInMinutes"
+                                                    label="保留时间（分钟）"
+                                                    extra="留空表示不修改；-1 表示不按时间清理。填 0 只有在保留大小同为 0 时才有效（两项一起置 0 才是关闭保留）"
+                                                >
+                                                    <InputNumber
+                                                        min={-1}
+                                                        max={525600}
+                                                        style={{width: '100%'}}
+                                                        placeholder="不修改"
+                                                    />
+                                                </Form.Item>
+                                                <Form.Item
+                                                    name="retentionSizeInMB"
+                                                    label="保留大小（MB）"
+                                                    extra="留空表示不修改；-1 表示不限容量。填 0 只有在保留时间同为 0 时才有效"
+                                                >
+                                                    <InputNumber
+                                                        min={-1}
+                                                        max={1048576}
+                                                        style={{width: '100%'}}
+                                                        placeholder="不修改"
+                                                    />
+                                                </Form.Item>
+                                            </div>
+                                            <div className="opt-group">
+                                                <div className="opt-group-title">分区</div>
+                                                <Form.Item
+                                                    name="numPartitions"
+                                                    label="分区数"
+                                                    extra="仅分区 topic 可调整；给非分区 topic 设置大于 0 的分区数会把它变成分区 topic"
+                                                >
+                                                    <InputNumber
+                                                        min={0}
+                                                        max={1000}
+                                                        precision={0}
+                                                        style={{width: '100%'}}
+                                                        placeholder="不修改"
+                                                    />
+                                                </Form.Item>
+                                                {/* 生效值只读展示：这些策略本 broker 没有 topic 级写入口 */}
+                                                <div className="readonly-block">
+                                                    <div>
+                                                        生效积压配额：
+                                                        {formatBacklogQuota(
+                                                            stats?.backlogQuotaLimitSize,
+                                                            stats?.backlogQuotaLimitTime,
+                                                        )}
+                                                    </div>
+                                                    <div>去重状态：{stats?.deduplicationStatus || '未知'}</div>
+                                                    <div>
+                                                        归属 Broker：
+                                                        {stats?.ownerBrokers?.length
+                                                            ? stats.ownerBrokers.join('、')
+                                                            : topicConfig?.ownerBrokers?.length
+                                                              ? topicConfig.ownerBrokers.join('、')
+                                                              : '未知'}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <p className="hint-text">
+                                            最大消息大小、积压配额、TTL、生产/消费者上限等策略在本 broker
+                                            上只有命名空间级别的写入口， 在 topic
+                                            级别修改不会生效，因此这里不提供输入框。
+                                        </p>
+                                    </Form>
+                                </StateBlock>
                             </Card>
                         ),
                     },
@@ -875,78 +1018,6 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                     </Form.Item>
                     <p className="hint-text" style={{marginTop: 'var(--spacing-sm)'}}>
                         跳过消息后，积压消息数将减少对应数量。
-                    </p>
-                </Form>
-            </Modal>
-
-            {/* 编辑配置弹窗 */}
-            <Modal
-                title="编辑 Topic 配置"
-                open={editConfigModalOpen}
-                onCancel={() => {
-                    setEditConfigModalOpen(false);
-                    editConfigForm.resetFields();
-                }}
-                footer={[
-                    <Button
-                        key="back"
-                        onClick={() => {
-                            setEditConfigModalOpen(false);
-                            editConfigForm.resetFields();
-                        }}
-                    >
-                        取消
-                    </Button>,
-                    <Button key="submit" type="primary" loading={savingInProgress} onClick={handleSaveConfig}>
-                        保存配置
-                    </Button>,
-                ]}
-                width={600}
-            >
-                <Form form={editConfigForm} layout="vertical">
-                    <Form.Item
-                        name="retentionTimeInMinutes"
-                        label="保留时间（分钟）"
-                        extra="留空表示不修改；-1 表示不按时间清理。填 0 只有在保留大小同为 0 时才有效（两项一起置 0 才是关闭保留）"
-                    >
-                        <InputNumber min={-1} max={525600} style={{width: '100%'}} placeholder="不修改" />
-                    </Form.Item>
-                    <Form.Item
-                        name="retentionSizeInMB"
-                        label="保留大小（MB）"
-                        extra="留空表示不修改；-1 表示不限容量。填 0 只有在保留时间同为 0 时才有效"
-                    >
-                        <InputNumber min={-1} max={1048576} style={{width: '100%'}} placeholder="不修改" />
-                    </Form.Item>
-                    <Form.Item
-                        name="numPartitions"
-                        label="分区数"
-                        extra="仅分区 topic 可调整；给非分区 topic 设置大于 0 的分区数会把它变成分区 topic"
-                    >
-                        <InputNumber min={0} max={1000} precision={0} style={{width: '100%'}} placeholder="不修改" />
-                    </Form.Item>
-
-                    {/* 生效值只读展示：这些策略本 broker 没有 topic 级写入口 */}
-                    <div
-                        style={{
-                            padding: 'var(--spacing-sm) var(--spacing-md)',
-                            background: 'var(--color-bg-secondary)',
-                            borderRadius: 'var(--radius-md)',
-                            fontSize: 'var(--font-size-xs)',
-                            lineHeight: 1.9,
-                        }}
-                    >
-                        <div>
-                            生效积压配额：
-                            {formatBacklogQuota(stats?.backlogQuotaLimitSize, stats?.backlogQuotaLimitTime)}
-                        </div>
-                        <div>去重状态：{stats?.deduplicationStatus || '未知'}</div>
-                        <div>归属 Broker：{stats?.ownerBrokers?.length ? stats.ownerBrokers.join('、') : '未知'}</div>
-                    </div>
-
-                    <p className="hint-text" style={{marginTop: 'var(--spacing-sm)'}}>
-                        最大消息大小、积压配额、TTL、生产/消费者上限等策略在本 broker 上只有命名空间级别的写入口， 在
-                        topic 级别修改不会生效，因此这里不提供输入框。
                     </p>
                 </Form>
             </Modal>

@@ -26,3 +26,6 @@ scripts/tunnel-selftest/certs/
 # 这里统一忽略所有 electron-builder 输出目录（release/、release-alt/、release-next/ …）。
 # 注意 release.sh 是脚本文件，不带尾斜杠的写法不会误伤它。
 release*/
+
+# CDP 实机验证的探针脚本与快照，只对本机有意义
+.tmp-verify/

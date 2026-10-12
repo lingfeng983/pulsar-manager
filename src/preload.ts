@@ -9,22 +9,40 @@ import type {
     ClusterConfigDraft,
     ClusterTopology,
     AppSettings,
+    ConsumerConfigCopyParams,
+    ConsumerConfigUpsertParams,
+    ConsumerSessionConfig,
     ConfigBundle,
     ConfigImportResult,
     ConfigMeta,
     ConsumeStartParams,
+    ConsumerSessionInfo,
     LoadTestParams,
     LoadTestProgress,
     MessageBatch,
     MessageSendParams,
+    MessageTemplate,
+    MessageTemplateUpsertParams,
     OperationLog,
     PluginEntry,
     PluginListResult,
+    ProducerFlowParams,
+    ProducerRunStats,
+    ProducerSendOnceParams,
+    ProducerSendParams,
+    ProducerSendResult,
+    ProducerSessionInfo,
+    ProducerSetRateParams,
+    ProducerStartParams,
     ReadStartParams,
+    SendHistoryEntry,
+    SendHistoryListParams,
     SessionEndEvent,
     SSHConfig,
     SSHTunnel,
     SubscriptionPathParams,
+    WorkbenchCopyParams,
+    WorkbenchScopeParams,
     Tenant,
     Topic,
     TopicConfig,
@@ -40,6 +58,7 @@ type StreamChannel = typeof import('./shared/types').MESSAGE_STREAM_CHANNELS;
 const CONSUME_BATCH_CHANNEL: StreamChannel['consumeBatch'] = 'msg:consume-batch';
 const READ_BATCH_CHANNEL: StreamChannel['readBatch'] = 'msg:read-batch';
 const SESSION_END_CHANNEL: StreamChannel['sessionEnd'] = 'msg:session-end';
+const PRODUCER_STATS_CHANNEL: StreamChannel['producerStats'] = 'msg:producer-stats';
 const LOAD_TEST_PROGRESS_CHANNEL: typeof import('./shared/types').LOAD_TEST_CHANNEL = 'benchmark:progress';
 
 // 主进程 → 渲染进程的下行订阅。返回反订阅闭包：组件卸载时必须能摘掉监听，
@@ -57,6 +76,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // 集群管理
     cluster: {
         list: () => ipcRenderer.invoke('cluster:list'),
+        checkStatus: () => ipcRenderer.invoke('cluster:checkStatus'),
         add: (config: ClusterConfigDraft) => ipcRenderer.invoke('cluster:add', config),
         update: (id: string, config: ClusterConfigDraft) => ipcRenderer.invoke('cluster:update', id, config),
         delete: (id: string) => ipcRenderer.invoke('cluster:delete', id),
@@ -193,6 +213,54 @@ contextBridge.exposeInMainWorld('electronAPI', {
         onSessionEnd: (callback: (event: SessionEndEvent) => void) => subscribe(SESSION_END_CHANNEL, callback),
     },
 
+    // 生产者工作台。会话结束事件与消费共用 msg:session-end——"会话没了"在两边
+    // 是同一件事，渲染端不该分两个监听再去猜哪个先响。
+    producer: {
+        startSession: (params: ProducerStartParams) => ipcRenderer.invoke('producer:startSession', params),
+        send: (params: ProducerSendParams) => ipcRenderer.invoke('producer:send', params),
+        sendOnce: (params: ProducerSendOnceParams) => ipcRenderer.invoke('producer:sendOnce', params),
+        flush: (sessionId: string) => ipcRenderer.invoke('producer:flush', {sessionId}),
+        startFlow: (params: ProducerFlowParams) => ipcRenderer.invoke('producer:startFlow', params),
+        stopFlow: (sessionId: string) => ipcRenderer.invoke('producer:stopFlow', {sessionId}),
+        setRate: (params: ProducerSetRateParams) => ipcRenderer.invoke('producer:setRate', params),
+        onStats: (callback: (stats: ProducerRunStats) => void) => subscribe(PRODUCER_STATS_CHANNEL, callback),
+        stop: (sessionId: string) => ipcRenderer.invoke('producer:stop', {sessionId}),
+        listSessions: (clusterId?: string) => ipcRenderer.invoke('producer:listSessions', {clusterId}),
+    },
+
+    // 消费者工作台。批次里不新增推送通道：消息批次与三态面板同一条
+    // msg:consume-batch，界面按 sessionId 认领，多开几条会话也各收各的。
+    consumer: {
+        start: (params: ConsumeStartParams) => ipcRenderer.invoke('consumer:start', params),
+        stop: (sessionId: string) => ipcRenderer.invoke('consumer:stop', {sessionId}),
+        listSessions: (clusterId?: string) => ipcRenderer.invoke('consumer:list', {clusterId}),
+    },
+
+    // 报文模板库（生产者工作台）：纯本地 SQLite，集群离线也能翻出上次写好的报文
+    template: {
+        list: (params: WorkbenchScopeParams) => ipcRenderer.invoke('template:list', params),
+        get: (id: string) => ipcRenderer.invoke('template:get', {id}),
+        create: (params: MessageTemplateUpsertParams) => ipcRenderer.invoke('template:create', params),
+        update: (params: MessageTemplateUpsertParams) => ipcRenderer.invoke('template:update', params),
+        delete: (id: string) => ipcRenderer.invoke('template:delete', {id}),
+        copy: (params: WorkbenchCopyParams) => ipcRenderer.invoke('template:copy', params),
+    },
+
+    // 消费者会话配置：同样只在本地库里
+    consumerConfig: {
+        list: (params: WorkbenchScopeParams) => ipcRenderer.invoke('consumerConfig:list', params),
+        get: (id: string) => ipcRenderer.invoke('consumerConfig:get', {id}),
+        create: (params: ConsumerConfigUpsertParams) => ipcRenderer.invoke('consumerConfig:create', params),
+        update: (params: ConsumerConfigUpsertParams) => ipcRenderer.invoke('consumerConfig:update', params),
+        delete: (id: string) => ipcRenderer.invoke('consumerConfig:delete', {id}),
+        copy: (params: ConsumerConfigCopyParams) => ipcRenderer.invoke('consumerConfig:copy', params),
+    },
+
+    // 发送历史只读；写入在 producer 的发送路径里，界面不能自己编一条成功记录
+    sendHistory: {
+        list: (params: SendHistoryListParams) => ipcRenderer.invoke('sendHistory:list', params),
+    },
+
     // 快速压测：start 拿到 runId 就返回，进度经 benchmark:progress 单向推送
     benchmark: {
         start: (params: LoadTestParams) => ipcRenderer.invoke('benchmark:start', params),
@@ -283,6 +351,7 @@ declare global {
         electronAPI: {
             cluster: {
                 list: () => Promise<APIResponse<ClusterConfig[]>>;
+                checkStatus: () => Promise<APIResponse<ClusterConfig[]>>;
                 add: (config: ClusterConfigDraft) => Promise<APIResponse<{id: string}>>;
                 update: (id: string, config: ClusterConfigDraft) => Promise<APIResponse<void>>;
                 delete: (id: string) => Promise<APIResponse<void>>;
@@ -410,6 +479,42 @@ declare global {
                 onConsumeBatch: (callback: (batch: MessageBatch) => void) => () => void;
                 onReadBatch: (callback: (batch: MessageBatch) => void) => () => void;
                 onSessionEnd: (callback: (event: SessionEndEvent) => void) => () => void;
+            };
+            producer: {
+                startSession: (params: ProducerStartParams) => Promise<APIResponse<ProducerSessionInfo>>;
+                send: (params: ProducerSendParams) => Promise<APIResponse<ProducerSendResult>>;
+                sendOnce: (params: ProducerSendOnceParams) => Promise<APIResponse<ProducerSendResult>>;
+                flush: (sessionId: string) => Promise<APIResponse<{flushed: boolean}>>;
+                startFlow: (params: ProducerFlowParams) => Promise<APIResponse<ProducerSessionInfo>>;
+                stopFlow: (sessionId: string) => Promise<APIResponse<ProducerRunStats | null>>;
+                setRate: (params: ProducerSetRateParams) => Promise<APIResponse<ProducerSessionInfo>>;
+                onStats: (callback: (stats: ProducerRunStats) => void) => () => void;
+                stop: (sessionId: string) => Promise<APIResponse<{stopped: boolean}>>;
+                listSessions: (clusterId?: string) => Promise<APIResponse<ProducerSessionInfo[]>>;
+            };
+            consumer: {
+                start: (params: ConsumeStartParams) => Promise<APIResponse<ConsumerSessionInfo>>;
+                stop: (sessionId: string) => Promise<APIResponse<{stopped: boolean}>>;
+                listSessions: (clusterId?: string) => Promise<APIResponse<ConsumerSessionInfo[]>>;
+            };
+            template: {
+                list: (params: WorkbenchScopeParams) => Promise<APIResponse<MessageTemplate[]>>;
+                get: (id: string) => Promise<APIResponse<MessageTemplate | null>>;
+                create: (params: MessageTemplateUpsertParams) => Promise<APIResponse<MessageTemplate>>;
+                update: (params: MessageTemplateUpsertParams) => Promise<APIResponse<MessageTemplate>>;
+                delete: (id: string) => Promise<APIResponse<{deleted: boolean}>>;
+                copy: (params: WorkbenchCopyParams) => Promise<APIResponse<MessageTemplate>>;
+            };
+            consumerConfig: {
+                list: (params: WorkbenchScopeParams) => Promise<APIResponse<ConsumerSessionConfig[]>>;
+                get: (id: string) => Promise<APIResponse<ConsumerSessionConfig | null>>;
+                create: (params: ConsumerConfigUpsertParams) => Promise<APIResponse<ConsumerSessionConfig>>;
+                update: (params: ConsumerConfigUpsertParams) => Promise<APIResponse<ConsumerSessionConfig>>;
+                delete: (id: string) => Promise<APIResponse<{deleted: boolean}>>;
+                copy: (params: ConsumerConfigCopyParams) => Promise<APIResponse<ConsumerSessionConfig>>;
+            };
+            sendHistory: {
+                list: (params: SendHistoryListParams) => Promise<APIResponse<SendHistoryEntry[]>>;
             };
             benchmark: {
                 start: (params: LoadTestParams) => Promise<APIResponse<{runId: string; topic: string}>>;

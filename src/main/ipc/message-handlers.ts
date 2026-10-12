@@ -19,7 +19,7 @@ export function registerMessageHandlers() {
         'messages:send',
         MessageSendSchema,
         ([params]) => params,
-        async (config, {clusterId, tenant, namespace, topic, persistent, message, properties}) => {
+        async (config, {clusterId, tenant, namespace, topic, persistent, message, properties, options}) => {
             const result = await nativeClientManager.send(clusterId, config, {
                 tenant,
                 namespace,
@@ -27,6 +27,7 @@ export function registerMessageHandlers() {
                 persistent,
                 message,
                 properties,
+                options,
             });
 
             insertOperationLog({

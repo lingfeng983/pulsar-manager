@@ -34,6 +34,8 @@ interface ResourceDetailPageProps<T extends object> {
     listLabel: ReactNode;
     listTitle: ReactNode;
     listEmptyText: ReactNode;
+    /** 列表卡片右上角的工具位（筛选输入框这类只作用于列表的控件放这里，不放页面级 actions） */
+    listActions?: ReactNode;
     columns: TableColumnsType<T>;
     dataSource: T[];
     rowKey: TableProps<T>['rowKey'];
@@ -56,6 +58,7 @@ function ResourceDetailPage<T extends object>({
     listLabel,
     listTitle,
     listEmptyText,
+    listActions,
     columns,
     dataSource,
     rowKey,
@@ -96,7 +99,7 @@ function ResourceDetailPage<T extends object>({
     );
 
     const list = (
-        <Card title={listTitle}>
+        <Card title={listTitle} extra={listActions}>
             <StateBlock empty={dataSource.length === 0} emptyText={listEmptyText}>
                 <Table<T>
                     dataSource={dataSource}

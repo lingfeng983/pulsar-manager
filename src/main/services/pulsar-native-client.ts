@@ -7,7 +7,31 @@ import type {ClientConfig, Consumer, Message as NativeMessage, Producer, Reader,
 import type {AuthenticationTls} from 'pulsar-client';
 import {createLogger} from '../utils/logger';
 import {isTimeoutError, sleep, withHardTimeout} from '../utils/promise';
-import type {ConsumeStartParams, Message, MessageBatch, ReadStartParams, SessionEndEvent} from '../../shared/types';
+import {
+    buildConsumerConfig,
+    buildProducerConfig,
+    createLatencyStats,
+    createRateLimiter,
+    isCapacityError,
+    round2,
+    round4,
+    SendWindow,
+} from './native-flow-utils';
+import {applyOptions, messageOptions, resolveBatch, toProducerMessage, type OutboundMessage} from './producer-send';
+import type {
+    ConsumeStartParams,
+    ConsumerSessionInfo,
+    Message,
+    MessageBatch,
+    ProducerFlowParams,
+    ProducerMessageOptions,
+    ProducerOptions,
+    ProducerRunStats,
+    ProducerSendResult,
+    ProducerSessionInfo,
+    ReadStartParams,
+    SessionEndEvent,
+} from '../../shared/types';
 
 const log = createLogger('NativeClient');
 
@@ -141,22 +165,130 @@ const CLOSE_TIMEOUT_MS = 5000;
 // Reader 的空轮询间隔：pulsar-client 1.18 的 readNext(timeout) 在超时真的到期时会段错误
 // （实测 readerIdle 两次必崩），所以 Reader 只能先 hasNext() 判断有货、再不带超时地读。
 const READER_POLL_MS = 250;
+// 「最近 N 条」的回溯扫描：没有尾部锚点，只能从 earliest 逐条读过去、把最后 N 条
+// 留在环形缓冲里。扫描量与时长都必须封顶，否则对着存了几百万条的 topic 点一次
+// "最近 20 条"就是整 Topic 回放，界面还停在"运行中"看不出在忙什么。
+const RECENT_SCAN_MAX_MESSAGES = 20000;
+const RECENT_SCAN_MS = 15000;
+// 留住的正文按 base64 长度合计封顶：N 条本身有上限，但单条可以是几 MB 的批处理报文，
+// 只按条数收会把主进程内存顶穿（推送给界面后还要在渲染进程再存一份）。
+const RECENT_SCAN_MAX_BYTES = 8 * 1024 * 1024;
+// 连续这么多轮 hasNext() 为假才算追平到尾部：单轮为假可能只是下一块 ledger 还没到，
+// 立刻收尾会把最后那几条漏掉。
+const RECENT_SCAN_IDLE_ROUNDS = 2;
 // 停止时要等的是"在途读取落地 + 资源关闭"的整体，而不是只等 close：
 // 预算必须覆盖最长的一次空轮询，否则正常等待也会被误判成卡死并提前返回。
 const SETTLE_TIMEOUT_MS = RECEIVE_TIMEOUT_MS + CLOSE_TIMEOUT_MS;
+// 常驻生产者会话没有读取循环，靠这个驻留循环回到循环头看停止标志，
+// 收尾（flush → close → 摘登记 → 上报）因此与消费路径走同一套 runSession。
+const SESSION_DWELL_MS = 200;
+// 会话总数护栏：每个会话都挂着一个原生 producer/consumer 与 broker 侧的连接，
+// 界面上多开几个页签、每个页签再开几个会话就能把主进程的连接数吃穿。
+// 32 足够日常用（一屏也摆不下这么多），超了直接拒绝而不是让原生层去扛。
+const MAX_SESSIONS = 32;
+// 连续发送每轮解析多少条报文。限速是按条等待的，这个值只影响"解析模板"这一步
+// 的摊销粒度：太小会让 resolveTemplate 的开销顶到速率前面。
+const FLOW_CHUNK = 50;
+// 统计推送的最小间隔。逐条过 IPC 会把主进程和渲染进程一起打死在数字上，
+// 500ms 一帧足够界面读出速率，也与压测的进度推送同频。
+const FLOW_STATS_MS = 500;
 
 // 返回 null 表示"这一轮没有消息"，循环继续；返回消息则计入本批。
 type Poll = () => Promise<NativeMessage | null>;
+
+type SessionKind = 'consumer' | 'reader' | 'producer';
+
+// 连续发送一轮的运行时状态。挂在 producer 句柄上而不是单开一张 Map：
+// 会话被停、集群被删、退出清理这三条路径都只认 session.close，
+// 另立一张表就会出现"会话已经没了、灌报文的循环还在往关闭后的 producer 上 send"。
+interface FlowState {
+    sessionId: string;
+    stopped: boolean;
+    // 改速率会换掉这个函数（限速器把下一次放行的时刻记在自己闭包里）
+    limiter: () => Promise<void>;
+    ratePerSecond: number;
+    // 0 = 不限速 / 不限总量
+    totalMessages: number;
+    maxInFlight: number;
+    stopOnError: boolean;
+    window: SendWindow;
+    latency: ReturnType<typeof createLatencyStats>;
+    // 已投出条数按"交给原生 send 的条数"计，broker 确认回来的才进 sent，
+    // 两者差的就是还在途的那部分
+    issued: number;
+    sent: number;
+    failed: number;
+    bytesSent: number;
+    startedAt: number;
+    lastStatsAt: number;
+    lastStatsSent: number;
+    lastStatsBytes: number;
+    lastError?: string;
+    // 循环整体（含在途排空）；停止与关闭都要等它
+    done: Promise<void>;
+}
+
+// 常驻 producer 的会话侧状态。flowRunning 是给连续发送（startFlow）留的那一格，
+// 单发路径永远读到 false——界面据此把"发送中"的转圈只在真在灌的时候显示。
+interface ProducerHandle {
+    producer: Producer;
+    clusterId: string;
+    topicUri: string;
+    producerName: string;
+    // 建会话时的参数：报文级的路由键/事件时间/延时在每次发送时可被覆盖，
+    // 没覆盖就回落到这里，所以这份必须跟着会话留着。
+    options: ProducerOptions;
+    flowRunning: boolean;
+    flow?: FlowState;
+    // 最近一次统计的快照：停止与断开会话时要把它作为终态推给界面
+    lastStats?: ProducerRunStats;
+}
+
+// 常驻 consumer 的会话侧状态。received 在这里而不是只留在界面：切页签、
+// 重开工作台都要能问出"这条订阅的会话收过多少条"，界面自己那份数在卸载时就没了。
+interface ConsumerHandle {
+    consumer: Consumer;
+    clusterId: string;
+    topicUri: string;
+    subscription: string;
+    consumerName?: string;
+    subscriptionType: ConsumeStartParams['subscriptionType'];
+    autoAck: boolean;
+    received: number;
+}
 
 interface Session {
     id: string;
     clusterId: string;
     key: string;
+    kind: SessionKind;
     stopped: boolean;
     close: () => Promise<void>;
     // 循环退出 + 资源关闭 + 上报完成的整体 Promise；停止时等它，
     // 而不是自己去关 consumer——在途读取还没落地就关是崩溃温床。
     settled: Promise<void>;
+    // 只有 producer 会话有：摘登记时跟着会话一起消失，不再单开一张 Map
+    // （两张表各自清理迟早出现"会话没了、producer 还挂着"的半截状态）。
+    producer?: ProducerHandle;
+    consumer?: ConsumerHandle;
+}
+
+// 一次性 producer 的收尾：flush 把批量队列里剩下的最后一段推出去，再 close。
+// withHardTimeout 只保证不卡死、不回报原因，而这里的失败必须能让用户看见——
+// 静默吞掉就成了"界面说发完了、broker 里少几条"。所以自己收一次错误文本。
+async function closeProducer(producer: Producer): Promise<string | undefined> {
+    const work = producer
+        .flush()
+        .then(() => producer.close())
+        .then(() => undefined);
+    const outcome = await Promise.race([
+        work.then(
+            () => null,
+            (error: unknown) => (error instanceof Error ? error.message : String(error)),
+        ),
+        sleep(SETTLE_TIMEOUT_MS).then(() => `producer 收尾超时（约 ${Math.round(SETTLE_TIMEOUT_MS / 1000)} 秒）`),
+    ]);
+    return outcome === null ? undefined : outcome;
 }
 
 // 原生客户端的连接参数指纹：隧道重连后本地端口变化，旧 Client 指向已经没人
@@ -339,17 +471,24 @@ export class NativeClientManager {
             persistent: boolean;
             message: string;
             properties?: Record<string, string>;
+            options?: ProducerMessageOptions;
         },
     ): Promise<{messageId: string}> {
         const topic = topicFullName(params.tenant, params.namespace, params.topic, params.persistent);
         const client = await this.getClient(clusterId, config);
         const work = (async (): Promise<{messageId: string}> => {
             const producer: Producer = await client.createProducer({topic});
+            // 逐条参数走工作台那同一份 applyOptions + toProducerMessage：单发与模板
+            // 分两套组装的话，"面板上勾了事件时间、broker 里那条却没有"就没人能发现。
+            const item: OutboundMessage = {
+                sourceIndex: 0,
+                body: params.message,
+                bytes: Buffer.byteLength(params.message, 'utf8'),
+                properties: params.properties,
+            };
+            applyOptions(item, params.options ?? {});
             try {
-                const messageId = await producer.send({
-                    data: Buffer.from(params.message, 'utf8'),
-                    properties: params.properties,
-                });
+                const messageId = await producer.send(toProducerMessage(item));
                 return {messageId: messageId.toString()};
             } finally {
                 await withHardTimeout(
@@ -365,25 +504,62 @@ export class NativeClientManager {
         return work;
     }
 
-    // 同一个订阅只允许一个会话：两个消费者抢 Exclusive 订阅会互相踢下线，
-    // 表现为"消息时隐时现"，比直接拒绝更难排查。
-    private reserveSession(clusterId: string, key: string): Session {
-        const existing = [...this.sessions.values()].find(session => session.key === key);
-        if (existing) {
+    // 会话占用登记。两种模式的区别是真实的原生语义，不是偏好：
+    // - exclusive：同一个订阅只允许一个消费者。两个 Exclusive 订阅的连接会互相踢下线，
+    //   Shared 下则会各自分到一半消息，两边都表现为"消息时隐时现"，比直接拒绝更难排查。
+    // - parallel：reader 与 producer 之间不存在抢占（reader 不落订阅，producer 各投各的），
+    //   键追加会话 id 保证互不相同，同一 topic 开多个生产者因此是允许的。
+    private reserveSession(clusterId: string, key: string, kind: SessionKind, mode: 'exclusive' | 'parallel'): Session {
+        if (this.sessions.size >= MAX_SESSIONS) {
+            throw new Error(`同时最多 ${MAX_SESSIONS} 个收发会话，请先停止一些再开`);
+        }
+        // uuid 而不是自计数：自计数会重复出现在"渲染层还握着上一个进程的 s1"
+        // 这类场景里，停错会话比停不到更难排查
+        const id = crypto.randomUUID();
+        const sessionKey = mode === 'parallel' ? `${key}#${id}` : key;
+        if (mode === 'exclusive' && [...this.sessions.values()].some(session => session.key === sessionKey)) {
             throw new Error('该订阅已有正在运行的会话，请先停止');
         }
         const session: Session = {
-            // uuid 而不是自计数：自计数会重复出现在"渲染层还握着上一个进程的 s1"
-            // 这类场景里，停错会话比停不到更难排查
-            id: crypto.randomUUID(),
+            id,
             clusterId,
-            key,
+            key: sessionKey,
+            kind,
             stopped: false,
             close: async () => undefined,
             settled: Promise.resolve(),
         };
         this.sessions.set(session.id, session);
         return session;
+    }
+
+    // 常驻会话的驻留循环：生产者会话不读消息，只需要一个能周期检查停止标志的循环，
+    // 好让停止时 runSession 的收尾与消费路径完全同一条（否则 producer 的关闭时机
+    // 就得由每个调用方自己保证，而漏掉一处就是在还活着的 producer 下面关 Client）。
+    private async dwell(session: Session): Promise<void> {
+        while (!session.stopped) {
+            await sleep(SESSION_DWELL_MS);
+        }
+    }
+
+    // 会话 id → 常驻 producer。取不到就明确报错而不是静默新建：静默重建会让
+    // 用户以为消息发进了同一个 producer（连接、producerName 都变），实际不是。
+    private producerHandle(sessionId: string): ProducerHandle {
+        const session = this.sessions.get(sessionId);
+        if (!session || session.kind !== 'producer' || session.stopped) {
+            throw new Error('生产者会话不存在或已停止，请重新建立连接');
+        }
+        const handle = session.producer;
+        if (!handle) {
+            throw new Error('生产者会话状态不完整，请停止后重建');
+        }
+        return handle;
+    }
+
+    // 会话的建立参数。IPC 层在解析报文前拿它做回落，所以真相只有一份：
+    // 会话上的 producer 就是按这份参数建出来的。
+    producerDefaults(sessionId: string): ProducerOptions {
+        return this.producerHandle(sessionId).options;
     }
 
     // 顺序轮询，不用原生 listener：listener 回调无法背压，
@@ -439,7 +615,14 @@ export class NativeClientManager {
 
     // 循环结束后统一收尾：关资源、摘登记、把终止原因推给调用方，
     // 并把整个过程作为 session.settled 暴露出去，停止时等的是它而不是一个裸 close。
-    private runSession(session: Session, loop: Promise<void>, onEnd: (event: SessionEndEvent) => void): void {
+    // outcome 给一次性会话（「最近 N 条」的扫描）留的口子：循环里往里写一句人话，
+    // 收尾时带进会话结束事件，界面才说得清"是扫完了、还是撞到护栏停了"。
+    private runSession(
+        session: Session,
+        loop: Promise<void>,
+        onEnd: (event: SessionEndEvent) => void,
+        outcome: {detail?: string} = {},
+    ): void {
         const settle = (error?: unknown) =>
             withHardTimeout(session.close(), `session ${session.id} close failed`).then(() => {
                 this.sessions.delete(session.id);
@@ -450,7 +633,11 @@ export class NativeClientManager {
                               reason: 'error',
                               detail: error instanceof Error ? error.message : String(error),
                           }
-                        : {sessionId: session.id, reason: session.stopped ? 'stopped' : 'completed'},
+                        : {
+                              sessionId: session.id,
+                              reason: session.stopped ? 'stopped' : 'completed',
+                              detail: outcome.detail,
+                          },
                 );
             });
         // 两个分支都消费掉结果，循环里的异常因此不会变成未处理拒绝
@@ -465,21 +652,50 @@ export class NativeClientManager {
         onEnd: (event: SessionEndEvent) => void,
     ): Promise<{sessionId: string}> {
         const topic = topicFullName(params.tenant, params.namespace, params.topic, params.persistent);
-        const session = this.reserveSession(clusterId, `${clusterId}|${topic}|${params.subscription}`);
+        // Exclusive 的抢占是真的：两个 Exclusive 消费者会互相踢下线，界面上表现为
+        // 消息时隐时现，所以这种类型继续按订阅排他。其余三种原生就允许多消费者
+        // 同订阅（Shared 分摊、Failover 主备、Key_Shared 按 key 分片），工作台
+        // 因此可以对着同一个订阅再开一条会话做对比，不再被"已有会话"挡在外面。
+        const mode = params.subscriptionType === 'Exclusive' ? 'exclusive' : 'parallel';
+        const session = this.reserveSession(
+            clusterId,
+            `${clusterId}|${topic}|${params.subscription}`,
+            'consumer',
+            mode,
+        );
         const client = await this.getClient(clusterId, config);
 
         let consumer: Consumer;
         try {
-            consumer = await client.subscribe({
-                topic,
-                subscription: params.subscription,
-                subscriptionType: NATIVE_SUBSCRIPTION_TYPES[params.subscriptionType],
-                subscriptionInitialPosition: params.initialPosition,
-            });
+            consumer = await client.subscribe(
+                buildConsumerConfig(topic, {
+                    subscription: params.subscription,
+                    subscriptionType: NATIVE_SUBSCRIPTION_TYPES[params.subscriptionType],
+                    initialPosition: params.initialPosition,
+                    receiverQueueSize: params.receiverQueueSize,
+                    ackTimeoutMs: params.ackTimeoutMs,
+                    nAckRedeliverTimeoutMs: params.nAckRedeliverTimeoutMs,
+                    consumerName: params.consumerName,
+                    deadLetter: params.deadLetter,
+                }),
+            );
         } catch (error) {
             this.sessions.delete(session.id);
             throw error;
         }
+        const handle: ConsumerHandle = {
+            consumer,
+            clusterId,
+            topicUri: topic,
+            subscription: params.subscription,
+            subscriptionType: params.subscriptionType,
+            autoAck: params.autoAck,
+            received: 0,
+        };
+        if (params.consumerName) {
+            handle.consumerName = params.consumerName;
+        }
+        session.consumer = handle;
         session.close = async () => {
             await consumer.close();
         };
@@ -499,7 +715,12 @@ export class NativeClientManager {
                         throw error;
                     }
                 },
-                params.autoAck ? message => consumer.acknowledge(message) : undefined,
+                async (message: NativeMessage) => {
+                    handle.received += 1;
+                    if (params.autoAck) {
+                        await consumer.acknowledge(message);
+                    }
+                },
                 params.maxMessages ?? 0,
                 emit,
             ),
@@ -523,13 +744,19 @@ export class NativeClientManager {
             throw new Error('按时间读取需要指定 timestamp');
         }
         const seekTimestamp = params.from === 'timestamp' ? params.timestamp : undefined;
-        const session = this.reserveSession(clusterId, `${clusterId}|${topic}|reader|${params.from}`);
+        const session = this.reserveSession(
+            clusterId,
+            `${clusterId}|${topic}|reader|${params.from}`,
+            'reader',
+            'parallel',
+        );
         const client = await this.getClient(clusterId, config);
 
         let reader: Reader;
         try {
             reader = await client.createReader({
                 topic,
+                // recent 走 earliest：尾部锚点不存在，回溯扫描必须从头扫
                 startMessageId: params.from === 'latest' ? MessageId.latest() : MessageId.earliest(),
             });
             if (seekTimestamp) {
@@ -542,6 +769,17 @@ export class NativeClientManager {
         session.close = async () => {
             await reader.close();
         };
+
+        if (params.from === 'recent') {
+            const outcome: {detail?: string} = {};
+            this.runSession(
+                session,
+                this.scanRecent(session, reader, params.recentCount ?? 20, emit, outcome),
+                onEnd,
+                outcome,
+            );
+            return {sessionId: session.id};
+        }
 
         this.runSession(
             session,
@@ -563,6 +801,477 @@ export class NativeClientManager {
         );
 
         return {sessionId: session.id};
+    }
+
+    /**
+     * 从 earliest 扫到尾部，只留最后 count 条，一次性推给界面后结束会话。
+     *
+     * 为什么不"倒着读"：pulsar-client 1.18 的 Reader 只有正向游标，broker 侧也没有
+     * lastMessageId 的 REST 路由（这台的 admin 连 send/peek 都没有），所以拿"最近 N 条"
+     * 只能靠扫描。护栏撞到哪个都在 outcome 里写清楚，不然界面只显 N 条，人会以为
+     * Topic 就这么多消息。
+     */
+    private async scanRecent(
+        session: Session,
+        reader: Reader,
+        count: number,
+        emit: (batch: MessageBatch) => void,
+        outcome: {detail?: string},
+    ): Promise<void> {
+        const kept: Message[] = [];
+        let keptBytes = 0;
+        let scanned = 0;
+        let idleRounds = 0;
+        const deadline = Date.now() + RECENT_SCAN_MS;
+        let stoppedByGuard = '';
+
+        try {
+            while (!session.stopped) {
+                if (reader.hasNext()) {
+                    const message = await reader.readNext();
+                    scanned += 1;
+                    idleRounds = 0;
+                    const rendered = toRendererMessage(message);
+                    kept.push(rendered);
+                    keptBytes += rendered.data.length;
+                    while (kept.length > count || (keptBytes > RECENT_SCAN_MAX_BYTES && kept.length > 1)) {
+                        const dropped = kept.shift();
+                        keptBytes -= dropped ? dropped.data.length : 0;
+                    }
+                    if (scanned >= RECENT_SCAN_MAX_MESSAGES) {
+                        stoppedByGuard = `已扫描 ${scanned} 条到达上限，留下的可能不是真正的尾部`;
+                        break;
+                    }
+                    if (Date.now() >= deadline) {
+                        stoppedByGuard = `扫描超过 ${Math.round(RECENT_SCAN_MS / 1000)} 秒已停止，留下的可能不是真正的尾部`;
+                        break;
+                    }
+                    continue;
+                }
+                idleRounds += 1;
+                if (idleRounds >= RECENT_SCAN_IDLE_ROUNDS) {
+                    break;
+                }
+                await sleep(READER_POLL_MS);
+            }
+        } catch (error) {
+            if (!session.stopped) {
+                throw error;
+            }
+            return;
+        }
+
+        if (session.stopped) {
+            return;
+        }
+        if (kept.length > 0) {
+            emit({sessionId: session.id, messages: kept});
+        }
+        outcome.detail = stoppedByGuard
+            ? `回溯扫描结束：扫过 ${scanned} 条，取最近 ${kept.length} 条。${stoppedByGuard}`
+            : kept.length > 0
+              ? `回溯扫描结束：扫过 ${scanned} 条，取最近 ${kept.length} 条`
+              : '回溯扫描结束：这个 topic 上没有消息';
+    }
+
+    /**
+     * 建立常驻生产者会话。
+     *
+     * 之所以要常驻而不是每条现开现关：单发路径的耗时几乎全在 createProducer 的
+     * 元数据握手与 close 的收尾上，报文本身几十字节反而不是大头。工作台"发一条
+     * 试试"和连续发送都要复用同一条 producer，界面上看到的速率才有意义。
+     */
+    async startProducer(
+        clusterId: string,
+        config: NativeConnectionConfig,
+        params: {
+            tenant: string;
+            namespace: string;
+            topic: string;
+            persistent: boolean;
+            options: ProducerOptions;
+        },
+        onEnd: (event: SessionEndEvent) => void,
+    ): Promise<ProducerSessionInfo> {
+        const topic = topicFullName(params.tenant, params.namespace, params.topic, params.persistent);
+        const session = this.reserveSession(clusterId, `${clusterId}|${topic}|producer`, 'producer', 'parallel');
+        const client = await this.getClient(clusterId, config);
+
+        let producer: Producer;
+        try {
+            producer = await client.createProducer(buildProducerConfig(topic, params.options));
+        } catch (error) {
+            this.sessions.delete(session.id);
+            throw error;
+        }
+        // 用原生返回的名字而不是只认用户填的：没填时 broker 侧那条 producer 仍然有名字，
+        // 界面显示的是 broker 上真实存在的标识，而不是我们起的另一个。
+        const producerName = producer.getProducerName() || params.options.producerName || `producer-${session.id}`;
+        const handle: ProducerHandle = {
+            producer,
+            clusterId,
+            topicUri: topic,
+            producerName,
+            options: params.options,
+            flowRunning: false,
+        };
+        session.producer = handle;
+        // 顺序不能反两处：一是连续发送还在灌的时候先 close，等于把 send 打在已销毁的
+        // 原生对象上（实测段错误），所以先停循环并排空在途；二是批量模式下最后一段
+        // 还压在原生队列里，先 close 就是把它丢掉，因此 flush 在 close 之前。
+        session.close = async () => {
+            await this.endFlow(handle);
+            await producer.flush();
+            await producer.close();
+        };
+
+        this.runSession(session, this.dwell(session), onEnd);
+
+        return this.producerInfo(session.id, handle);
+    }
+
+    // 逐条发送、逐条记账。整批中断是最没用的行为：一批里往往是某一条超过单条上限
+    // 或取不到字段，剩下的照发，界面把失败的那几条单列出来。
+    // aborted 由调用方决定"这条 producer 还算不算数"：常驻会话被停掉时剩下的每条
+    // 都会抛同一个原生错误，一次性发送则没有这种中途作废。
+    private async sendWith(
+        producer: Producer,
+        items: OutboundMessage[],
+        aborted: () => boolean,
+    ): Promise<ProducerSendResult> {
+        const result: ProducerSendResult = {messageIds: [], bytes: 0, failures: []};
+        for (let index = 0; index < items.length; index += 1) {
+            const item = items[index];
+            try {
+                const messageId = await producer.send(toProducerMessage(item));
+                result.messageIds.push(messageId.toString());
+                result.bytes += item.bytes;
+            } catch (error) {
+                // 报的是这条消息在批次里的原始序号（不是 items 的下标）：解析阶段
+                // 就失败的那几条不在 items 里，两边共用一套序号才对得上。
+                if (aborted()) {
+                    for (let rest = index; rest < items.length; rest += 1) {
+                        result.failures.push({index: items[rest].sourceIndex, error: '会话已停止，本条未发送'});
+                    }
+                    break;
+                }
+                const detail = error instanceof Error ? error.message : String(error);
+                result.failures.push({index: item.sourceIndex, error: detail});
+            }
+        }
+        return result;
+    }
+
+    async sendThroughSession(sessionId: string, items: OutboundMessage[]): Promise<ProducerSendResult> {
+        const handle = this.producerHandle(sessionId);
+        return this.sendWith(handle.producer, items, () => !this.sessions.get(sessionId));
+    }
+
+    // 批量模式下把还压在队列里的最后一段立刻走完。发送返回的 messageIds 本身已经
+    // 代表 broker 收下了，这里给的是"我现在就要去对面核对"的手动一步。
+    async flushSession(sessionId: string): Promise<void> {
+        await this.producerHandle(sessionId).producer.flush();
+    }
+
+    // ========== 连续发送（flow） ==========
+
+    // 会话快照。producerName 取原生返回的那个，界面显示的必须与 broker 侧一致。
+    private producerInfo(sessionId: string, handle: ProducerHandle): ProducerSessionInfo {
+        return {
+            sessionId,
+            clusterId: handle.clusterId,
+            topicUri: handle.topicUri,
+            producerName: handle.producerName,
+            connected: handle.producer.isConnected(),
+            flowRunning: handle.flowRunning,
+        };
+    }
+
+    // 速率按"上一次推送到现在"这段窗口算，不用整轮平均：用户中途改速率、
+    // broker 开始限流，都会被整轮平均抹成一条看不出变化的直线。
+    private flowStats(handle: ProducerHandle, flow: FlowState, running: boolean, error?: string): ProducerRunStats {
+        const now = Date.now();
+        const sinceMs = Math.max(1, now - flow.lastStatsAt);
+        const stats: ProducerRunStats = {
+            sessionId: flow.sessionId,
+            sent: flow.sent,
+            failed: flow.failed,
+            bytesSent: flow.bytesSent,
+            elapsedMs: now - flow.startedAt,
+            msgPerSec: round2(((flow.sent - flow.lastStatsSent) / sinceMs) * 1000),
+            mbPerSec: round4(((flow.bytesSent - flow.lastStatsBytes) * 1000) / sinceMs / (1024 * 1024)),
+            latency: flow.latency.summarize(),
+            flowRunning: running,
+        };
+        if (flow.lastError) {
+            stats.lastError = flow.lastError;
+        }
+        if (error) {
+            stats.error = error;
+        }
+        handle.lastStats = stats;
+        return stats;
+    }
+
+    private pushFlowStats(
+        handle: ProducerHandle,
+        flow: FlowState,
+        emit: (stats: ProducerRunStats) => void,
+        force = false,
+    ): void {
+        if (!force && Date.now() - flow.lastStatsAt < FLOW_STATS_MS) {
+            return;
+        }
+        const stats = this.flowStats(handle, flow, true);
+        flow.lastStatsAt = Date.now();
+        flow.lastStatsSent = flow.sent;
+        flow.lastStatsBytes = flow.bytesSent;
+        emit(stats);
+    }
+
+    // 停掉这一轮的连续发送并等在途落地。会话收尾（close 前）与界面点停止都走这里，
+    // 只有这一处会置 stopped=true 后等 done，所以不存在"两个停止互相等"的路径。
+    private async endFlow(handle: ProducerHandle): Promise<void> {
+        const flow = handle.flow;
+        if (!flow) {
+            return;
+        }
+        flow.stopped = true;
+        await withHardTimeout(flow.done, `flow ${flow.sessionId} did not settle`, CLOSE_TIMEOUT_MS);
+        handle.flowRunning = false;
+    }
+
+    async startFlow(
+        sessionId: string,
+        params: ProducerFlowParams,
+        emit: (stats: ProducerRunStats) => void,
+    ): Promise<ProducerSessionInfo> {
+        const session = this.sessions.get(sessionId);
+        const handle = session?.producer;
+        if (!session || !handle || session.stopped) {
+            throw new Error('生产者会话不存在或已停止，请重新建立连接');
+        }
+        if (handle.flowRunning) {
+            throw new Error('这条会话已经有一轮连续发送在跑，先停掉它');
+        }
+        const options = messageOptions(handle.options, params.options);
+        const flow: FlowState = {
+            sessionId,
+            stopped: false,
+            limiter: createRateLimiter(params.ratePerSecond),
+            ratePerSecond: params.ratePerSecond,
+            totalMessages: params.totalMessages,
+            maxInFlight: params.maxInFlight,
+            stopOnError: params.stopOnError,
+            window: new SendWindow(params.maxInFlight),
+            latency: createLatencyStats(),
+            issued: 0,
+            sent: 0,
+            failed: 0,
+            bytesSent: 0,
+            startedAt: Date.now(),
+            lastStatsAt: Date.now(),
+            lastStatsSent: 0,
+            lastStatsBytes: 0,
+            done: Promise.resolve(),
+        };
+        handle.flow = flow;
+        handle.flowRunning = true;
+        flow.done = this.runFlow(session, handle, flow, params.template, options, emit);
+        // 循环内部的异常都在这条链上收掉，否则停止时没人 await 就成未处理拒绝
+        flow.done.catch(() => undefined);
+        return this.producerInfo(sessionId, handle);
+    }
+
+    private async runFlow(
+        session: Session,
+        handle: ProducerHandle,
+        flow: FlowState,
+        template: ProducerFlowParams['template'],
+        options: ReturnType<typeof messageOptions>,
+        emit: (stats: ProducerRunStats) => void,
+    ): Promise<void> {
+        let endError: string | undefined;
+        try {
+            while (
+                !flow.stopped &&
+                !session.stopped &&
+                (flow.totalMessages === 0 || flow.issued < flow.totalMessages)
+            ) {
+                const want =
+                    flow.totalMessages === 0 ? FLOW_CHUNK : Math.min(FLOW_CHUNK, flow.totalMessages - flow.issued);
+                const batch = resolveBatch(template, want, options, flow.issued);
+                flow.issued += want;
+                flow.failed += batch.failures.length;
+                if (batch.failures.length === want) {
+                    // 整批都解析不出来：继续只是把失败数往上刷，模板本身不会自己修好
+                    endError = batch.failures[0].error;
+                    flow.lastError = endError;
+                    break;
+                }
+                for (const item of batch.items) {
+                    await flow.limiter();
+                    if (flow.stopped || session.stopped) {
+                        break;
+                    }
+                    await flow.window.waitForSlot();
+                    const startedAt = performance.now();
+                    flow.window.track(
+                        handle.producer.send(toProducerMessage(item)).then(
+                            () => {
+                                flow.sent += 1;
+                                flow.bytesSent += item.bytes;
+                                flow.latency.add(performance.now() - startedAt);
+                            },
+                            (error: unknown) => {
+                                const detail = error instanceof Error ? error.message : String(error);
+                                flow.failed += 1;
+                                flow.lastError = detail;
+                                // broker 明确说容量不够时继续灌只会刷满日志；stopOnError 同理
+                                if (flow.stopOnError || isCapacityError(detail)) {
+                                    flow.stopped = true;
+                                }
+                            },
+                        ),
+                    );
+                    this.pushFlowStats(handle, flow, emit);
+                }
+                this.pushFlowStats(handle, flow, emit);
+            }
+        } catch (error) {
+            // 走到这里的是循环自身的异常（解析之外的原生调用抛错、限速器意外）
+            endError = error instanceof Error ? error.message : String(error);
+            flow.lastError = endError;
+        } finally {
+            // 在途的发送必须落地之后再报终态：否则界面看到"已停止"而 broker 那边
+            // 还在陆续收消息，数字对不上。drain 只等已交给原生的那些条。
+            await flow.window.drain();
+            handle.flowRunning = false;
+            emit(this.flowStats(handle, flow, false, endError));
+            handle.flow = undefined;
+        }
+    }
+
+    async stopFlow(sessionId: string): Promise<ProducerRunStats | null> {
+        const handle = this.producerHandle(sessionId);
+        await this.endFlow(handle);
+        return handle.lastStats || null;
+    }
+
+    // 改速率只换限速器，不换 producer：连续发送中途提速是常态
+    //（先看 100/s 通不通，再往上加），为此断开重连会把已建立的订阅与
+    // broker 侧的 producer 计数都搅乱。
+    setFlowRate(sessionId: string, ratePerSecond: number): ProducerSessionInfo {
+        const handle = this.producerHandle(sessionId);
+        const flow = handle.flow;
+        if (!flow || !handle.flowRunning) {
+            throw new Error('这条会话没有正在跑的连续发送');
+        }
+        flow.ratePerSecond = ratePerSecond;
+        flow.limiter = createRateLimiter(ratePerSecond);
+        return this.producerInfo(sessionId, handle);
+    }
+
+    listProducerSessions(clusterId?: string): ProducerSessionInfo[] {
+        const infos: ProducerSessionInfo[] = [];
+        for (const session of this.sessions.values()) {
+            if (session.kind !== 'producer' || session.stopped || !session.producer) {
+                continue;
+            }
+            if (clusterId && session.clusterId !== clusterId) {
+                continue;
+            }
+            const handle = session.producer;
+            infos.push(this.producerInfo(session.id, handle));
+        }
+        return infos;
+    }
+
+    // 消费者工作台区分"这条会话还活着"和"界面刚才被卸载过"：切页签不会停会话，
+    // 重开工作台时靠这份列表把卡片接回来，否则会多出一条看不见却占着同一订阅的会话。
+    listConsumerSessions(clusterId?: string): ConsumerSessionInfo[] {
+        const infos: ConsumerSessionInfo[] = [];
+        for (const session of this.sessions.values()) {
+            if (session.kind !== 'consumer' || session.stopped || !session.consumer) {
+                continue;
+            }
+            if (clusterId && session.clusterId !== clusterId) {
+                continue;
+            }
+            infos.push(this.consumerInfo(session.id, session.consumer));
+        }
+        return infos;
+    }
+
+    private consumerInfo(sessionId: string, handle: ConsumerHandle): ConsumerSessionInfo {
+        const info: ConsumerSessionInfo = {
+            sessionId,
+            clusterId: handle.clusterId,
+            topicUri: handle.topicUri,
+            subscription: handle.subscription,
+            subscriptionType: handle.subscriptionType,
+            autoAck: handle.autoAck,
+            received: handle.received,
+            // 未确认条数要等手动 ack 那一批（逐条确认的登记表在那里）；
+            // 现在报 0 会读成"全都确认过了"，所以界面在这一批不显示这一项。
+            pendingAcks: 0,
+        };
+        if (handle.consumerName) {
+            info.consumerName = handle.consumerName;
+        }
+        return info;
+    }
+
+    // 会话 id → 常驻 consumer。和 producerHandle 同一口径：取不到就明确报错，
+    // 绝不静默重建一条 consumer——那会让界面上那条卡片的计数与实际连接对不上。
+    private consumerHandle(sessionId: string): {session: Session; handle: ConsumerHandle} {
+        const session = this.sessions.get(sessionId);
+        if (!session || session.kind !== 'consumer' || session.stopped) {
+            throw new Error('消费者会话不存在或已停止，请重新建立连接');
+        }
+        const handle = session.consumer;
+        if (!handle) {
+            throw new Error('消费者会话状态不完整，请停止后重建');
+        }
+        return {session, handle};
+    }
+
+    consumerSession(sessionId: string): ConsumerSessionInfo {
+        const {session, handle} = this.consumerHandle(sessionId);
+        return this.consumerInfo(session.id, handle);
+    }
+
+    /**
+     * 一次性发送：现开一条 producer、发完就关，不建会话。
+     * 给 TopicDetail 的轻量发送和"发一条试试"用——那些场景留着常驻连接只会让
+     * 用户分不清哪条 topic 还挂着连接，而握手开销本来也不是它们在意的事。
+     */
+    async sendOnce(
+        clusterId: string,
+        config: NativeConnectionConfig,
+        params: {
+            tenant: string;
+            namespace: string;
+            topic: string;
+            persistent: boolean;
+            options: ProducerOptions;
+        },
+        items: OutboundMessage[],
+    ): Promise<ProducerSendResult> {
+        const topic = topicFullName(params.tenant, params.namespace, params.topic, params.persistent);
+        const client = await this.getClient(clusterId, config);
+        const work = (async (): Promise<ProducerSendResult> => {
+            const producer: Producer = await client.createProducer(buildProducerConfig(topic, params.options));
+            // sendWith 逐条吞掉发送异常、自身不 reject，所以这里没有 try/finally：
+            // 关掉这条一次性 producer 是唯一必经的收尾。
+            const result = await this.sendWith(producer, items, () => false);
+            result.closeError = await closeProducer(producer);
+            return result;
+        })();
+        // 登记必须在 await 之前，理由与 send() 相同：createProducer 到 close 之间
+        // 集群被删或改配置的话，removeCluster 会直接关原生 Client，而下面还挂着 producer。
+        this.trackShortLived(clusterId, work);
+        return work;
     }
 
     async stopSessionById(sessionId: string): Promise<boolean> {

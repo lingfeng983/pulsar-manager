@@ -32,12 +32,33 @@ const HomePage: React.FC = () => {
     // 所以页头留一个挂载点，由它 portal 进来（搬状态等于把整块拓扑逻辑上提一层）。
     const [topoSlot, setTopoSlot] = useState<HTMLElement | null>(null);
 
-    const {clusters, loading, error, fetchClusters, deleteClusterAsync, setActiveCluster, setExpandedCluster} =
-        useClusterStore();
+    const {
+        clusters,
+        loading,
+        checking,
+        error,
+        fetchClusters,
+        refreshClusterStatus,
+        deleteClusterAsync,
+        setActiveCluster,
+        setExpandedCluster,
+    } = useClusterStore();
 
     useEffect(() => {
-        fetchClusters();
-    }, [fetchClusters]);
+        void fetchClusters();
+        // 首屏就探一次活：列表里的状态是上次退出时落库的，不探就会一直挂着旧值。
+        // 探活慢（不可达集群最坏要试完四个候选端点），所以不挡页面，探完自己刷徽标。
+        void refreshClusterStatus();
+    }, [fetchClusters, refreshClusterStatus]);
+
+    const handleRefreshStatus = async () => {
+        const ok = await refreshClusterStatus();
+        if (ok) {
+            message.success('集群状态已刷新');
+        } else {
+            message.error('刷新集群状态失败');
+        }
+    };
 
     // 筛选在渲染层做：集群数量本来就小，为了过滤再发一轮 IPC 没有意义。
     const filteredClusters = useMemo(() => {
@@ -173,9 +194,9 @@ const HomePage: React.FC = () => {
                             />
                             <IconButton
                                 icon={<ReloadOutlined />}
-                                label="刷新集群列表"
-                                loading={loading}
-                                onClick={() => void fetchClusters()}
+                                label="刷新集群状态"
+                                loading={loading || checking}
+                                onClick={() => void handleRefreshStatus()}
                             />
                         </>
                     ) : (

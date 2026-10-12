@@ -1,9 +1,10 @@
-import React, {useState, useEffect, useCallback, useRef} from 'react';
-import {Button, Tag, type TableColumnsType} from 'antd';
-import {FileTextOutlined, DatabaseOutlined, TagOutlined, ArrowRightOutlined} from '@ant-design/icons';
+import React, {useMemo, useState, useEffect, useCallback, useRef} from 'react';
+import {Button, Input, Tag, type TableColumnsType} from 'antd';
+import {FileTextOutlined, DatabaseOutlined, TagOutlined, ArrowRightOutlined, SearchOutlined} from '@ant-design/icons';
 import {useTabStore} from '../store/tabs';
 import {loadTopics} from '../hooks/resourceCache';
 import {shortName} from '../utils/format';
+import {fuzzyMatch} from '../utils/fuzzyMatch';
 import {topicTab} from '../utils/tabIds';
 import ResourceDetailPage, {type ResourceStat} from '../components/common/ResourceDetailPage';
 
@@ -24,6 +25,7 @@ const NamespaceDetail: React.FC<NamespaceDetailProps> = ({clusterId, tenant, nam
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [topics, setTopics] = useState<TopicInfo[]>([]);
+    const [topicFilter, setTopicFilter] = useState('');
     const [namespaceInfo, setNamespaceInfo] = useState<{
         replicationClusters: string[];
         clusters: string[];
@@ -108,6 +110,13 @@ const NamespaceDetail: React.FC<NamespaceDetailProps> = ({clusterId, tenant, nam
         },
     ];
 
+    // 筛选在渲染层做：topic 清单已经整份在手，为一个输入框再发一轮 IPC 不值当
+    const filtering = topicFilter.trim().length > 0;
+    const visibleTopics = useMemo(
+        () => (filtering ? topics.filter(t => fuzzyMatch(t.name, topicFilter)) : topics),
+        [topics, topicFilter, filtering],
+    );
+
     const stats: ResourceStat[] = [
         {key: 'topics', title: 'Topic 数量', value: topics.length, prefix: <FileTextOutlined />},
         {
@@ -134,10 +143,26 @@ const NamespaceDetail: React.FC<NamespaceDetailProps> = ({clusterId, tenant, nam
                 {label: '集群', tags: namespaceInfo?.clusters ?? [], fallback: '无'},
             ]}
             listLabel="Topics"
-            listTitle={`Topic 列表 (${topics.length})`}
-            listEmptyText="暂无 Topic"
+            listTitle={
+                filtering
+                    ? `Topic 列表 (命中 ${visibleTopics.length} / 共 ${topics.length})`
+                    : `Topic 列表 (${topics.length})`
+            }
+            listEmptyText={filtering ? '没有匹配的 topic' : '暂无 Topic'}
+            listActions={
+                <Input
+                    size="small"
+                    allowClear
+                    style={{width: 180}}
+                    prefix={<SearchOutlined />}
+                    placeholder="筛选 topic"
+                    aria-label="按名称模糊筛选 topic"
+                    value={topicFilter}
+                    onChange={event => setTopicFilter(event.target.value)}
+                />
+            }
             columns={topicColumns}
-            dataSource={topics}
+            dataSource={visibleTopics}
             rowKey="name"
         />
     );

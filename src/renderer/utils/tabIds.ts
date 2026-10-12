@@ -28,6 +28,29 @@ export const topicTab = (ref: TopicTabRef): TabItem => ({
     data: {...ref, persistent: ref.persistent !== false},
 });
 
+// 生产者工作台与 Topic 详情分成两个页签（id 前缀不同但都从 topicTabId 派生）：
+// 详情里的轻量发送不留连接，工作台挂的是常驻 producer，同一个页签里用户会分不清
+// 关掉这个标签到底断没断掉那条 producer。
+export const producerTabId = (ref: TopicTabRef): string => `producer-${topicTabId(ref)}`;
+
+export const producerTab = (ref: TopicTabRef): TabItem => ({
+    id: producerTabId(ref),
+    title: `${ref.topic} 生产`,
+    type: 'producer',
+    data: {...ref, persistent: ref.persistent !== false},
+});
+
+// 消费者工作台同样独立成页签：一条 topic 上常常要一边看着订阅收消息、
+// 一边在详情里翻订阅列表，两个方向各自留一个页签比挤在一页里清楚。
+export const consumerTabId = (ref: TopicTabRef): string => `consumer-${topicTabId(ref)}`;
+
+export const consumerTab = (ref: TopicTabRef): TabItem => ({
+    id: consumerTabId(ref),
+    title: `${ref.topic} 消费`,
+    type: 'consumer',
+    data: {...ref, persistent: ref.persistent !== false},
+});
+
 export const namespaceTabId = (clusterId: string, tenant: string, namespace: string): string =>
     `ns-${clusterId}-${tenant}-${namespace}`;
 
