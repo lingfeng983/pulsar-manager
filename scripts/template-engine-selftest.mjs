@@ -172,7 +172,9 @@ check('float 不超过指定小数位且在区间内', () => {
     for (let i = 0; i < 200; i += 1) {
         const v = resolve('{"v":"${float(1,999,3)}"}').v;
         assert.ok(v >= 1 && v <= 999);
-        assert.ok(String(v).split('.')[1]?.length <= 3, `小数位超了：${v}`);
+        // 落在整数上（364.000 收掉尾零就是 364）是合法的：小数位数是 0
+        const decimals = String(v).split('.')[1];
+        assert.ok(!decimals || decimals.length <= 3, `小数位超了：${v}`);
     }
 });
 

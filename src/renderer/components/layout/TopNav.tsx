@@ -46,6 +46,10 @@ const TopNav: React.FC = () => {
     const {theme, setTheme} = useThemeStore();
     const {addTab} = useTabStore();
     const {clusters} = useClusterStore();
+    // 集群列表收进 ref：扇出搜索读最新值，但不把它放进 searchResources 依赖。否则任何
+    // 一次集群探活写回都会换掉 clusters 数组，把防抖 effect 重新触发一遍、重发跨集群 IPC。
+    const clustersRef = useRef(clusters);
+    clustersRef.current = clusters;
     const [searchValue, setSearchValue] = useState('');
     const [aboutModalOpen, setAboutModalOpen] = useState(false);
     const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
@@ -103,7 +107,7 @@ const TopNav: React.FC = () => {
                 const full = () => results.length >= SEARCH_RESULT_LIMIT || isStale();
 
                 // 搜索集群
-                clusters.forEach(cluster => {
+                clustersRef.current.forEach(cluster => {
                     if (results.length >= SEARCH_RESULT_LIMIT) {
                         return;
                     }
@@ -118,7 +122,7 @@ const TopNav: React.FC = () => {
                 });
 
                 // 搜索租户、命名空间、Topic（走共享缓存，避免每次输入都重新打全量请求）
-                for (const cluster of clusters) {
+                for (const cluster of clustersRef.current) {
                     if (full()) {
                         break;
                     }
@@ -178,7 +182,9 @@ const TopNav: React.FC = () => {
                                             const topicName = shortName(topic.name);
                                             if (topicName.toLowerCase().includes(lower)) {
                                                 results.push({
-                                                    key: `topic-${cluster.id}-${tenant.name}-${namespace}-${topicName}`,
+                                                    key: `topic-${cluster.id}-${tenant.name}-${namespace}-${
+                                                        topic.persistent ? 'p' : 'n'
+                                                    }-${topicName}`,
                                                     label: [cluster.name, tenant.name, namespace, topicName].join(
                                                         ' / ',
                                                     ),
@@ -218,7 +224,9 @@ const TopNav: React.FC = () => {
                 }
             }
         },
-        [clusters],
+        // 只读 ref、setter 与模块函数，全部稳定：身份不变，防抖 effect 才不会被集群
+        // 探活写回带着重跑。
+        [],
     );
 
     // 处理搜索变化

@@ -25,7 +25,17 @@ export interface ResolvedBatch {
     items: OutboundMessage[];
     /** index 是本次 count 里的序号（从 0 起），界面按它把失败条目对上第几条 */
     failures: {index: number; error: string}[];
+    /** 本次实际处理掉的条数（含解析失败的）；小于请求的 count 说明还有剩余 */
+    consumed: number;
+    /** 本批已解析条目的字节总和，调用方用它做载荷预算 */
+    bytes: number;
 }
+
+// 单批在主进程里最多物化多少条、多少字节待发正文。count 上限是 1000，
+// 而模板正文 1MB、解析后单条上限 5MB，一次点下去最坏就是 5GB 字符串同时
+// 活着；解析与发送因此必须分批交替，攒够一批预算就交出去、发完再解下一批。
+const CHUNK_MAX_MESSAGES = 200;
+const CHUNK_MAX_BYTES = 16 * 1024 * 1024;
 
 const DEFAULT_MESSAGE_OPTIONS: ProducerMessageOptions = {};
 
@@ -103,8 +113,11 @@ export function messageOptions(
 }
 
 /**
- * 解析 count 条报文。每一条重新走一遍占位符（随机值因此条与条不同），
- * seq() 靠 messageIndex 递进，同一 seed 下整批内容与顺序都可复现。
+ * 解析报文，一次最多一批（见上面的预算）。每一条重新走一遍占位符（随机值因此
+ * 条与条不同），seq() 靠 messageIndex 递进，同一 seed 下整批内容与顺序都可复现。
+ *
+ * consumed 小于 count 表示"这批到此为止，剩下的还没解"，调用方带着推进过的
+ * startIndex 再叫一次即可；一次点 1000 条大报文不会在主进程里同时存在。
  *
  * startIndex 给连续发送用：那一轮是分成许多小批解析的，序号必须整轮连续，
  * 否则同一 seed 下"第 60 条"在单发路径和连续路径上会解析成不同内容。
@@ -117,7 +130,12 @@ export function resolveBatch(
 ): ResolvedBatch {
     const items: OutboundMessage[] = [];
     const failures: {index: number; error: string}[] = [];
+    let consumed = 0;
+    let bytes = 0;
     for (let offset = 0; offset < count; offset += 1) {
+        if (consumed >= CHUNK_MAX_MESSAGES || (items.length > 0 && bytes >= CHUNK_MAX_BYTES)) {
+            break;
+        }
         const index = startIndex + offset;
         const resolved = resolveTemplate(template.body, template.variables, {
             seed: options.seed,
@@ -127,6 +145,7 @@ export function resolveBatch(
             // 主进程侧 tsconfig 是 strict:false，判别联合在 !resolved.ok 下不收窄
             // （窄化要 strictNullChecks），所以这里显式读 error 字段而不是指望类型缩好。
             failures.push({index, error: (resolved as {error?: string}).error ?? '模板解析失败'});
+            consumed += 1;
             continue;
         }
         const item: OutboundMessage = {
@@ -139,11 +158,14 @@ export function resolveBatch(
             applyOptions(item, options);
         } catch (error) {
             failures.push({index, error: error instanceof Error ? error.message : String(error)});
+            consumed += 1;
             continue;
         }
+        consumed += 1;
+        bytes += item.bytes;
         items.push(item);
     }
-    return {items, failures};
+    return {items, failures, consumed, bytes};
 }
 
 /** 转成原生 ProducerMessage。绑定里逐条的字段只有这几个。 */

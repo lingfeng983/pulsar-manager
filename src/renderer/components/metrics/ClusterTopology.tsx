@@ -82,8 +82,18 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId: initialClus
 
     const {clusters, fetchClusters} = useClusterStore();
 
-    // 如果传入了特定集群，则使用该集群，否则支持选择
-    const selectedCluster = selectedClusterId || clusters.find(c => c.status === 'connected')?.id || clusters[0]?.id;
+    // 全局拓扑页签下"默认选中哪个集群"只在首次拿到集群列表时定一次：cluster.ts 的探活
+    // 会整份替换 clusters 数组，若每次渲染都重算"第一个已连接"，用户没碰选择器也会被
+    // 静默切到别的集群并重发全量拓扑 IPC。传了具体集群时 selectedClusterId 已有值，不插手。
+    useEffect(() => {
+        if (selectedClusterId || clusters.length === 0) {
+            return;
+        }
+        const connectedCluster = clusters.find(c => c.status === 'connected');
+        setSelectedClusterId(connectedCluster?.id || clusters[0].id);
+    }, [clusters, selectedClusterId]);
+
+    const selectedCluster = selectedClusterId;
 
     useEffect(() => {
         fetchClusters();

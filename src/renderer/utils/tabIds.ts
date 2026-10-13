@@ -21,9 +21,13 @@ export interface TopicTabRef {
 export const topicTabId = ({clusterId, tenant, namespace, topic, persistent}: TopicTabRef): string =>
     `topic-${clusterId}-${tenant}-${namespace}-${persistent === false ? 'non-persistent' : 'persistent'}-${topic}`;
 
+// 标题也要带区分：两个同名 topic 的页签并排时只写着 t1 和 t1，点开之前根本分不出
+// 哪个是非持久化那条（id 已经区分了，但 id 不显示给用户）。
+const topicTitle = ({topic, persistent}: TopicTabRef): string => (persistent === false ? `${topic}（非持久）` : topic);
+
 export const topicTab = (ref: TopicTabRef): TabItem => ({
     id: topicTabId(ref),
-    title: ref.topic,
+    title: topicTitle(ref),
     type: 'topic',
     data: {...ref, persistent: ref.persistent !== false},
 });
@@ -35,7 +39,7 @@ export const producerTabId = (ref: TopicTabRef): string => `producer-${topicTabI
 
 export const producerTab = (ref: TopicTabRef): TabItem => ({
     id: producerTabId(ref),
-    title: `${ref.topic} 生产`,
+    title: `${topicTitle(ref)} 生产`,
     type: 'producer',
     data: {...ref, persistent: ref.persistent !== false},
 });
@@ -46,7 +50,7 @@ export const consumerTabId = (ref: TopicTabRef): string => `consumer-${topicTabI
 
 export const consumerTab = (ref: TopicTabRef): TabItem => ({
     id: consumerTabId(ref),
-    title: `${ref.topic} 消费`,
+    title: `${topicTitle(ref)} 消费`,
     type: 'consumer',
     data: {...ref, persistent: ref.persistent !== false},
 });

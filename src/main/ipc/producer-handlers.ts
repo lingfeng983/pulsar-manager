@@ -8,11 +8,12 @@ import {
     ProducerStartSchema,
     SessionIdSchema,
     insertOperationLog,
+    insertSendHistory,
     registerHandler,
     registerNativeHandler,
 } from './_shared';
 import {nativeClientManager, topicFullName} from '../services/pulsar-native-client';
-import {messageOptions, resolveBatch} from '../services/producer-send';
+import {messageOptions} from '../services/producer-send';
 import {sendToRenderer} from './stream';
 import {MESSAGE_STREAM_CHANNELS} from '../../shared/types';
 import type {
@@ -21,6 +22,7 @@ import type {
     ProducerOptions,
     ProducerRunStats,
     ProducerSendResult,
+    ProducerSessionInfo,
     SessionEndEvent,
 } from '../../shared/types';
 import {createLogger} from '../utils/logger';
@@ -37,13 +39,45 @@ function needOptions(options: unknown): ProducerOptions {
     return options as ProducerOptions;
 }
 
-// 解析失败与发送失败说的是同一条消息（序号都取本次 count 里的位置），
-// 接在一起按序号排好，界面才能把"第 3 条没发出去"读成第 3 条。
-function joinFailures(
-    resolved: {index: number; error: string}[],
-    sent: {index: number; error: string}[],
-): {index: number; error: string}[] {
-    return [...resolved, ...sent].sort((a, b) => a.index - b.index);
+// 历史只存正文前缀，不存整篇载荷（单条上限 5MB，落库就是几十 GB）。
+const HISTORY_PREVIEW_CHARS = 400;
+
+function preview(body: string): string {
+    return body.length > HISTORY_PREVIEW_CHARS ? `${body.slice(0, HISTORY_PREVIEW_CHARS)}…` : body;
+}
+
+// 历史是旁路：写不进去（磁盘满、库被锁）不能让已经发出去的消息在界面上变成失败，所以吞异常只留日志。
+function recordSendHistory(entry: {
+    clusterId: string;
+    topic: string;
+    templateName?: string;
+    templateId?: string;
+    /** 模板正文（内联报文也走这里，历史记的就是这次投的报文长什么样） */
+    body: string;
+    sent: number;
+    bytes: number;
+    messageId?: string | null;
+    /** 失败原因：整批一条没出去时必填，部分失败时给第一条 */
+    failure?: string;
+}): void {
+    try {
+        insertSendHistory({
+            cluster_id: entry.clusterId,
+            topic_uri: entry.topic,
+            template_id: entry.templateId ?? null,
+            template_name: entry.templateName?.trim() || '内联报文',
+            body_preview: preview(entry.body),
+            // 逐条正文此时已经在原生层释放（分批解析发送），这里记的是平均每条的体积
+            body_bytes: entry.sent > 0 ? Math.round(entry.bytes / entry.sent) : 0,
+            message_count: entry.sent,
+            message_id: entry.messageId ?? null,
+            status: entry.sent > 0 ? 'success' : 'failure',
+            // 部分失败时留第一条的原因，全成功留空；一条都没出去时这句就是界面要显的那句话
+            error_message: entry.failure ?? (entry.sent > 0 ? null : '未发出任何消息'),
+        });
+    } catch (error) {
+        log.warn(`发送历史写入失败：${error instanceof Error ? error.message : String(error)}`);
+    }
 }
 
 function report(clusterId: string, topic: string, detail: string, ok: boolean): void {
@@ -87,25 +121,40 @@ export function registerProducerHandlers() {
     registerHandler('producer:send', async (params: unknown): Promise<ProducerSendResult> => {
         const input = ProducerSendSchema.parse(params);
         const sessionId = input.sessionId;
+        const topic = topicFullName(input.tenant, input.namespace, input.topic, input.persistent);
         const options = messageOptions(
             nativeClientManager.producerDefaults(sessionId),
             input.options as ProducerMessageOptions | undefined,
         );
-        const batch = resolveBatch(input.template as MessageTemplateBody, input.count, options);
-        if (batch.items.length === 0) {
-            // 一条都没解析出来就不碰 broker：把解析错误原样交回去，
-            // 界面显示"0 条已发 / N 条失败"，而不是一句笼统的发送失败。
-            log.warn(`session ${sessionId}: 本次 ${input.count} 条全部解析失败`);
-            return {messageIds: [], bytes: 0, failures: batch.failures};
+        // 解析与发送在原生层逐批交替（每条都重新过一遍占位符，序号跨批连续），
+        // 一次点 1000 条大报文时界面拿到的仍然是完整的失败清单，而主进程同时
+        // 只持有一批正文。全部解析失败时 items 为空，压根不碰 broker。
+        const result = await nativeClientManager.sendThroughSession(
+            sessionId,
+            input.template as MessageTemplateBody,
+            input.count,
+            options,
+        );
+        if (result.messageIds.length === 0) {
+            log.warn(`session ${sessionId}: 本次 ${input.count} 条全部未发出`);
         }
-        const result = await nativeClientManager.sendThroughSession(sessionId, batch.items);
-        result.failures = joinFailures(batch.failures, result.failures);
         report(
             input.clusterId,
-            topicFullName(input.tenant, input.namespace, input.topic, input.persistent),
+            topic,
             `经会话发送 ${result.messageIds.length} 条，失败 ${result.failures.length} 条`,
             result.messageIds.length > 0,
         );
+        recordSendHistory({
+            clusterId: input.clusterId,
+            topic,
+            templateName: input.templateName,
+            templateId: input.templateId,
+            body: (input.template as MessageTemplateBody).body,
+            sent: result.messageIds.length,
+            bytes: result.bytes,
+            messageId: result.messageIds[0] ?? null,
+            failure: result.failures[0]?.error,
+        });
         return result;
     });
 
@@ -114,6 +163,37 @@ export function registerProducerHandlers() {
     // 多出"改了配置却还在往旧连接里灌"的错觉。
     registerHandler('producer:startFlow', async (params: unknown) => {
         const input = ProducerFlowSchema.parse(params);
+        // 每一轮只落一条历史：终态那一帧（flowRunning=false）是唯一知道实际投了
+        // 多少条的时刻，而它可能来自用户停止、投满总量或出错自行结束。
+        let recorded = false;
+        // 归属信息要等 startFlow 返回，而开局即失败的那一轮终态帧就在返回之前——
+        // 先把它存下来，拿到 info 再补写，否则"秒失败的那一轮"永远没有历史。
+        let pendingTerminal: ProducerRunStats | null = null;
+        const infoRef: {current: ProducerSessionInfo | undefined} = {current: undefined};
+        const record = (stats: ProducerRunStats, info: ProducerSessionInfo) => {
+            recorded = true;
+            recordSendHistory({
+                clusterId: info.clusterId,
+                topic: info.topicUri,
+                templateId: input.templateId,
+                templateName: input.templateName,
+                body: (input.template as MessageTemplateBody).body,
+                sent: stats.sent,
+                bytes: stats.bytesSent,
+                failure: stats.lastError ?? stats.error,
+            });
+        };
+        const emit = (stats: ProducerRunStats) => {
+            sendToRenderer(MESSAGE_STREAM_CHANNELS.producerStats, stats);
+            if (stats.flowRunning || recorded) {
+                return;
+            }
+            if (infoRef.current) {
+                record(stats, infoRef.current);
+            } else {
+                pendingTerminal = stats;
+            }
+        };
         const info = await nativeClientManager.startFlow(
             input.sessionId,
             {
@@ -125,8 +205,12 @@ export function registerProducerHandlers() {
                 stopOnError: input.stopOnError,
                 options: input.options as ProducerMessageOptions | undefined,
             },
-            (stats: ProducerRunStats) => sendToRenderer(MESSAGE_STREAM_CHANNELS.producerStats, stats),
+            emit,
         );
+        infoRef.current = info;
+        if (pendingTerminal && !recorded) {
+            record(pendingTerminal, info);
+        }
         insertOperationLog({
             cluster_id: info.clusterId,
             action: 'send',
@@ -186,11 +270,7 @@ export function registerProducerHandlers() {
         async (config, input) => {
             const options = needOptions(input.options);
             const topic = topicFullName(input.tenant, input.namespace, input.topic, input.persistent);
-            const batch = resolveBatch(input.template as MessageTemplateBody, input.count, messageOptions(options));
-            if (batch.items.length === 0) {
-                report(input.clusterId, topic, `模板解析失败，未发送 ${input.count} 条`, false);
-                return {messageIds: [], bytes: 0, failures: batch.failures};
-            }
+            // 与会话发送同一套逐批解析：这条路径同样可能一次投 1000 条
             const result = await nativeClientManager.sendOnce(
                 input.clusterId,
                 config,
@@ -201,17 +281,35 @@ export function registerProducerHandlers() {
                     persistent: input.persistent,
                     options,
                 },
-                batch.items,
+                {
+                    template: input.template as MessageTemplateBody,
+                    count: input.count,
+                    options: messageOptions(options),
+                },
             );
-            result.failures = joinFailures(batch.failures, result.failures);
-            report(
-                input.clusterId,
+            if (result.messageIds.length === 0) {
+                report(input.clusterId, topic, `模板解析或发送全部失败，未发出 ${input.count} 条`, false);
+            } else {
+                report(
+                    input.clusterId,
+                    topic,
+                    `发送 ${result.messageIds.length} 条到 ${topic}${
+                        result.failures.length ? `，失败 ${result.failures.length} 条` : ''
+                    }`,
+                    true,
+                );
+            }
+            recordSendHistory({
+                clusterId: input.clusterId,
                 topic,
-                `发送 ${result.messageIds.length} 条到 ${topic}${
-                    result.failures.length ? `，失败 ${result.failures.length} 条` : ''
-                }`,
-                result.messageIds.length > 0,
-            );
+                templateName: input.templateName,
+                templateId: input.templateId,
+                body: (input.template as MessageTemplateBody).body,
+                sent: result.messageIds.length,
+                bytes: result.bytes,
+                messageId: result.messageIds[0] ?? null,
+                failure: result.failures[0]?.error,
+            });
             return result;
         },
     );

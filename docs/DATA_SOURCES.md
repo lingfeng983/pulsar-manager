@@ -16,28 +16,27 @@
     │      └──▶ 原生客户端 (pulsar-client, N-API)：消息收发、快速压测
     │
   SQLite（敏感字段 AES-256-GCM 加密）
-    clusters / ssh_tunnels / operation_logs / user_settings
+    clusters / ssh_tunnels / operation_logs / user_settings /
+    message_templates / consumer_session_configs / send_history
 ```
 
 ## 二、页面数据来源详细说明
 
 ### 2.1 首页 (Home.tsx)
 
+首页分「列表视图」与「拓扑视图」两个模式，都不做跨集群聚合统计。
+
 **数据来源：**
-- **集群列表**: `window.electronAPI.cluster.list()`
+- **集群列表**（列表视图）: `window.electronAPI.cluster.list()`
   - IPC: `cluster:list`（Handler: `src/main/ipc/cluster-handlers.ts`）
   - 数据源: SQLite `clusters` 表
-  - 字段: id, name, service_url, web_service_url, status, version
-
-- **全局统计**: 真实聚合，不是示例值
-  - `metrics:getAggregatedStats` 逐集群取回聚合统计（Top 数、分区、订阅、生产者、消费者、输入/输出速率、积压）
-  - `metrics:getBrokers` 取回各集群活跃 Broker 数量
-  - 渲染层把已连接集群的结果相加得到 6 张卡片：集群总数 / 在线 Brokers / 活跃 Topics（副文案带分区与订阅数）/ 消息输入速率 / 消息输出速率 / 积压消息
-  - 单个集群失败只损失它自己的数字，其余照常显示；集群列表在加载期间变化时旧响应会被世代守卫丢弃
-
+  - 字段: id, name, serviceUrl, webServiceUrl, status, version
+  - 名称/地址筛选与状态四选一下拉都在渲染层做（集群数量本来就小，不为过滤再发一轮 IPC），筛空时表格显「没有符合筛选条件的集群」
+- **集群状态探活**: 挂载即 `refreshClusterStatus()` → IPC `cluster:checkStatus`（口径见 2.7），列表里的 `status` 是探活写回的持久列；「刷新集群状态」走同一轮，成功与失败都出 toast
+- **集群拓扑**（拓扑视图）: 由 `HomeTopology` 组件负责，取数见 2.6；放大缩小 / 刷新 / 全屏四个图标与节点计数默认 portal 到页头这一行，进入全屏后改画在图内右上角（全屏独占的是图这一层，工具栏留在页头就等于「退出全屏」被盖住）
 - **状态管理**: `useClusterStore` (Zustand)
   - 位置: `src/renderer/store/cluster.ts`
-  - 方法: `fetchClusters()`, `deleteClusterAsync()`
+  - 方法: `fetchClusters()`, `refreshClusterStatus()`, `deleteClusterAsync()`
 
 ---
 
@@ -129,7 +128,7 @@
     persistent: boolean
     from: 'earliest' | 'latest' | 'timestamp' | 'recent'
     timestamp?: number    // 仅 from === 'timestamp' 时提交
-    recentCount?: number  // 仅 from === 'recent' 时提交，1–1000，默认 20
+    recentCount?: number  // 仅 from === 'recent' 时提交，1–500，默认 20
     maxMessages: number   // 上限 10000；recent 模式下不出现（扫描自己收尾）
   }
   ```
@@ -149,7 +148,6 @@
 interface Message {
   messageId: string
   producerName: string
-  sequenceId: number
   publishTime: number
   properties: Record<string, string>
   data: string  // Base64 encoded
@@ -217,14 +215,18 @@ interface Message {
 interface ClusterTopology {
   brokers: Array<{
     name: string
+    // 由各 topic 的 ownerBrokers 反向聚合而来，归属不可用时为空数组
     topics: string[]
-    stats?: any
   }>
   topics: Array<{
     name: string
     tenant: string
     namespace: string
-    partitions: number
+    persistent: boolean
+    // 分区 URI 列表，长度即分区数；非分区 topic 为空数组
+    partitionNames: string[]
+    // 承载该 topic（或其某个分区）的 broker，host:port 列表
+    ownerBrokers: string[]
     subscriptions: string[]
     producers: number
     consumers: number
@@ -232,11 +234,13 @@ interface ClusterTopology {
     msgRateOut: number
     backlogSize: number
   }>
+  // 归属来源：brokerStats（topic stats 带 ownerBroker）/ singleBroker（集群只有一个 broker）/ none（拿不到，绝不猜）
+  ownershipSource: 'brokerStats' | 'singleBroker' | 'none'
 }
 ```
 
 #### 2.6.3 节点关系
-- **Broker → Topic**: 只按真实归属连线，归属未知就不连，不按序号轮转分配
+- **Broker → Topic**: 只按真实归属（`ownerBrokers`）连线，归属不可用（`ownershipSource === 'none'`）时就不连，不按序号轮转分配
 - **边权重**: 基于 `msgRateIn`
 - **配色**: 运行时从 CSS 变量读取，跟随亮色/暗色/护眼三套主题
 
@@ -253,9 +257,11 @@ interface ClusterTopology {
 
 - **常驻会话**: `producer:startSession`（带 `ProducerOptions`）→ `producer:send`（单发 1–1000 条）→ `producer:flush`（只把原生队列最后一段推出，不关会话）→ `producer:stop`（断会话，回 `stopped` 不报错）；`producer:listSessions` 列当前会话
 - **不建会话的一次性发送**: `producer:sendOnce`，现开现关，用于"就发一条、别留连接"
+- **分批解析与发送**: `producer:send`、`producer:sendOnce`、连续流三条路径都由原生层逐批 resolve→send→release（每批 ≤200 条、正文合计 ≤16MB），主进程不会同时持有 `条数 × 正文`；每条仍重新过一遍占位符，序号跨批连续，界面拿到的失败清单是完整的
 - **连续限速流**: `producer:startFlow`（`ratePerSecond` 0 为不限、`totalMessages` 0 为到手动停止、`maxInFlight`、`stopOnError`），运行中改速率走 `producer:setRate`（只换限速器，不重建 producer），停止走 `producer:stopFlow`
 - **统计推送**: `msg:producer-stats`（main → renderer），已发/失败/字节、msg/s、MB/s 与 P50/P99 确认延迟
-- **报文模板**: `template:list/get/create/update/delete/copy`，存 `message_templates`。正文必须是合法 JSON，`${...}` 为占位符，生成函数见 `src/renderer/utils/template-engine.ts` 的 `KNOWN_FUNCTIONS`（`int/float/bool/string/uuid/choice/seq/index/now/date/timestamp`），支持具名变量与 `$each{count,of}` 展开，整体占位符保留原类型，渲染结果上限 5MB
+- **发送历史**: 单发、直接发送与连续发送的每一轮（终态帧）都写 `send_history`，正文只留前 400 字符与平均单条字节；界面入口是工作台顶部的「发送历史」，走 `sendHistory:list` 按 集群 + topic 读最近 200 条
+- **报文模板**: `template:list/get/create/update/delete/copy`，存 `message_templates`。正文必须是合法 JSON，`${...}` 为占位符，生成函数见 `src/shared/template-engine.ts` 的 `KNOWN_FUNCTIONS`（`int/float/bool/string/uuid/choice/seq/index/now/date/timestamp`），支持具名变量与 `$each{count,of}` 展开，整体占位符保留原类型，渲染结果上限 5MB
 - **producer 级参数**（`src/shared/producer-defaults.ts` 为唯一事实来源，主进程建 producer、IPC Zod 默认值、界面初值三处同源）: 发送超时、在途队列、队列满是否阻塞、压缩、批大小/批字节/批时间、`chunkingEnabled`。`batchingEnabled` 与 `chunkingEnabled` 同真会 abort 原生进程，Zod `refine` 与界面都拦
 
 ### 2.9 消费者工作台 (ConsumerWorkspace.tsx)
@@ -388,7 +394,7 @@ CREATE TABLE send_history (
     template_id TEXT,
     template_name TEXT NOT NULL,          -- 冗余存一份：删模板不丢历史
     body_preview TEXT NOT NULL,           -- 只记正文前缀与字节数，不存解析后的载荷
-    body_bytes INTEGER NOT NULL,
+    body_bytes INTEGER NOT NULL,          -- 平均每条字节（逐条正文分批发送后即释放，留不了逐条体积）
     message_count INTEGER NOT NULL DEFAULT 1,
     message_id TEXT,
     status TEXT NOT NULL,
@@ -531,7 +537,7 @@ Admin REST 没有发消息与 peek 的端点（真实 broker 上返回 HTML 404�
 | IPC 通道 | 方向 | 功能 |
 |---------|------|------|
 | `producer:startSession` | renderer → main | 在指定 topic 上建常驻 producer 会话（带 `ProducerOptions`） |
-| `producer:send` | renderer → main | 走常驻会话发送 1–1000 条（模板渲染后逐条投） |
+| `producer:send` | renderer → main | 走常驻会话发送 1–1000 条（分批渲染逐条投），`templateName`/`templateId` 只给发送历史用 |
 | `producer:sendOnce` | renderer → main | 不建会话的一次性发送，现开现关 |
 | `producer:startFlow` / `producer:stopFlow` | renderer → main | 启动 / 停止连续限速流（`ratePerSecond` 0 不限、`totalMessages` 0 到手动停止、`maxInFlight`、`stopOnError`） |
 | `producer:setRate` | renderer → main | 运行中改速率，只换限速器不重建 producer |
@@ -558,7 +564,7 @@ Admin REST 没有发消息与 peek 的端点（真实 broker 上返回 HTML 404�
 |---------|------|------|
 | `template:list` / `get` / `create` / `update` / `delete` / `copy` | renderer → main | 报文模板增删改查与复制，落 `message_templates`，作用域为 集群 + topic（空 topic 为通用） |
 | `consumerConfig:list` / `get` / `create` / `update` / `delete` / `copy` | renderer → main | 消费者会话配置，落 `consumer_session_configs` |
-| `sendHistory:list` | renderer → main | 按 集群 + topic 分页读发送历史（有表有接口，界面暂无入口） |
+| `sendHistory:list` | renderer → main | 按 集群 + topic 读最近 200 条发送历史，供生产者工作台的「发送历史」弹窗 |
 
 ---
 

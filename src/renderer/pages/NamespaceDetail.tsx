@@ -163,7 +163,7 @@ const NamespaceDetail: React.FC<NamespaceDetailProps> = ({clusterId, tenant, nam
             }
             columns={topicColumns}
             dataSource={visibleTopics}
-            rowKey="name"
+            rowKey={record => `${record.persistent ? 'persistent' : 'non-persistent'}://${record.name}`}
         />
     );
 };

@@ -26,3 +26,25 @@ export function withHardTimeout(work: Promise<unknown>, failureLabel: string, ti
         });
     });
 }
+
+// 与 withHardTimeout 同一个"绝不无限等"的保险，但要把"到底落地了没有"告诉调用方：
+// 原生 producer 的收尾必须据此决定能不能去 close（没排空就 close 是段错误路径）。
+export function settledWithin(work: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+    // 落败分支之后 reject 也要有人接，否则是未处理拒绝
+    void work.catch(error =>
+        log.warn('in-flight work failed after timeout', error instanceof Error ? error.message : error),
+    );
+    return new Promise<boolean>(resolve => {
+        const timer = setTimeout(() => resolve(false), timeoutMs);
+        void work.then(
+            () => {
+                clearTimeout(timer);
+                resolve(true);
+            },
+            () => {
+                clearTimeout(timer);
+                resolve(true);
+            },
+        );
+    });
+}

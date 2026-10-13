@@ -40,10 +40,12 @@ import MessageDetailModal from '../components/message/MessageDetailModal';
 import CodePane, {type CodePaneHandle} from '../components/editor/CodePane';
 import {
     decodeMessageBatch,
-    formatMessageData,
     truncateText,
+    trimMessageList,
+    STREAM_MAX_BYTES,
     type PayloadKind,
 } from '../components/message/messageFormat';
+import {buildMessagesExport, messagesExportFilename} from '../components/message/exportMessages';
 import {useResizableColumns} from '../hooks/useResizableColumns';
 
 // 一行"标签 + 问号说明 + 控件"。标签钉宽、控件吃剩下，与工作台那两张参数表同构，
@@ -136,29 +138,43 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
     // 会话 id 同时放 ref：推送回调与卸载清理都要读最新值，
     // 放 state 会让 effect 依赖来回变化，反而漏停或重复停。
     const sessionRef = useRef<ActiveSession | null>(null);
+    // 停止请求在途的标记：只防连点重复发停止，不承担"已停"的语义
+    const stoppingRef = useRef(false);
+    // 启动在途，以及这期间到达的、还不认领得下的事件。startConsume 的 IPC 与主进程
+    // 第一批推送是并发的：响应没回来时界面并不知道自己要认领哪个 sessionId，那几批
+    // （以及"会话已经结束了"这句）只能先存着，认领上立刻回放。不这么做的话
+    // 短会话（reader 扫尾部、收满就结束的几十条）会一条都显不出来。
+    const startingRef = useRef(false);
+    const earlyEvents = useRef<{batches: MessageBatch[]; ends: SessionEndEvent[]}>({batches: [], ends: []});
 
     const sendPaneRef = useRef<CodePaneHandle | null>(null);
 
     const stopActiveSession = useCallback(async (notify: boolean) => {
         const session = sessionRef.current;
-        if (!session) {
+        if (!session || stoppingRef.current) {
             return;
         }
-        // 先摘掉引用：在途的批次会因为 id 对不上被丢弃，重复点击也不会重复停止
-        sessionRef.current = null;
-        setSessionId(null);
+        stoppingRef.current = true;
         const stop =
             session.mode === 'consume' ? window.electronAPI.messages.stopConsume : window.electronAPI.messages.stopRead;
         try {
             const response = await stop(session.sessionId);
-            if (notify && !response.success) {
-                message.warning(response.error || '停止会话失败');
+            // 引用只在主进程确认停掉之后才摘：提前清空等于把会话判成"界面无从再管"，
+            // 而那边的 consumer/reader 还在跑——autoAck 继续吞消息、订阅被占住，
+            // 下次开会被"该订阅已有会话"拒绝，最后吃的是主进程 32 个会话的额度。
+            if (response.success) {
+                sessionRef.current = null;
+                setSessionId(null);
+            } else if (notify) {
+                message.warning(response.error || '停止会话失败，会话可能仍在运行，可再次点击停止');
             }
         } catch (stopError) {
             if (notify) {
-                message.error('停止会话失败');
+                message.error('停止会话失败，会话可能仍在运行，可再次点击停止');
             }
             console.error('Failed to stop session:', stopError);
+        } finally {
+            stoppingRef.current = false;
         }
     }, []);
 
@@ -187,35 +203,52 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
     );
 
     const appendBatch = useCallback((batch: MessageBatch) => {
-        setMessages(prev => [...batch.messages, ...prev].slice(0, MAX_DISPLAY_COUNT));
+        setMessages(prev => trimMessageList([...batch.messages, ...prev], MAX_DISPLAY_COUNT, STREAM_MAX_BYTES));
+    }, []);
+
+    const applySessionEnd = useCallback((event: SessionEndEvent) => {
+        sessionRef.current = null;
+        setSessionId(null);
+        if (event.reason === 'error') {
+            setError(event.detail || '会话异常终止');
+        } else if (event.reason === 'completed') {
+            // 主进程对一次性回溯扫描会带一句 detail（扫了多少、取了几条、有没有撞护栏），
+            // 没有 detail 才是按限量收满的那种结束。
+            message.info(event.detail || '已达到消息数量上限，会话结束');
+        }
     }, []);
 
     useEffect(() => {
         const isMine = (id: string) => sessionRef.current?.sessionId === id;
 
+        const stash = (batch: MessageBatch) => {
+            const kept = earlyEvents.current.batches.reduce((total, item) => total + item.messages.length, 0);
+            if (kept >= MAX_DISPLAY_COUNT) {
+                return;
+            }
+            earlyEvents.current.batches.push(batch);
+        };
+
         const offConsume = window.electronAPI.messages.onConsumeBatch(batch => {
             if (isMine(batch.sessionId)) {
                 appendBatch(batch);
+            } else if (startingRef.current) {
+                stash(batch);
             }
         });
         const offRead = window.electronAPI.messages.onReadBatch(batch => {
             if (isMine(batch.sessionId)) {
                 appendBatch(batch);
+            } else if (startingRef.current) {
+                stash(batch);
             }
         });
         // 收满上限或循环出错时会话会自己结束，不接这个事件界面就会一直显示"运行中"
         const offEnd = window.electronAPI.messages.onSessionEnd((event: SessionEndEvent) => {
-            if (!isMine(event.sessionId)) {
-                return;
-            }
-            sessionRef.current = null;
-            setSessionId(null);
-            if (event.reason === 'error') {
-                setError(event.detail || '会话异常终止');
-            } else if (event.reason === 'completed') {
-                // 主进程对一次性回溯扫描会带一句 detail（扫了多少、取了几条、有没有撞护栏），
-                // 没有 detail 才是按限量收满的那种结束。
-                message.info(event.detail || '已达到消息数量上限，会话结束');
+            if (isMine(event.sessionId)) {
+                applySessionEnd(event);
+            } else if (startingRef.current) {
+                earlyEvents.current.ends.push(event);
             }
         });
 
@@ -224,7 +257,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
             offRead();
             offEnd();
         };
-    }, [appendBatch]);
+    }, [appendBatch, applySessionEnd]);
 
     const fetchSubscriptions = useCallback(async () => {
         try {
@@ -392,22 +425,42 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
             }
             setStarting(true);
             setError(null);
+            startingRef.current = true;
+            earlyEvents.current = {batches: [], ends: []};
             try {
                 const response = await invoke();
                 if (!response.success || !response.data) {
                     setError(response.error || '启动会话失败');
                     return;
                 }
-                sessionRef.current = {sessionId: response.data.sessionId, mode: streamMode};
-                setSessionId(response.data.sessionId);
+                const sessionId = response.data.sessionId;
+                sessionRef.current = {sessionId, mode: streamMode};
+                setSessionId(sessionId);
                 setMessages([]);
+                // 认领上了才回放，并且是先批后结束：结束事件如果抢在响应前面到达，
+                // 这条会话其实已经跑完了，回放完它界面就直接落到"已停止"。
+                const early = earlyEvents.current;
+                earlyEvents.current = {batches: [], ends: []};
+                startingRef.current = false;
+                for (const batch of early.batches) {
+                    if (batch.sessionId === sessionId) {
+                        appendBatch(batch);
+                    }
+                }
+                for (const event of early.ends) {
+                    if (event.sessionId === sessionId) {
+                        applySessionEnd(event);
+                    }
+                }
             } catch (startError) {
                 setError(startError instanceof Error ? startError.message : String(startError));
             } finally {
+                startingRef.current = false;
+                earlyEvents.current = {batches: [], ends: []};
                 setStarting(false);
             }
         },
-        [],
+        [appendBatch, applySessionEnd],
     );
 
     const handleStartConsume = () =>
@@ -489,37 +542,9 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
 
         setExportLoading(true);
         try {
-            let content: string;
-            let mimeType: string;
-            let extension: string;
-
-            if (format === 'json') {
-                const exportData = messages.map(msg => ({
-                    messageId: msg.messageId,
-                    producerName: msg.producerName,
-                    publishTime: dayjs(msg.publishTime).format('YYYY-MM-DD HH:mm:ss.SSS'),
-                    properties: msg.properties,
-                    data: formatMessageData(msg.data),
-                }));
-                content = JSON.stringify(exportData, null, 2);
-                mimeType = 'application/json';
-                extension = 'json';
-            } else {
-                const headers = ['messageId', 'publishTime', 'producerName', 'properties', 'data'];
-                const rows = messages.map(msg => [
-                    msg.messageId,
-                    dayjs(msg.publishTime).format('YYYY-MM-DD HH:mm:ss.SSS'),
-                    msg.producerName,
-                    `"${JSON.stringify(msg.properties).replace(/"/g, '""')}"`,
-                    `"${formatMessageData(msg.data).replace(/"/g, '""')}"`,
-                ]);
-                content = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
-                mimeType = 'text/csv';
-                extension = 'csv';
-            }
-
-            downloadBlob(content, `messages_${topic}_${dayjs().format('YYYYMMDD_HHmmss')}.${extension}`, mimeType);
-            message.success(`成功导出 ${messages.length} 条消息 (${extension.toUpperCase()})`);
+            const payload = buildMessagesExport(messages, format);
+            downloadBlob(payload.content, messagesExportFilename(topic, format), payload.mimeType);
+            message.success(`成功导出 ${messages.length} 条消息 (${payload.extension.toUpperCase()})`);
         } catch (exportError) {
             console.error('Failed to export messages:', exportError);
             message.error('导出失败');
@@ -887,11 +912,11 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                 {readFrom === 'recent' && (
                     <div>
                         <label style={fieldLabel}>条数:</label>
-                        <Tooltip title="原生 Reader 没有尾部锚点，这条是从最早开始扫、只留最后 N 条，扫完自动结束（最多扫 2 万条或 15 秒）。">
+                        <Tooltip title="原生 Reader 没有尾部锚点，这条是从最早开始扫、只留最后 N 条，扫完自动结束（最多扫 2 万条或 15 秒）。上限与列表保留条数一致。">
                             <InputNumber
                                 aria-label="最近多少条"
                                 min={1}
-                                max={1000}
+                                max={MAX_DISPLAY_COUNT}
                                 value={recentCount}
                                 onChange={value => setRecentCount(value ?? 20)}
                                 style={{width: 90}}

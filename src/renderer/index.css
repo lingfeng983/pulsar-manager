@@ -529,6 +529,28 @@ pre,
     height: 100vh;
 }
 
+/* 首页拓扑全屏的是图这一层：UA 给 :fullscreen 元素铺纯黑底，亮色主题下像出了故障。 */
+.topology-chart:fullscreen {
+    background: var(--color-bg-base);
+    padding: var(--spacing-sm);
+}
+
+/* 全屏时工具栏留在页头会被黑底盖住（退出按钮点不到），所以画在图内右上角。 */
+.topology-inline-toolbar {
+    position: absolute;
+    top: var(--spacing-sm);
+    right: var(--spacing-sm);
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--spacing-sm);
+    padding: 4px var(--spacing-sm);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-bg-elevated);
+}
+
 /* content-holder 是 display:block，antd 没给 .ant-tabs-content 定高，
    于是它按内容塌陷，标签页白白丢掉一截视口高度（图表只能退回 min-height）。
    body/#root 都是 overflow:hidden，页面滚动本就由各页根容器负责，
@@ -599,6 +621,16 @@ pre,
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
     background: var(--color-bg-elevated);
+}
+
+/* 发送历史展开的正文前缀：库里存的就只有前 400 字符，整篇载荷当时已在原生层释放，
+   所以这里要显式告诉用户看到的是截断预览，不能让它看起来像完整报文。 */
+.history-preview {
+    margin: 0;
+    max-height: 220px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
 }
 
 /* 连续发送面板：卡片右栏只有约 300px 宽，控件排不下就整行换行，

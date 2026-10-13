@@ -39,9 +39,9 @@ Topic 详情页的「消息浏览器」有三种模式，互不混淆（不是�
 
 消息浏览器解决"发一条看看"，工作台解决"挂着跑一段"：
 
-- **生产者工作台**：一个 topic 可挂多条常驻会话。报文是**模板**——正文必须是合法 JSON，`${...}` 是占位符，支持 `int/float/bool/string/uuid/choice/seq/index/now/date/timestamp` 这些生成函数与具名变量，整体占位符保留原类型（数字不会被写成字符串），`$each{count,of}` 按列表展开。单发（1–1000 条）走常驻会话，连续发送是可运行时改速率的限速流（`ratePerSecond` 0 为不限、总量 0 为到手动停止、在途上限、出错即停可选），统计给已发/失败/字节、msg/s、MB/s 与 P50/P99 确认延迟；`flush` 只把原生队列最后一段推出，`stop` 才断会话。另有"直接发送"一条现开现关、不留连接的通道
+- **生产者工作台**：一个 topic 可挂多条常驻会话。报文是**模板**——正文必须是合法 JSON，`${...}` 是占位符，支持 `int/float/bool/string/uuid/choice/seq/index/now/date/timestamp` 这些生成函数与具名变量，整体占位符保留原类型（数字不会被写成字符串），`$each{count,of}` 按列表展开。单发（1–1000 条）走常驻会话，连续发送是可运行时改速率的限速流（`ratePerSecond` 0 为不限、总量 0 为到手动停止、在途上限、出错即停可选），统计给已发/失败/字节、msg/s、MB/s 与 P50/P99 确认延迟；`flush` 只把原生队列最后一段推出，`stop` 才断会话。另有"直接发送"一条现开现关、不留连接的通道。一次上千条大报文时解析与发送是分批交替的（每批不超 200 条、正文合计不超 16MB），主进程不会先把 `条数 × 正文` 整份堆在内存里，界面上拿到的失败清单仍然是完整的。「发送历史」读的是本地 `send_history`，按 集群 + topic 显最近 200 条（模板名、条数、平均单条字节、messageId、失败原因，展开看正文前缀）
 - **消费者工作台**：同样多会话并存（Exclusive 除外，重复开时先弹确认）。订阅设置可配类型（Shared/Key_Shared/Failover/Exclusive）、起始（Latest/Earliest）、自动确认开关、限量、`receiverQueueSize`、`ackTimeoutMs`/`nAckRedeliverTimeoutMs`（关掉自动确认才出现）、消费者名与死信策略（死信 topic、最大重投次数、初始订阅）。消息按会话分桶显示、每秒自算速率，可暂停渲染、限制保留条数（1–5000）、导出 JSON/CSV、清空
-- 模板、消费者会话配置、发送历史各一张本地表，支持增删改查与复制，用过几次、最后一次什么时候用过都记着
+- 模板、消费者会话配置各一张本地表，支持增删改查与复制，用过几次、最后一次什么时候用过都记着；发送历史那张只写与读，不做编辑
 
 ### 快速压测
 
@@ -126,7 +126,7 @@ pulsar-manager/
 └── tsconfig.node.json         # 主进程/preload 的 TS 配置（CommonJS）
 ```
 
-根目录另有一份[《详细设计说明书》](./Pulsar%20桌面管理工具详细设计说明书.md)和一份[《UI 详细设计规范》](./Pulsar%20桌面管理工具%20UI%20详细设计规范（最终完整版）.md)，是项目最初的设计输入，部分细节已被后续实现取代。
+`docs/` 下另有一份[《详细设计说明书》](./docs/Pulsar%20桌面管理工具详细设计说明书.md)和一份[《UI 详细设计规范》](./docs/Pulsar%20桌面管理工具%20UI%20详细设计规范（最终完整版）.md)，是项目最初的设计输入，部分细节已被后续实现取代。
 
 ## 快速开始
 
@@ -194,7 +194,7 @@ npm run build:main && npm run build
 5. **不要用 Admin REST 发消息或 peek 消息。** `POST /admin/v2/producers/{t}/{ns}/{topic}/send` 与 `.../subscription/{sub}/peek/{n}` 在真实 broker 上并不存在（返回 HTML 404）。消息收发只有原生客户端这一条路。
 6. **分区 topic 的删除走 `.../{topic}/partitions`**，`/partition/-1` 在部分版本上 404。
 7. **聚合有上限。** `AGGREGATION_LIMITS` 限制租户/命名空间/topic 数量，聚合内部扇出用 `mapWithConcurrency` 固定并发窗口（外层已持有信号量许可，内部再 acquire 会死锁）。
-8. **渲染层依赖必须留在 `devDependencies`。** antd / echarts / react 等由 Vite 打进 `dist/renderer`，主进程编译产物只 `require` axios、better-sqlite3、pulsar-client、uuid、zod。把渲染层依赖挪回 `dependencies`，electron-builder 会把它们的源码再塞进 asar（实测 157 MiB），安装包随即越过 Gitee 附件 100 MB 上限而被拒。
+8. **渲染层依赖必须留在 `devDependencies`。** antd / echarts / react 等由 Vite 打进 `dist/renderer`，主进程编译产物只 `require` axios、better-sqlite3、pulsar-client、ssh2、uuid、zod。把渲染层依赖挪回 `dependencies`，electron-builder 会把它们的源码再塞进 asar（实测 157 MiB），安装包随即越过 Gitee 附件 100 MB 上限而被拒。
 9. **`batchingEnabled` 与 `chunkingEnabled` 不能同时为 true。** 原生绑定（pulsar-client 1.18 的 C++ 层）在这两项都开时直接 abort 整个主进程，实测没有 JS 异常也没有 crashpad 转储。三处同时挡：Zod 校验 `refine` 拒绝、构造 producer 时 `chunkingEnabled && !batchingEnabled`、界面上开了批发送就把分块开关置灰。
 10. **代码框的颜色与字号只能写 CSS 变量。** CodeMirror 主题经 style-mod 原样塞进生成的样式表，变量在浏览器里按当前 `<html>` 解析，所以三套主题与四档字号都自动跟随；写成 `#fff` 或固定 px，实测就是"整页变暗了只有编辑器还白底"。
 
@@ -213,7 +213,7 @@ npm run build:main && npm run build
 - **快速压测的延迟口径**：统计的是 `send()` 调用到 broker 确认的时间，包含客户端在途队列的排队；单生产者并发调大时 P50 会显著上升，这不是 broker 变慢
 - **消费没有逐条手动 ack**：只有"自动 ack"开关，关掉之后消息就一直不确认
 - **消息浏览器没有 peek / 重投 / 按 ID 定位**：只能从头或从某个时间点开始读，不能"看一眼订阅游标下一条再决定消不消费"，也不能把一条已收到的消息原样再发一次
-- **发送历史有表无界面**：`send_history` 每次发送都在写，`sendHistory:list` 也通了，但界面上还没有查询入口
+- **发送历史只存前缀**：每次发送（单发、直接发送、连续发送的每一轮）都往 `send_history` 落一行，生产者工作台的「发送历史」按 集群 + topic 读最近 200 条；正文只留前 400 字符与平均单条字节数，整篇载荷当时就在原生层释放，所以历史不能拿来重发
 - **模板的 schema 校验未实现**：`message_templates.schema_mode` 只是存下来的字段，发送时不做任何结构校验
 - **插件只贡献数据**：插件市场里的插件是本地 JSON 声明，只能提供压测预设与 Topic 创建模板，不能新增界面、不能访问 broker、不能执行代码；需要这类能力请直接把需求提为应用功能
 - 未实现：Schema 管理、权限管理、告警、时序降采样、国际化、K8s 端口转发

@@ -11,8 +11,39 @@ setLogFileForMainProcess(path.join(app.getPath('userData'), 'logs', 'main.log'))
 
 const log = createLogger('Main');
 
+// 主进程带着原生 pulsar-client / SSH 隧道句柄进入未定义状态继续跑，比直接退出更危险
+// （已知的段错误路径都在"资源还在被用却已半死"这一类）。这里不自动重启——用户可能
+// 正在灌一批报文，静默重启会把它整个丢掉——而是明确告知"已进入不确定状态，请退出重启"，
+// 由用户决定，同时保证只提示一次。
+let fatalNoticeShown = false;
+
+function reportFatalException(detail: string): void {
+    log.error('Uncaught Exception', detail);
+    if (fatalNoticeShown || !mainWindow || mainWindow.isDestroyed()) {
+        return;
+    }
+    fatalNoticeShown = true;
+    void dialog
+        .showMessageBox(mainWindow, {
+            type: 'error',
+            title: '主进程出现未捕获异常',
+            message: '应用已进入不确定状态',
+            detail:
+                `${detail.slice(0, 400)}\n\n` +
+                '正在运行的收发会话可能已经失效但仍在占用连接。建议保存需要的内容后退出并重新启动应用。',
+            buttons: ['知道了', '立即退出'],
+        })
+        .then(result => {
+            if (result.response === 1) {
+                isQuitting = true;
+                app.quit();
+            }
+        })
+        .catch(() => undefined);
+}
+
 process.on('uncaughtException', error => {
-    log.error('Uncaught Exception', error instanceof Error ? `${error.message}\n${error.stack ?? ''}` : String(error));
+    reportFatalException(error instanceof Error ? `${error.message}\n${error.stack ?? ''}` : String(error));
 });
 
 process.on('unhandledRejection', reason => {
@@ -134,6 +165,10 @@ function createWindow() {
     mainWindow.webContents.on('console-message', (_event, level, message) => {
         if (message.includes('Autofill.enable') && message.includes("wasn't found")) {
             return;
+        }
+        // 渲染层的 error 级日志此前只是被这个空函数过了一遍，主进程日志里什么都查不到
+        if (level >= 3) {
+            log.error(`renderer console: ${message}`);
         }
     });
 

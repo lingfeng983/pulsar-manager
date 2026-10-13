@@ -1,14 +1,23 @@
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
-import {Button, InputNumber, Segmented, Space, Tag, Tooltip, message} from 'antd';
+import {Button, InputNumber, Modal, Segmented, Space, Table, Tag, Tooltip, message} from 'antd';
+import type {TableColumnsType} from 'antd';
 import {
     ClearOutlined,
     DisconnectOutlined,
     ExportOutlined,
     FormatPainterOutlined,
+    HistoryOutlined,
     LinkOutlined,
     SendOutlined,
 } from '@ant-design/icons';
-import type {MessageTemplate, ProducerOptions, ProducerRunStats, ProducerSessionInfo, TemplateVariable} from '../types';
+import type {
+    MessageTemplate,
+    ProducerOptions,
+    ProducerRunStats,
+    ProducerSessionInfo,
+    SendHistoryEntry,
+    TemplateVariable,
+} from '../types';
 import {defaultProducerOptions} from '../../shared/producer-defaults';
 import {validateTemplate} from '../../shared/template-engine';
 import PageShell from '../components/common/PageShell';
@@ -72,6 +81,9 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
     const [oneShot, setOneShot] = useState(1);
     const [oneShotLoading, setOneShotLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [historyOpen, setHistoryOpen] = useState(false);
+    const [historyRows, setHistoryRows] = useState<SendHistoryEntry[]>([]);
+    const [historyLoading, setHistoryLoading] = useState(false);
 
     const editorRef = useRef<JsonEditorHandle>(null);
     // 会话结束事件与停止操作都要读当前会话集合，放 state 会让订阅 effect 反复重订阅，
@@ -82,6 +94,61 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
     const templateBody = useMemo(
         () => ({body: draft.body, variables: draft.variables, properties: draft.properties}),
         [draft.body, draft.variables, draft.properties],
+    );
+
+    // 发送历史按 集群 + topic 取，不按会话取：会话是临时对象，而"这个 topic 上
+    // 投过什么"要跨页签、跨重启都读得到。
+    const openHistory = useCallback(async () => {
+        setHistoryOpen(true);
+        setHistoryLoading(true);
+        try {
+            const response = await window.electronAPI.sendHistory.list({clusterId, topicUri, limit: 200});
+            if (response.success) {
+                setHistoryRows(response.data || []);
+            } else {
+                setError(response.error || '读取发送历史失败');
+                setHistoryRows([]);
+            }
+        } catch (historyError) {
+            setError(historyError instanceof Error ? historyError.message : String(historyError));
+            setHistoryRows([]);
+        } finally {
+            setHistoryLoading(false);
+        }
+    }, [clusterId, topicUri]);
+
+    const historyColumns: TableColumnsType<SendHistoryEntry> = useMemo(
+        () => [
+            {
+                title: '时间',
+                dataIndex: 'createdAt',
+                width: 150,
+                render: (value: string) => new Date(value).toLocaleString(),
+            },
+            {title: '模板', dataIndex: 'templateName', width: 150, ellipsis: true},
+            {title: '条数', dataIndex: 'messageCount', width: 70},
+            {
+                title: '单条体积',
+                dataIndex: 'bodyBytes',
+                width: 90,
+                render: (value: number) => `${value} B`,
+            },
+            {
+                title: '状态',
+                dataIndex: 'status',
+                width: 80,
+                render: (value: string, row) =>
+                    value === 'success' ? (
+                        <Tag color="green">成功</Tag>
+                    ) : (
+                        <Tooltip title={row.errorMessage || '未发出任何消息'}>
+                            <Tag color="red">失败</Tag>
+                        </Tooltip>
+                    ),
+            },
+            {title: 'Message ID', dataIndex: 'messageId', ellipsis: true},
+        ],
+        [],
     );
 
     const applyTemplate = useCallback((template: MessageTemplate) => {
@@ -252,6 +319,9 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
                 sessionId: session.sessionId,
                 template: templateBody,
                 count,
+                // 发送历史那一行要知道这是哪个模板发的
+                templateName: draft.name || undefined,
+                templateId: currentId,
             });
             if (response.success && response.data) {
                 const result = response.data;
@@ -315,6 +385,8 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
                 totalMessages: settings.totalMessages,
                 maxInFlight: settings.maxInFlight,
                 stopOnError: settings.stopOnError,
+                templateName: draft.name || undefined,
+                templateId: currentId,
             });
             if (response.success && response.data) {
                 const info = response.data;
@@ -379,6 +451,8 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
                 template: templateBody,
                 count: oneShot,
                 options,
+                templateName: draft.name || undefined,
+                templateId: currentId,
             });
             if (response.success && response.data) {
                 reportFailures(response.data.failures);
@@ -427,6 +501,11 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
                     <Button size="small" icon={<ClearOutlined />} onClick={resetDraft}>
                         新建报文
                     </Button>
+                    <Tooltip title="这个 topic 上投过的报文（只留正文前缀，最多 200 条）">
+                        <Button size="small" icon={<HistoryOutlined />} onClick={() => void openHistory()}>
+                            发送历史
+                        </Button>
+                    </Tooltip>
                     <Tooltip title="不建常驻连接，现开现关投一批（每次都要重新握手，试报文用它）">
                         <Space wrap size={2}>
                             <InputNumber
@@ -470,6 +549,9 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
                 onApply={applyTemplate}
                 onSaved={template => setCurrentId(template.id)}
                 onNameChange={name => setDraft(current => ({...current, name}))}
+                // 删掉的正是当前这份时，编辑器里的内容就成了"没有模板的草稿"：
+                // 留着 currentId，下一次保存会写进一条已经不存在的行
+                onDeleted={() => setCurrentId(undefined)}
             />
             <div className="producer-layout">
                 <div className="producer-main">
@@ -593,6 +675,28 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
                     })}
                 </div>
             </div>
+            <Modal
+                title={`发送历史 · ${topicUri}`}
+                open={historyOpen}
+                onCancel={() => setHistoryOpen(false)}
+                footer={null}
+                width={860}
+            >
+                <div className="hint-text">展开某行看正文前缀（库里只留前 400 字符，整篇载荷不落库）。</div>
+                <Table
+                    size="small"
+                    rowKey="id"
+                    loading={historyLoading}
+                    columns={historyColumns}
+                    dataSource={historyRows}
+                    pagination={{size: 'small', pageSize: 20, showSizeChanger: false}}
+                    expandable={{
+                        // 库里只有正文前缀，整篇载荷当时就释放在原生层了，这里照实显前缀
+                        expandedRowRender: row => <pre className="history-preview">{row.bodyPreview}</pre>,
+                    }}
+                    locale={{emptyText: '这个 Topic 还没有发送记录'}}
+                />
+            </Modal>
         </PageShell>
     );
 };

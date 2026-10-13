@@ -1,4 +1,4 @@
-import React, {useEffect, useRef, useState, useCallback, useMemo} from 'react';
+import React, {useContext, useEffect, useRef, useState, useCallback, useMemo} from 'react';
 import {createPortal} from 'react-dom';
 import {Card, Spin, Alert} from 'antd';
 import {ReloadOutlined, ZoomInOutlined, ZoomOutOutlined, FullscreenOutlined, CompressOutlined} from '@ant-design/icons';
@@ -12,6 +12,7 @@ import {shortName} from '../utils/format';
 import {topicTab, topologyTab} from '../utils/tabIds';
 import {useTopologyPalette} from '../utils/topologyColors';
 import {useFontFactor} from '../utils/fontScale';
+import {PaneActiveContext} from '../hooks/useKeybindings';
 import StateBlock from './common/StateBlock';
 import IconButton from './common/IconButton';
 import {
@@ -168,6 +169,9 @@ const HomeTopology: React.FC<{toolbarContainer?: HTMLElement | null}> = ({toolba
     const palette = useTopologyPalette();
     const fontScale = useFontFactor();
     const {addTab} = useTabStore();
+    // 外层页签切走后组件仍挂载（display:none），力导向动画与全量拓扑 IPC 得跟着激活态停掉，
+    // 门控方式同 MetricsDashboard 用 paneActive 停轮询。
+    const paneActive = useContext(PaneActiveContext);
 
     const {ref: chartRef, isFullscreen, toggle: toggleFullscreen} = useFullscreen<HTMLDivElement>();
     useEchartsResize(chartRef, getChart);
@@ -176,23 +180,28 @@ const HomeTopology: React.FC<{toolbarContainer?: HTMLElement | null}> = ({toolba
 
     const {clusters} = useClusterStore();
 
-    // 缓存 ECharts 配置
-    const chartOption = useMemo(
-        () =>
-            buildTopologyOption({
-                nodes,
-                edges,
-                palette,
-                layout,
-                // 图例走 ECharts 自己的 legend：点一下就把那一类节点从图上摘掉，
-                // 之前那排静态色点什么都点不动。概览画不到分区与订阅，不列进图例。
-                showLegend: true,
-                legendTypes: ['cluster', 'broker', 'topic'],
-                fontScale,
-                canvasSize: {width: chartWidth, height: chartHeight},
-            }),
-        [nodes, edges, palette, layout, fontScale, chartWidth, chartHeight],
-    );
+    // 缓存 ECharts 配置。页签非活动时容器被量成 0×0，若照常重算会把 0 尺寸喂进
+    // buildTopologyOption、重建 option 并重启力导向动画；隐藏期沿用上一次可见时的 option。
+    const chartOptionRef = useRef<ReturnType<typeof buildTopologyOption> | null>(null);
+    const chartOption = useMemo(() => {
+        if (!paneActive && chartOptionRef.current) {
+            return chartOptionRef.current;
+        }
+        const option = buildTopologyOption({
+            nodes,
+            edges,
+            palette,
+            layout,
+            // 图例走 ECharts 自己的 legend：点一下就把那一类节点从图上摘掉，
+            // 之前那排静态色点什么都点不动。概览画不到分区与订阅，不列进图例。
+            showLegend: true,
+            legendTypes: ['cluster', 'broker', 'topic'],
+            fontScale,
+            canvasSize: {width: chartWidth, height: chartHeight},
+        });
+        chartOptionRef.current = option;
+        return option;
+    }, [paneActive, nodes, edges, palette, layout, fontScale, chartWidth, chartHeight]);
 
     // 加载集群拓扑数据
     const loadTopology = useCallback(async () => {
@@ -289,8 +298,12 @@ const HomeTopology: React.FC<{toolbarContainer?: HTMLElement | null}> = ({toolba
     }, [clusters]);
 
     useEffect(() => {
+        // 页签切走时不重发全量拓扑 IPC，也不在隐藏容器上跑加载与动画。
+        if (!paneActive) {
+            return;
+        }
         loadTopology();
-    }, [loadTopology]);
+    }, [paneActive, loadTopology]);
 
     // 放大
     const handleZoomIn = useCallback(() => {
@@ -376,7 +389,9 @@ const HomeTopology: React.FC<{toolbarContainer?: HTMLElement | null}> = ({toolba
 
     return (
         <>
-            {toolbarContainer ? createPortal(toolbarNode, toolbarContainer) : null}
+            {/* 全屏时工具栏不能留在页头：独占视口的只有图这一层，留在外面就等于
+                「退出全屏」被盖住，只能靠 Esc 出来，所以改画在图内右上角。 */}
+            {isFullscreen || !toolbarContainer ? null : createPortal(toolbarNode, toolbarContainer)}
             <Card
                 style={{flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column'}}
                 styles={{body: {flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden'}}}
@@ -397,17 +412,20 @@ const HomeTopology: React.FC<{toolbarContainer?: HTMLElement | null}> = ({toolba
                     {/* 拓扑图 */}
                     <div
                         ref={chartRef}
+                        className="topology-chart"
                         style={{
                             flex: 1,
                             minHeight: 300,
                             display: 'flex',
                             flexDirection: 'column',
+                            position: 'relative',
                             // zrender 写回的行内像素宽就是内容的最小宽度，flex 项的 min-width
                             // 默认 auto，不清零就回不去，窗口变窄时图只能溢出而不是跟着缩。
                             minWidth: 0,
                             overflow: 'hidden',
                         }}
                     >
+                        {isFullscreen ? <div className="topology-inline-toolbar">{toolbarNode}</div> : null}
                         <div ref={measureChartArea} style={{flex: 1, minHeight: 0, minWidth: 0}}>
                             {nodes.length > 0 && (
                                 <ReactECharts

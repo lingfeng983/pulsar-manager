@@ -10,6 +10,7 @@ import {
     defaultProducerOptions,
     isCapacityError,
     round2,
+    round4,
 } from './native-flow-utils';
 import {createLogger} from '../utils/logger';
 import {isTimeoutError, withHardTimeout} from '../utils/promise';
@@ -90,6 +91,10 @@ interface Run {
     // execute 是否已经跑起来。没跑起来时 settled 还是初始的空 Promise，
     // 作废握手不能等它，只能直接关已经建好的 producer/consumer。
     running: boolean;
+    // settle() 已经跑过（资源表被它取走并关闭）。之后 createProducer/subscribe
+    // 才落地的句柄必须自己关掉：再塞进 run.producers 就没人关了，
+    // 而 nativeClientManager.clear() 会在这些活句柄下面直接关原生 Client。
+    resourcesSettled: boolean;
 }
 
 // 同一目标（集群 + Topic + 订阅）只允许一条压测在跑：两条并发写同一个 Topic，
@@ -128,7 +133,7 @@ function progressOf(run: Run, phase: LoadTestPhase): LoadTestProgress {
         bytesSent: run.bytesSent,
         elapsedMs,
         msgPerSec: round2((run.sent * 1000) / elapsedMs),
-        mbPerSec: round2(run.bytesSent / 1024 / 1024 / (elapsedMs / 1000)),
+        mbPerSec: round4(run.bytesSent / 1024 / 1024 / (elapsedMs / 1000)),
         latency: run.latency.summarize(),
         error: run.failure ?? run.stopReason ?? undefined,
         lastError: run.lastError ?? undefined,
@@ -177,6 +182,7 @@ class LoadTestManager {
             releaseClient: null,
             settled: Promise.resolve(),
             running: false,
+            resourcesSettled: false,
         };
         this.runs.set(key, run);
 
@@ -260,18 +266,29 @@ class LoadTestManager {
         // 消费者必须先于生产者建好：订阅起始位置是 Latest，晚建会漏掉最前面的消息，
         // "发 1000 条只收到 800 条"会被当成集群丢消息。
         if (params.consumeBacklog) {
-            run.consumer = await client.subscribe({
+            const consumer = await client.subscribe({
                 topic: run.topic,
                 subscription: params.subscription,
                 subscriptionType: 'Shared',
                 subscriptionInitialPosition: 'Latest',
                 consumerName: 'pm-bench',
             });
+            if (run.resourcesSettled) {
+                // 建到一半已经被作废：settle() 关的是它 splice 走的那批，这批没人管
+                await consumer.close().catch(() => undefined);
+                return;
+            }
+            run.consumer = consumer;
         }
         for (let index = 0; index < params.producers; index += 1) {
-            run.producers.push(
-                await client.createProducer(buildProducerConfig(run.topic, producerOptions(params, index))),
+            const producer = await client.createProducer(
+                buildProducerConfig(run.topic, producerOptions(params, index)),
             );
+            if (run.resourcesSettled) {
+                await producer.close().catch(() => undefined);
+                continue;
+            }
+            run.producers.push(producer);
         }
     }
 
@@ -432,6 +449,7 @@ class LoadTestManager {
     // 释放客户端引用。中间任何一步超时都不能卡住后面的收尾。
     private async settle(run: Run): Promise<void> {
         run.stopped = true;
+        run.resourcesSettled = true;
         const producers = run.producers.splice(0);
         const consumer = run.consumer;
         run.consumer = null;

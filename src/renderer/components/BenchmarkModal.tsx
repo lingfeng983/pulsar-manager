@@ -102,6 +102,11 @@ const BenchmarkModal: React.FC<BenchmarkModalProps> = ({open, onClose}) => {
     // 进度通道在组件挂载期一直开着：压测可能比弹窗存在得更久
     useEffect(() => {
         return window.electronAPI.benchmark.onProgress(next => {
+            // 只接受当前轮次（或尚未记录轮次）的进度：上一轮压测的尾包若直接落进来，
+            // 会把 runIdRef/progress 覆写、并把 starting 置回 false，污染当前轮 UI。
+            if (runIdRef.current !== null && next.runId !== runIdRef.current) {
+                return;
+            }
             runIdRef.current = next.runId;
             setProgress(next);
             if (next.phase !== 'running') {

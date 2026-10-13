@@ -62,6 +62,9 @@ const TopicFormModal: React.FC<TopicFormModalProps> = ({open, clusterId, tenant,
             message.success('Topic 已创建');
             onSaved(values.name);
             onClose();
+        } catch {
+            // IPC 传输层异常没有 response，不接住就是按钮转一下什么也不说
+            message.error('创建失败');
         } finally {
             setSubmitting(false);
         }

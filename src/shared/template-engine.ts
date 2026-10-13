@@ -138,7 +138,33 @@ interface Scope {
 }
 
 function splitArgs(input: string): string[] {
-    return input.trim() ? input.split(',').map(part => part.trim()) : [];
+    const text = input.trim();
+    if (!text) {
+        return [];
+    }
+    // 裸 split(',') 会把引号里的逗号也当分隔符：string(8, "a b") 这类还行，
+    // choice("x,y"|z) 或带逗号的日期 pattern 会被切成错误的碎片。
+    // 这里按引号状态扫描切分，引号内的逗号不参与分隔。
+    const parts: string[] = [];
+    let current = '';
+    let quote: '"' | "'" | null = null;
+    for (let index = 0; index < text.length; index += 1) {
+        const char = text[index];
+        if (quote === null && (char === '"' || char === "'")) {
+            quote = char;
+            current += char;
+        } else if (char === quote) {
+            quote = null;
+            current += char;
+        } else if (char === ',' && quote === null) {
+            parts.push(current.trim());
+            current = '';
+        } else {
+            current += char;
+        }
+    }
+    parts.push(current.trim());
+    return parts;
 }
 
 function toNumber(raw: string | undefined, fallback: number, fn: string): number {
@@ -175,7 +201,10 @@ function castScalar(raw: string): Value {
     if (trimmed === 'true' || trimmed === 'false') {
         return trimmed === 'true';
     }
-    if (trimmed !== '' && Number.isFinite(Number(trimmed))) {
+    // 只有"转成数字再写回来一模一样"才算数字：19~20 位的订单号超出 2^53，
+    // Number() 会把末几位改掉，"007" 也会掉前导零。这两个场景里用户要的
+    // 恰恰是与报文一致的字符串，静默转数字就是发出一条对不上账的消息。
+    if (trimmed !== '' && Number.isFinite(Number(trimmed)) && String(Number(trimmed)) === trimmed) {
         return Number(trimmed);
     }
     return raw;
@@ -342,38 +371,64 @@ interface WalkContext {
     options: ResolveOptions;
     scope: Scope;
     variables: Map<string, string>;
+    budget: {nodes: number; chars: number; depth: number};
 }
 
+// 每展开一个 $each 元素计一次。单级 count 上限 10000 管不住嵌套——内外两级
+// 相乘能到 1e8，而 5MB 检查在 walk+stringify 全量物化之后才生效，届时主进程
+// 已经 OOM。所以在展开时就按累计预算拦，超限直接抛错，不等物化。
+const MAX_EXPANDED_NODES = 200_000;
+// 解析出的字符串按字符累计，与节点数双轨封顶，防止"节点少但每个巨大"绕开。
+const MAX_ACCUMULATED_CHARS = 8_000_000;
+// 嵌套形状异常（如 {"$each":{"count":1,"of":{"$each":…}}} 的自指写法）会让
+// walk 无限递归，JS 栈溢出是原生层崩溃而不是友好报错，必须提前拦。
+const MAX_WALK_DEPTH = 256;
+
 function walk(node: JsonValue, ctx: WalkContext, path: string): JsonValue {
-    if (Array.isArray(node)) {
-        const out: JsonValue[] = [];
-        for (let index = 0; index < node.length; index += 1) {
-            const item = node[index];
-            // 数组元素本身就是 $each 时展开成多个元素，这是列表类字段的主要写法
-            if (isPlainObject(item) && isEach(item)) {
-                for (const expanded of expandEach(item[EACH_KEY], ctx, `${path}[${index}]`)) {
-                    out.push(expanded);
+    ctx.budget.depth += 1;
+    if (ctx.budget.depth > MAX_WALK_DEPTH) {
+        throw new Error('模板嵌套层级异常（超过 256 层），请检查 $each 是否层层自引用');
+    }
+    try {
+        if (Array.isArray(node)) {
+            const out: JsonValue[] = [];
+            for (let index = 0; index < node.length; index += 1) {
+                const item = node[index];
+                // 数组元素本身就是 $each 时展开成多个元素，这是列表类字段的主要写法
+                if (isPlainObject(item) && isEach(item)) {
+                    for (const expanded of expandEach(item[EACH_KEY], ctx, `${path}[${index}]`)) {
+                        out.push(expanded);
+                    }
+                    continue;
                 }
-                continue;
+                out.push(walk(item, ctx, `${path}[${index}]`));
             }
-            out.push(walk(item, ctx, `${path}[${index}]`));
+            return out;
         }
-        return out;
-    }
-    if (isPlainObject(node)) {
-        if (isEach(node)) {
-            return expandEach(node[EACH_KEY], ctx, path);
+        if (isPlainObject(node)) {
+            if (isEach(node)) {
+                return expandEach(node[EACH_KEY], ctx, path);
+            }
+            const out: {[key: string]: JsonValue} = {};
+            for (const key of Object.keys(node)) {
+                out[key] = walk(node[key], ctx, path ? `${path}.${key}` : key);
+            }
+            return out;
         }
-        const out: {[key: string]: JsonValue} = {};
-        for (const key of Object.keys(node)) {
-            out[key] = walk(node[key], ctx, path ? `${path}.${key}` : key);
+        if (typeof node === 'string') {
+            const resolved = resolveString(node, ctx.rng, ctx.options, ctx.scope, ctx.variables);
+            // 整体占位符会保留原类型（${int(1,9)} 解析成数字），预算按序列化后的体积估
+            ctx.budget.chars += typeof resolved === 'string' ? resolved.length : String(resolved).length;
+            if (ctx.budget.chars > MAX_ACCUMULATED_CHARS) {
+                const mb = Math.round(ctx.budget.chars / 1024 / 1024);
+                throw new Error(`模板解析累计文本约 ${mb}MB，超出安全预算，请减少 $each 的 count 或字段体积`);
+            }
+            return resolved;
         }
-        return out;
+        return node;
+    } finally {
+        ctx.budget.depth -= 1;
     }
-    if (typeof node === 'string') {
-        return resolveString(node, ctx.rng, ctx.options, ctx.scope, ctx.variables);
-    }
-    return node;
 }
 
 function expandEach(spec: JsonValue | undefined, ctx: WalkContext, path: string): JsonValue[] {
@@ -392,6 +447,12 @@ function expandEach(spec: JsonValue | undefined, ctx: WalkContext, path: string)
     }
     const out: JsonValue[] = [];
     for (let index = 0; index < count; index += 1) {
+        ctx.budget.nodes += 1;
+        if (ctx.budget.nodes > MAX_EXPANDED_NODES) {
+            throw new Error(
+                `$each 累计展开已达 ${MAX_EXPANDED_NODES} 个元素（嵌套层级会相乘放大），` + '请减少各层 count',
+            );
+        }
         // 每一项是独立作用域：index() 取本项序号，具名变量的值则整条消息共用
         out.push(walk(spec.of as JsonValue, {...ctx, scope: {index}}, `${path}[${index}]`));
     }
@@ -419,12 +480,19 @@ export function resolveTemplate(
         const rng = createRng(options.seed);
         const resolveOptions: ResolveOptions = {...options, messageIndex: options.messageIndex ?? 0};
         const table = buildVariableValues(variables, rng, resolveOptions, {});
-        const text = JSON.stringify(walk(parsed, {rng, options: resolveOptions, scope: {}, variables: table}, ''));
+        const walkContext: WalkContext = {
+            rng,
+            options: resolveOptions,
+            scope: {},
+            variables: table,
+            budget: {nodes: 0, chars: 0, depth: 0},
+        };
+        const text = JSON.stringify(walk(parsed, walkContext, ''));
         const bytes = utf8Bytes(text);
         const max = options.maxBytes ?? DEFAULT_MAX_BYTES;
         if (bytes > max) {
-            // 模板本身限 1MB，但 $each + 大 count 能把它撑到几十 MB：不在这一步拦，
-            // 主进程会在 Buffer.from 阶段 OOM，现场是原生层崩溃而不是友好提示。
+            // 兜底检查：嵌套 $each 的失控展开已由 walk/expandEach 的累计预算
+            // 在物化前拦截，这里守住"单级大 count 一次性撑爆"的剩余路径。
             return {
                 ok: false,
                 error:

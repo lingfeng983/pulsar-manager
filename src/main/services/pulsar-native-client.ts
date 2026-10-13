@@ -6,7 +6,7 @@ import {AuthenticationBasic, AuthenticationToken, Client, LogLevel, MessageId} f
 import type {ClientConfig, Consumer, Message as NativeMessage, Producer, Reader, SubscriptionType} from 'pulsar-client';
 import type {AuthenticationTls} from 'pulsar-client';
 import {createLogger} from '../utils/logger';
-import {isTimeoutError, sleep, withHardTimeout} from '../utils/promise';
+import {isTimeoutError, settledWithin, sleep, withHardTimeout} from '../utils/promise';
 import {
     buildConsumerConfig,
     buildProducerConfig,
@@ -23,6 +23,7 @@ import type {
     ConsumerSessionInfo,
     Message,
     MessageBatch,
+    MessageTemplateBody,
     ProducerFlowParams,
     ProducerMessageOptions,
     ProducerOptions,
@@ -162,6 +163,9 @@ const BATCH_FLUSH_MS = 300;
 // 单次 receive 的等待上限：超时是正常空轮询，用来周期性回到循环头检查停止标志
 const RECEIVE_TIMEOUT_MS = 2000;
 const CLOSE_TIMEOUT_MS = 5000;
+// 连续发送被停后要等在途落地，最坏是 sendTimeout（默认 30s）+ 排空与关闭本身。
+// 这个预算只给 producer 会话：它等短了，就是在还有 send 在飞时去关原生对象。
+const PRODUCER_SETTLE_TIMEOUT_MS = 40_000;
 // Reader 的空轮询间隔：pulsar-client 1.18 的 readNext(timeout) 在超时真的到期时会段错误
 // （实测 readerIdle 两次必崩），所以 Reader 只能先 hasNext() 判断有货、再不带超时地读。
 const READER_POLL_MS = 250;
@@ -240,8 +244,15 @@ interface ProducerHandle {
     options: ProducerOptions;
     flowRunning: boolean;
     flow?: FlowState;
+    // 点了停止但那一轮还在排空在途发送（broker 半死时每条要等 sendTimeout 才落地）。
+    // 这一格为真期间禁止再起新一轮、也禁止关 producer：在途 send 打在关闭中的
+    // 原生对象上就是段错误。排空完成后由 runFlow 的 finally 摘掉。
+    draining?: boolean;
     // 最近一次统计的快照：停止与断开会话时要把它作为终态推给界面
     lastStats?: ProducerRunStats;
+    // flush/close 只能做一次：会话收尾与 runFlow 的 finally 都可能走到这里，
+    // 第二次 close 同样是打在已销毁对象上。
+    finalized?: boolean;
 }
 
 // 常驻 consumer 的会话侧状态。received 在这里而不是只留在界面：切页签、
@@ -429,7 +440,10 @@ export class NativeClientManager {
         this.sessions.delete(session.id);
         // 让循环自己收尾（它会等这次读取落地后再关资源）。直接 close 会把在途的
         // receive/readNext 打在已销毁的原生对象上——Reader 那条路径实测是段错误。
-        await withHardTimeout(session.settled, `session ${session.id} did not settle`, SETTLE_TIMEOUT_MS);
+        // producer 会话的预算要另给：它的收尾包含连续发送在途 send 的排空，
+        // 最坏要等满 sendTimeout，用消费侧那 7 秒会把排空中途截断。
+        const settleBudget = session.kind === 'producer' ? PRODUCER_SETTLE_TIMEOUT_MS : SETTLE_TIMEOUT_MS;
+        await withHardTimeout(session.settled, `session ${session.id} did not settle`, settleBudget);
     }
 
     // 关闭该集群上的全部会话并释放客户端（集群被删除或改配置时调用）。
@@ -920,9 +934,16 @@ export class NativeClientManager {
         // 原生对象上（实测段错误），所以先停循环并排空在途；二是批量模式下最后一段
         // 还压在原生队列里，先 close 就是把它丢掉，因此 flush 在 close 之前。
         session.close = async () => {
-            await this.endFlow(handle);
-            await producer.flush();
-            await producer.close();
+            // 顺序不能反两处：一是连续发送还在灌的时候先 close，等于把 send 打在已销毁的
+            // 原生对象上（实测段错误），所以先停循环并排空在途；二是批量模式下最后一段
+            // 还压在原生队列里，先 close 就是把它丢掉，因此 flush 在 close 之前。
+            // 排空没在预算内落地时把 producer 暂时留着，由 runFlow 的 finally 在消息
+            // 真落地后补关——抢时机 close 就是那条已知的段错误路径。
+            const drained = await this.endFlow(handle);
+            if (!drained && handle.draining) {
+                return;
+            }
+            await this.finalizeProducer(handle);
         };
 
         this.runSession(session, this.dwell(session), onEnd);
@@ -962,9 +983,46 @@ export class NativeClientManager {
         return result;
     }
 
-    async sendThroughSession(sessionId: string, items: OutboundMessage[]): Promise<ProducerSendResult> {
+    async sendThroughSession(
+        sessionId: string,
+        template: MessageTemplateBody,
+        count: number,
+        options: ProducerMessageOptions,
+    ): Promise<ProducerSendResult> {
         const handle = this.producerHandle(sessionId);
-        return this.sendWith(handle.producer, items, () => !this.sessions.get(sessionId));
+        return this.sendChunks(handle.producer, {template, count, options}, () => !this.sessions.has(sessionId));
+    }
+
+    // 解析一批发一批。一次性把 count 条全解出来，最坏就是 1000 × 5MB 的正文同时
+    // 在主进程里活着；逐批"解析→发送→释放"后同时只有一批（预算见 producer-send）。
+    // 序号跨批连续传递，所以 seq() 与界面说的"第几条"都不受影响。
+    private async sendChunks(
+        producer: Producer,
+        plan: {template: MessageTemplateBody; count: number; options: ProducerMessageOptions},
+        aborted: () => boolean,
+    ): Promise<ProducerSendResult> {
+        const result: ProducerSendResult = {messageIds: [], bytes: 0, failures: []};
+        for (let issued = 0; issued < plan.count;) {
+            const batch = resolveBatch(plan.template, plan.count - issued, plan.options, issued);
+            issued += batch.consumed;
+            result.failures.push(...batch.failures);
+            if (batch.items.length === 0) {
+                continue;
+            }
+            const sent = await this.sendWith(producer, batch.items, aborted);
+            result.messageIds.push(...sent.messageIds);
+            result.failures.push(...sent.failures);
+            result.bytes += sent.bytes;
+            if (aborted()) {
+                // 会话中途没了：还没解析的那些条同样没发出去，一并如实记账
+                for (let index = issued; index < plan.count; index += 1) {
+                    result.failures.push({index, error: '会话已停止，本条未发送'});
+                }
+                break;
+            }
+        }
+        result.failures.sort((a, b) => a.index - b.index);
+        return result;
     }
 
     // 批量模式下把还压在队列里的最后一段立刻走完。发送返回的 messageIds 本身已经
@@ -1029,16 +1087,46 @@ export class NativeClientManager {
         emit(stats);
     }
 
-    // 停掉这一轮的连续发送并等在途落地。会话收尾（close 前）与界面点停止都走这里，
-    // 只有这一处会置 stopped=true 后等 done，所以不存在"两个停止互相等"的路径。
-    private async endFlow(handle: ProducerHandle): Promise<void> {
+    // 停掉这一轮的连续发送并等在途落地。会话收尾（close 前）与界面点停止都走这里。
+    // 返回 false 表示"停止请求已发出但还没排空"——调用方绝不能在此之后去 close
+    // producer（在途 send 打在关闭中的原生对象上就是段错误），排空完成后
+    // runFlow 的 finally 会自己把 producer 收掉。
+    private async endFlow(handle: ProducerHandle): Promise<boolean> {
         const flow = handle.flow;
         if (!flow) {
-            return;
+            return true;
         }
         flow.stopped = true;
-        await withHardTimeout(flow.done, `flow ${flow.sessionId} did not settle`, CLOSE_TIMEOUT_MS);
+        if (handle.draining) {
+            // 已有一次排空在等：不重复计时，直接告诉调用方"还没落地"
+            return false;
+        }
+        handle.draining = true;
+        const settled = await settledWithin(
+            flow.done.then(
+                () => true,
+                () => false,
+            ),
+            CLOSE_TIMEOUT_MS,
+        );
+        if (!settled) {
+            return false;
+        }
         handle.flowRunning = false;
+        handle.draining = false;
+        return true;
+    }
+
+    // flush → close，且整个会话周期里只生效一次。
+    private async finalizeProducer(handle: ProducerHandle): Promise<void> {
+        if (handle.finalized) {
+            return;
+        }
+        handle.finalized = true;
+        // 批量模式下最后一段还压在原生队列里，先 close 就是把它丢掉，因此 flush 在前。
+        // flush 失败（连接已断/正在停）时 close 照做，否则留着一个关不掉的 producer。
+        await handle.producer.flush().catch(() => undefined);
+        await handle.producer.close().catch(() => undefined);
     }
 
     async startFlow(
@@ -1053,6 +1141,11 @@ export class NativeClientManager {
         }
         if (handle.flowRunning) {
             throw new Error('这条会话已经有一轮连续发送在跑，先停掉它');
+        }
+        if (handle.draining || handle.flow) {
+            // 上一轮点了停止但在途还没落地：此时再起一轮，两拨 send 会同时打在
+            // 同一个原生 producer 上，停止与统计也再也对不上号。
+            throw new Error('上一轮连续发送还在排空在途消息，请等它落地后再启动');
         }
         const options = messageOptions(handle.options, params.options);
         const flow: FlowState = {
@@ -1077,6 +1170,7 @@ export class NativeClientManager {
         };
         handle.flow = flow;
         handle.flowRunning = true;
+        handle.lastStats = undefined;
         flow.done = this.runFlow(session, handle, flow, params.template, options, emit);
         // 循环内部的异常都在这条链上收掉，否则停止时没人 await 就成未处理拒绝
         flow.done.catch(() => undefined);
@@ -1101,11 +1195,13 @@ export class NativeClientManager {
                 const want =
                     flow.totalMessages === 0 ? FLOW_CHUNK : Math.min(FLOW_CHUNK, flow.totalMessages - flow.issued);
                 const batch = resolveBatch(template, want, options, flow.issued);
-                flow.issued += want;
+                // 只推进真正解析过的那几条（字节预算可能让这一批提前收口），
+                // 按 want 推进会把没解的序号直接跳过，seq() 就断号了。
+                flow.issued += batch.consumed;
                 flow.failed += batch.failures.length;
-                if (batch.failures.length === want) {
+                if (batch.items.length === 0) {
                     // 整批都解析不出来：继续只是把失败数往上刷，模板本身不会自己修好
-                    endError = batch.failures[0].error;
+                    endError = batch.failures[0]?.error ?? '模板解析失败';
                     flow.lastError = endError;
                     break;
                 }
@@ -1146,9 +1242,17 @@ export class NativeClientManager {
             // 在途的发送必须落地之后再报终态：否则界面看到"已停止"而 broker 那边
             // 还在陆续收消息，数字对不上。drain 只等已交给原生的那些条。
             await flow.window.drain();
-            handle.flowRunning = false;
-            emit(this.flowStats(handle, flow, false, endError));
-            handle.flow = undefined;
+            // 只清自己这一轮：超时停止后用户重开的新一轮已经挂在 handle 上，
+            // 旧一轮的 finally 晚落地时把人家抹掉，就变成"新一轮停不下来、改不了速率"。
+            if (handle.flow === flow) {
+                handle.flow = undefined;
+                handle.flowRunning = false;
+                emit(this.flowStats(handle, flow, false, endError));
+            }
+            // 会话收尾因为没排空而把 close 押后时，由这里在落地之后补上。
+            if (session.stopped) {
+                await this.finalizeProducer(handle);
+            }
         }
     }
 
@@ -1245,6 +1349,8 @@ export class NativeClientManager {
      * 一次性发送：现开一条 producer、发完就关，不建会话。
      * 给 TopicDetail 的轻量发送和"发一条试试"用——那些场景留着常驻连接只会让
      * 用户分不清哪条 topic 还挂着连接，而握手开销本来也不是它们在意的事。
+     * 模板与条数交给这里逐批解析（见 sendChunks）：一次性物化整批正文会让
+     * 主进程在发一条"试试"的路上先多出几百 MB。
      */
     async sendOnce(
         clusterId: string,
@@ -1256,7 +1362,7 @@ export class NativeClientManager {
             persistent: boolean;
             options: ProducerOptions;
         },
-        items: OutboundMessage[],
+        plan: {template: MessageTemplateBody; count: number; options: ProducerMessageOptions},
     ): Promise<ProducerSendResult> {
         const topic = topicFullName(params.tenant, params.namespace, params.topic, params.persistent);
         const client = await this.getClient(clusterId, config);
@@ -1264,7 +1370,7 @@ export class NativeClientManager {
             const producer: Producer = await client.createProducer(buildProducerConfig(topic, params.options));
             // sendWith 逐条吞掉发送异常、自身不 reject，所以这里没有 try/finally：
             // 关掉这条一次性 producer 是唯一必经的收尾。
-            const result = await this.sendWith(producer, items, () => false);
+            const result = await this.sendChunks(producer, plan, () => false);
             result.closeError = await closeProducer(producer);
             return result;
         })();

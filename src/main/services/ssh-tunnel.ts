@@ -77,7 +77,11 @@ function readSecret(stored: string, allowPath: boolean): string {
     try {
         return fs.readFileSync(expanded, 'utf-8');
     } catch (error) {
-        throw new Error(`无法读取 SSH 私钥文件 "${value}": ${(error as Error).message}`);
+        // 不回显 value：这里的字符串可能是整篇私钥（只是没带 BEGIN 头的那种），
+        // 而这条消息会进日志与界面错误条
+        throw new Error(
+            `无法读取 SSH 私钥：文件不存在或没有读取权限（${error instanceof Error ? error.message : String(error)}）`,
+        );
     }
 }
 
@@ -127,6 +131,9 @@ function listenLocal(onConnection: (socket: net.Socket) => void): Promise<net.Se
 export class SshTunnelManager {
     private active = new Map<string, ActiveTunnel>();
     private pending = new Map<string, Promise<TunnelEndpoints>>();
+    // 每次 invalidate/disconnect 递增。建立中的隧道完成时世代已变，说明它用的
+    // 是改之前的参数：交出去等于让请求打到按旧主机建起来的本地端口。
+    private generation = new Map<string, number>();
 
     endpoints(tunnelId: string): TunnelEndpoints | undefined {
         return this.active.get(tunnelId)?.endpoints;
@@ -134,6 +141,10 @@ export class SshTunnelManager {
 
     isConnecting(tunnelId: string): boolean {
         return this.pending.has(tunnelId);
+    }
+
+    private currentGeneration(tunnelId: string): number {
+        return this.generation.get(tunnelId) ?? 0;
     }
 
     /** 已有隧道且目标一致就直接复用，否则建立一条新的（并发调用共享同一次建立）。 */
@@ -146,6 +157,9 @@ export class SshTunnelManager {
         if (inflight && !existing) {
             return inflight;
         }
+        // 世代在排队这一刻取，而不是 open() 里：作废发生在两者之间时，
+        // 排在后面的这次建立同样已经过期，必须知道自己过期。
+        const generation = this.currentGeneration(record.id);
         // 目标变了（或上一次建立用的是旧目标）：先等它收尾再按新目标重建，
         // 否则两次建立会互相覆盖，留下没人关闭的本地监听和 SSH 连接。
         const work = (
@@ -156,7 +170,7 @@ export class SshTunnelManager {
                   )
                 : Promise.resolve()
         )
-            .then(() => this.open(record, targets))
+            .then(() => this.open(record, targets, generation))
             .finally(() => {
                 if (this.pending.get(record.id) === work) {
                     this.pending.delete(record.id);
@@ -166,7 +180,12 @@ export class SshTunnelManager {
         return work;
     }
 
-    private async open(record: SSHTunnelRecord, targets: TunnelTargets): Promise<TunnelEndpoints> {
+    private async open(record: SSHTunnelRecord, targets: TunnelTargets, generation: number): Promise<TunnelEndpoints> {
+        const stale = () => this.currentGeneration(record.id) !== generation;
+        if (stale()) {
+            // 排队期间被作废：这里连旧的都不要关，关掉会把新那条一起掐了
+            throw new Error('SSH 隧道参数在建立期间已变更，请重试');
+        }
         // 旧隧道（哪怕目标不同）先干净关掉，否则本地监听端口会一直泄漏
         await this.teardown(record.id, 'disconnected');
 
@@ -223,6 +242,12 @@ export class SshTunnelManager {
                     localBrokerPort: brokerAddress.port,
                 },
             };
+            if (stale()) {
+                // 握手期间配置被改过：这条隧道连的是旧对端，登记了就会一直用错
+                listeners.forEach(listener => listener.close());
+                ssh.destroy();
+                throw new Error('SSH 隧道参数在建立期间已变更，请重试');
+            }
             this.active.set(record.id, tunnel);
 
             // 握手期间的 once 监听已摘掉，这里换成常驻监听：隧道中途断掉必须
@@ -262,12 +287,21 @@ export class SshTunnelManager {
 
     /** 主动断开：本地监听与 SSH 连接全部释放，端口留 0、状态置未连接。 */
     async disconnect(tunnelId: string): Promise<void> {
+        this.forget(tunnelId);
         await this.teardown(tunnelId, 'disconnected');
     }
 
     /** 配置变更后作废缓存隧道（记录保留），下一次请求按新参数重建。 */
     async invalidate(tunnelId: string): Promise<void> {
+        this.forget(tunnelId);
         await this.teardown(tunnelId, 'disconnected');
+    }
+
+    // 递增世代并丢掉排队中的那次建立：正在连接的那条落地后会发现世代已变，
+    // 自己把监听与 SSH 连接拆掉，而不是把一个按旧参数建成的端点交给调用方。
+    private forget(tunnelId: string): void {
+        this.generation.set(tunnelId, this.currentGeneration(tunnelId) + 1);
+        this.pending.delete(tunnelId);
     }
 
     async closeAll(): Promise<void> {

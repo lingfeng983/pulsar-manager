@@ -1,4 +1,4 @@
-import React, {useState, useEffect, useCallback} from 'react';
+import React, {useState, useEffect, useCallback, useRef} from 'react';
 import {Modal, Alert, Button, Space, Input, Progress, Typography, Descriptions, message} from 'antd';
 
 type CheckResult = NonNullable<Awaited<ReturnType<typeof window.electronAPI.update.check>>['data']>;
@@ -27,8 +27,13 @@ const UpdateModal: React.FC<{open: boolean; onClose: () => void}> = ({open, onCl
     const [downloading, setDownloading] = useState(false);
     const [progress, setProgress] = useState<{received: number; total: number} | null>(null);
     const [downloaded, setDownloaded] = useState(false);
+    // 检查请求代次：开窗触发的检查与"保存令牌/重试"触发的检查并发时，
+    // 晚到的旧响应不能覆盖新结果。
+    const checkRequestRef = useRef(0);
 
     const runCheck = useCallback(async () => {
+        const requestId = ++checkRequestRef.current;
+        const isStale = () => requestId !== checkRequestRef.current;
         setChecking(true);
         setError(null);
         setResult(null);
@@ -36,15 +41,23 @@ const UpdateModal: React.FC<{open: boolean; onClose: () => void}> = ({open, onCl
         setProgress(null);
         try {
             const response = await window.electronAPI.update.check();
+            if (isStale()) {
+                return;
+            }
             if (response.success && response.data) {
                 setResult(response.data);
             } else {
                 setError(response.error || '检查更新失败');
             }
         } catch (e) {
+            if (isStale()) {
+                return;
+            }
             setError(String(e));
         } finally {
-            setChecking(false);
+            if (!isStale()) {
+                setChecking(false);
+            }
         }
     }, []);
 

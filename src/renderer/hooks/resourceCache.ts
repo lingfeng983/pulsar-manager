@@ -71,7 +71,11 @@ function unwrap<T>(response: {success: boolean; data?: T; error?: string}, what:
 // 同一个 key 正在飞行中的请求。资源树、TopNav 搜索、首页拓扑经常在同一帧
 // 请求同一份数据，若只看缓存，冷启动时会并发打出 N 个完全相同的 IPC。
 // 这里让后来者复用同一个 Promise，成功后一起拿结果，失败后一起报错。
-const inFlight = new Map<string, Promise<unknown>>();
+// 条目必须带发起时的写入代次：失效动作之后的读取若还复用失效前发出的
+// 在途请求，界面会渲染出删除前的旧数据（且因 epoch 不符根本不写缓存）。
+type InFlightEntry<T> = {promise: Promise<T>; epoch: number};
+
+const inFlight = new Map<string, InFlightEntry<unknown>>();
 
 // 单调递增的写入代次：任何失效动作都会 +1。失效之前发出的在途请求，其结果
 // 已经不代表"最新"，必须禁止它回写缓存——否则删掉 topic 后一次慢刷新
@@ -84,12 +88,13 @@ async function cachedLoad<T>(cache: LRUCache<T>, key: string, fetcher: () => Pro
         return cached;
     }
 
-    const pending = inFlight.get(key) as Promise<T> | undefined;
-    if (pending) {
-        return pending;
+    const pending = inFlight.get(key) as InFlightEntry<T> | undefined;
+    if (pending && pending.epoch === writeEpoch) {
+        return pending.promise;
     }
 
     const epochAtStart = writeEpoch;
+    const entry: InFlightEntry<T> = {promise: undefined as unknown as Promise<T>, epoch: epochAtStart};
     const request = fetcher()
         .then(data => {
             if (epochAtStart === writeEpoch) {
@@ -98,10 +103,14 @@ async function cachedLoad<T>(cache: LRUCache<T>, key: string, fetcher: () => Pro
             return data;
         })
         .finally(() => {
-            inFlight.delete(key);
+            // 只摘自己的条目：若中途失效后已有新一轮请求顶替了 map，别把它误删。
+            if (inFlight.get(key) === entry) {
+                inFlight.delete(key);
+            }
         });
+    entry.promise = request;
 
-    inFlight.set(key, request);
+    inFlight.set(key, entry);
     return request;
 }
 

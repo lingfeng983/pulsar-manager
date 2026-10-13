@@ -83,6 +83,9 @@ const ContextMenu: React.FC<ContextMenuProps> = ({x, y, items, ariaLabel, fixed,
         switch (event.key) {
             case 'Escape':
                 event.preventDefault();
+                // 不收住冒泡的话，Escape 会一路传到 window 上的全局 Escape 监听，
+                // 关菜单顺带把顶部搜索框清空、作废在途搜索。
+                event.stopPropagation();
                 onClose();
                 return;
             case 'ArrowDown':

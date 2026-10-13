@@ -67,19 +67,24 @@ function collapseTopicUris(topicUris: string[]): Topic[] {
         const fullName = topicUri.split('://').pop() || '';
         const persistent = topicUri.startsWith('persistent://');
         const partition = fullName.match(/^(.*)-partition-(\d+)$/);
+        // 去重键必须带 scheme：persistent 与 non-persistent 同名是两个不同资源，
+        // 只用 fullName 会让非持久那条被先入的持久条目吃掉。
+        const scope = `${persistent ? 'persistent' : 'non-persistent'}://`;
 
         if (!partition) {
-            if (!byName.has(fullName)) {
-                byName.set(fullName, {name: fullName, persistent, topicUri: fullName, partitions: []});
+            const key = `${scope}${fullName}`;
+            if (!byName.has(key)) {
+                byName.set(key, {name: fullName, persistent, topicUri: fullName, partitions: []});
             }
             continue;
         }
 
         const baseName = partition[1];
-        let entry = byName.get(baseName);
+        const key = `${scope}${baseName}`;
+        let entry = byName.get(key);
         if (!entry) {
             entry = {name: baseName, persistent, topicUri: baseName, partitions: []};
-            byName.set(baseName, entry);
+            byName.set(key, entry);
         }
         entry.partitions.push(topicUri);
     }

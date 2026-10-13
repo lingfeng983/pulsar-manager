@@ -493,6 +493,9 @@ export interface ProducerSendParams extends TopicPathParams {
     // 一次点"发送"投几条（每条重新解析占位符）
     count: number;
     options?: ProducerMessageOptions;
+    // 只用于发送历史那一行：这一批是哪个模板发的、模板叫什么名字
+    templateName?: string;
+    templateId?: string;
 }
 
 export interface ProducerSendResult {
@@ -508,6 +511,9 @@ export interface ProducerSendResult {
 export interface ProducerFlowParams {
     sessionId: string;
     template: MessageTemplateBody;
+    // 只给发送历史用：留空表示内联报文
+    templateName?: string;
+    templateId?: string;
     // 0 = 不限速，全速投
     ratePerSecond: number;
     // 0 = 一直投到手动停止
@@ -527,6 +533,9 @@ export interface ProducerSendOnceParams extends TopicPathParams {
     template: MessageTemplateBody;
     count: number;
     options?: ProducerOptions;
+    // 同 ProducerSendParams：只写进发送历史，不参与发送本身
+    templateName?: string;
+    templateId?: string;
 }
 
 // ========== 消费者工作台 ==========
@@ -575,48 +584,7 @@ export interface ConsumerSessionInfo {
     pendingAcks: number;
 }
 
-export interface AckParams {
-    sessionId: string;
-    seqs: number[];
-    mode: 'individual' | 'cumulative';
-}
-
-export interface AckResult {
-    acked: number;
-    failures: {seq: number; error: string}[];
-}
-
-export interface SeekParams {
-    sessionId: string;
-    messageIdBytes?: string;
-    timestamp?: number;
-}
-
-// ========== peek / 重发 / 发送历史 ==========
-
-export interface PeekLatestParams extends TopicPathParams {
-    // 从 now - windowMinutes 起 seek 再向前扫，取最近这么多分钟内的消息
-    windowMinutes: number;
-    count: number;
-    // 扫描条数上限：分区多、积压大时不能无限读
-    scanLimit: number;
-    deadlineMs: number;
-}
-
-export interface PeekResult {
-    messages: Message[];
-    // 达到 scanLimit/deadline 还没凑够 count：界面要说明是"没扫到"而不是"没有"
-    scanned: number;
-    truncated: boolean;
-    reason?: string;
-}
-
-export interface MessageResendParams extends TopicPathParams {
-    dataBase64: string;
-    properties?: Record<string, string>;
-    // 不带表示回发到原 topic
-    targetTopic?: TopicPathParams;
-}
+// ========== 发送历史 ==========
 
 export interface SendHistoryEntry {
     id: number;
@@ -631,18 +599,6 @@ export interface SendHistoryEntry {
     status: 'success' | 'failure';
     errorMessage?: string | null;
     createdAt: string;
-}
-
-// ========== Topic schema ==========
-
-// broker 侧 schema 注册表是否可用是未知数（本仓库此前完全没碰过 schema 路由），
-// 所以取不到时必须给出原因并让界面退回本地校验，而不是抛红色错误。
-export interface TopicSchemaInfo {
-    available: boolean;
-    reason?: string;
-    schemaType?: string;
-    definition?: string;
-    version?: number;
 }
 
 // 主进程 → 渲染进程的推送通道名（preload 与 ipc/stream 共用，避免两处各写一份字面量）

@@ -1,4 +1,4 @@
-import React, {type ReactNode} from 'react';
+import React, {type ReactNode, useEffect} from 'react';
 import {DatePicker, Input, InputNumber, Select, Switch, Tooltip} from 'antd';
 import type {ProducerOptions} from '../../types';
 import {defaultProducerOptions} from '../../../shared/producer-defaults';
@@ -32,6 +32,15 @@ const Row: React.FC<{label: ReactNode; hint?: string; children: ReactNode}> = ({
 
 const ProducerOptionsForm: React.FC<ProducerOptionsFormProps> = ({value, onChange}) => {
     const patch = (next: Partial<ProducerOptions>) => onChange({...value, ...next});
+
+    // 批量与分块同开会让原生进程 abort，模板回填等外部来源仍可能带进这种组合：
+    // 这里按"批量优先"把真实值纠正回来，否则界面显示分块为关、发出去的参数却是同开。
+    useEffect(() => {
+        if (value.batchingEnabled && value.chunkingEnabled) {
+            onChange({...value, chunkingEnabled: false});
+        }
+    }, [value, onChange]);
+
     const number = (key: keyof ProducerOptions, min: number, max: number, step = 1) => (
         <InputNumber
             size="small"
@@ -108,7 +117,7 @@ const ProducerOptionsForm: React.FC<ProducerOptionsFormProps> = ({value, onChang
                     <Switch
                         size="small"
                         disabled={value.batchingEnabled}
-                        checked={value.chunkingEnabled && !value.batchingEnabled}
+                        checked={value.chunkingEnabled}
                         onChange={checked => patch({chunkingEnabled: checked})}
                     />
                 </Row>

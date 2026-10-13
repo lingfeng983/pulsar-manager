@@ -1,45 +1,38 @@
 {
-  "appId": "com.pulsar.manager",
-  "productName": "Pulsar Manager",
-  "directories": {
-    "output": "release",
-    "buildResources": "build"
-  },
-  "files": [
-    "dist/**/*",
-    "package.json",
-    "!**/*.map",
-    "!**/*.tsbuildinfo"
-  ],
-  "asarUnpack": [
-    "node_modules/better-sqlite3/build/Release/better_sqlite3.node",
-    "node_modules/pulsar-client/lib/binding/pulsar.node"
-  ],
-  "npmRebuild": false,
-  "win": {
-    "artifactName": "Pulsar管理工具-安装包-${version}.${ext}",
-    "target": [
-      {
-        "target": "nsis",
-        "arch": ["x64"]
-      }
+    "appId": "com.pulsar.manager",
+    "productName": "Pulsar Manager",
+    "directories": {
+        "output": "release",
+        "buildResources": "build"
+    },
+    "files": ["dist/**/*", "package.json", "!**/*.map", "!**/*.tsbuildinfo"],
+    "asarUnpack": [
+        "node_modules/better-sqlite3/build/Release/better_sqlite3.node",
+        "node_modules/pulsar-client/lib/binding/pulsar.node"
     ],
-    "signAndEditExecutable": false
-  },
-  "nsis": {
-    "oneClick": false,
-    "allowToChangeInstallationDirectory": true,
-    "createDesktopShortcut": true,
-    "createStartMenuShortcut": true
-  },
-  "mac": {
-    "target": ["dmg"],
-    "category": "public.app-category.developer-tools",
-    "icon": "build/icon.icns"
-  },
-  "linux": {
-    "target": ["AppImage", "deb"],
-    "category": "Development",
-    "icon": "build/icon.png"
-  }
+    "npmRebuild": false,
+    "win": {
+        "artifactName": "Pulsar管理工具-安装包-${version}.${ext}",
+        "target": [
+            {
+                "target": "nsis",
+                "arch": ["x64"]
+            }
+        ],
+        "signAndEditExecutable": false
+    },
+    "nsis": {
+        "oneClick": false,
+        "allowToChangeInstallationDirectory": true,
+        "createDesktopShortcut": true,
+        "createStartMenuShortcut": true
+    },
+    "mac": {
+        "target": ["dmg"],
+        "category": "public.app-category.developer-tools"
+    },
+    "linux": {
+        "target": ["AppImage", "deb"],
+        "category": "Development"
+    }
 }

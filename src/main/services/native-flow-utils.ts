@@ -69,7 +69,13 @@ export function createRateLimiter(ratePerSecond: number): () => Promise<void> {
     const stepMs = 1000 / ratePerSecond;
     let nextSlotAt = Date.now();
     return async () => {
-        const waitMs = nextSlotAt - Date.now();
+        const now = Date.now();
+        // 落后于计划就把时间轴拉回现在：定时器被事件循环压后时，nextSlotAt 会一直
+        // 落在过去，之后的每条都不等待——一次卡顿之后就变成"整批瞬间灌完"的突发。
+        if (nextSlotAt < now) {
+            nextSlotAt = now;
+        }
+        const waitMs = nextSlotAt - now;
         nextSlotAt += stepMs;
         if (waitMs > 0) {
             await sleep(waitMs);

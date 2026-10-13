@@ -942,6 +942,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                         type="primary"
                         loading={resettingInProgress}
                         onClick={() => void executeResetCursor()}
+                        disabled={resetPosition === 'timestamp' && !resetTimestamp}
                     >
                         确认重置
                     </Button>,

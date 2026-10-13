@@ -1,5 +1,6 @@
 import {useCallback, useEffect, useRef, useState} from 'react';
 import type {Message, MessageBatch, SessionEndEvent} from '../../types';
+import {STREAM_MAX_BYTES, trimMessageList} from './messageFormat';
 
 // 消息流的订阅收口。消费与读取两条推送通道 + 会话结束事件在每个要看实时消息的
 // 页面里都是同一套：按 sessionId 认领、新消息插到最前、超过上限裁尾。
@@ -70,7 +71,9 @@ export function useMessageStream({
         }
         setBuckets(current => {
             const previous = current[batch.sessionId] || [];
-            const next = [...batch.messages, ...previous].slice(0, limitRef.current);
+            // 条数之外还要按正文长度收：几 MB 一条的报文×500 条就是把渲染进程
+            // 按 GB 驻留，而实时推送路径没有主进程扫描那道 8MB 护栏。
+            const next = trimMessageList([...batch.messages, ...previous], limitRef.current, STREAM_MAX_BYTES);
             return {...current, [batch.sessionId]: next};
         });
     }, []);

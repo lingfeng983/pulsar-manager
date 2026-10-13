@@ -19,6 +19,7 @@ import {
     getSetting,
     setSetting,
     insertOperationLog,
+    insertSendHistory,
     runInTransaction,
     type SSHTunnelRecord,
 } from '../database/sqlite';
@@ -51,6 +52,7 @@ export {
     getSetting,
     setSetting,
     insertOperationLog,
+    insertSendHistory,
     runInTransaction,
     encrypt,
     decrypt,
@@ -115,6 +117,10 @@ const optionalWebUrl = z
     .nullable()
     .refine(value => !value || WEB_URL_PATTERN.test(value), {message: '需为 http:// 或 https:// 地址'});
 
+// admin 超时（毫秒）。区间与配置中心导入校验（app-config）保持同一口径：
+// 负值会让 axios 立刻抛错、超大值会把请求挂在那里没人管，两者都不该进库。
+const adminApiTimeoutSchema = z.number().int().min(1000).max(120000).optional().nullable();
+
 export const ClusterConfigSchema = stripUnusedSsh(
     z
         .object({
@@ -128,7 +134,9 @@ export const ClusterConfigSchema = stripUnusedSsh(
             useSshTunnel: z.boolean().optional().nullable(),
             sshConfigId: TunnelIdSchema,
             ssh: SshInlineSchema.optional().nullable(),
-            adminApiTimeout: z.number().optional().nullable(),
+            // 与导入校验（app-config 的 1000..120000）同一区间：这里只写 z.number()
+            // 的话，负值会让 axios 立刻失败、超大值会把请求挂住，而 0 之外没人兜底。
+            adminApiTimeout: adminApiTimeoutSchema,
         })
         // 勾选了隧道就必须有可用的隧道配置：要么这次填了新参数，要么已经有落库的
         // sshConfigId。缺了它会在连接阶段才报"隧道配置不存在"，用户看不到原因。
@@ -147,7 +155,7 @@ export const ClusterTestSchema = stripUnusedSsh(
         webServiceUrl: optionalWebUrl,
         authPlugin: z.string().optional().nullable(),
         authParams: z.string().optional().nullable(),
-        adminApiTimeout: z.number().optional().nullable(),
+        adminApiTimeout: adminApiTimeoutSchema,
         tlsEnabled: z.boolean().optional().nullable(),
         tlsTrustCerts: z.string().optional().nullable(),
         useSshTunnel: z.boolean().optional().nullable(),
@@ -447,8 +455,10 @@ export const ReadStartSchema = TopicPathSchema.extend({
     from: z.enum(['earliest', 'latest', 'timestamp', 'recent']).default('earliest'),
     timestamp: z.number().int().positive().optional(),
     maxMessages: z.number().int().min(0).max(10000).default(500),
-    // 「最近 N 条」的 N：上限 1000 是因为主进程要把这 N 条都留在内存里再一次性推给界面
-    recentCount: z.number().int().min(1).max(1000).default(20),
+    // 「最近 N 条」的 N：上限对齐界面保留条数（500），否则主进程认真扫完 1000 条
+    // 推过来，渲染层按保留上限只留 500 条，用户看到"扫过 X 条，取最近 1000 条"
+    // 而列表只有一半，等于静默丢数。
+    recentCount: z.number().int().min(1).max(500).default(20),
 })
     // 起点与时间戳必须二选一：两个都给的话服务层会拿 timestamp 去 seek，
     // 用户选"最新位置"却看到从旧时间开始回放，而且界面报成功。
@@ -599,13 +609,9 @@ export const ConsumerConfigDraftSchema = z.object({
     ackTimeoutMs: z.number().int().min(1000).max(3_600_000).optional(),
     nAckRedeliverTimeoutMs: z.number().int().min(1000).max(3_600_000).optional(),
     consumerName: z.string().min(1).max(255).optional(),
-    deadLetter: z
-        .object({
-            topicName: z.string().min(1).max(500),
-            maxRedeliverCount: z.number().int().min(1).max(100),
-            initialSubscriptionName: z.string().min(1).max(255).optional(),
-        })
-        .optional(),
+    // 与建会话那一处共用同一份死信校验：草稿能存下自由文本、起会话时才被全路径正则
+    // 拒掉，等于把同一份配置分成"存得进去、用不出来"两种状态。
+    deadLetter: DeadLetterSchema.optional(),
 });
 
 export const ConsumerConfigUpsertSchema = ConsumerConfigDraftSchema.extend({
@@ -632,18 +638,23 @@ export const ProducerStartSchema = TopicPathSchema.extend({
 
 // 模板正文只取 body/variables/properties 三项：发送方传的是"这次要发的报文"，
 // 不是数据库里的那一行，名称与作用域跟这次发送无关。
+// templateName/templateId 是这次发送的"叫什么名字"，只用于写发送历史。
 export const ProducerSendSchema = TopicPathSchema.extend({
     sessionId: z.string().uuid(),
     template: TemplateBodySchema,
     // 一次点"发送"投几条。上限 1000：每条最坏 5MB，再大就该走连续发送而不是这里。
     count: z.number().int().min(1).max(1000).default(1),
     options: ProducerMessageOptionsSchema.optional(),
+    templateName: z.string().min(1).max(100).optional(),
+    templateId: z.string().uuid().optional(),
 });
 
 export const ProducerSendOnceSchema = TopicPathSchema.extend({
     template: TemplateBodySchema,
     count: z.number().int().min(1).max(1000).default(1),
     options: ProducerOptionsSchema.default({}),
+    templateName: z.string().min(1).max(100).optional(),
+    templateId: z.string().uuid().optional(),
 });
 
 export const ProducerFlushSchema = z.object({sessionId: z.string().uuid()});
@@ -662,6 +673,8 @@ export const ProducerFlowSchema = z.object({
     maxInFlight: z.number().int().min(1).max(2000).default(500),
     stopOnError: z.boolean().default(true),
     options: ProducerMessageOptionsSchema.optional(),
+    templateName: z.string().min(1).max(100).optional(),
+    templateId: z.string().uuid().optional(),
 });
 
 export const ProducerSetRateSchema = z.object({

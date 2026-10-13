@@ -24,6 +24,8 @@ interface TemplateLibraryProps {
     onApply: (template: MessageTemplate) => void;
     onSaved: (template: MessageTemplate) => void;
     onNameChange: (name: string) => void;
+    // 删除的是当前模板时让父层把 id 也清掉：只清名字的话，点「更新」会拿着已删的 id 去 update
+    onDeleted?: (id: string) => void;
 }
 
 const scopeLabel = (template: MessageTemplate): string =>
@@ -40,6 +42,7 @@ const TemplateLibrary: React.FC<TemplateLibraryProps> = ({
     onApply,
     onSaved,
     onNameChange,
+    onDeleted,
 }) => {
     const [templates, setTemplates] = useState<MessageTemplate[]>([]);
     const [loading, setLoading] = useState(false);
@@ -104,6 +107,7 @@ const TemplateLibrary: React.FC<TemplateLibraryProps> = ({
         if (response.success) {
             if (currentId === id) {
                 onNameChange('');
+                onDeleted?.(id);
             }
             void reload();
         } else {

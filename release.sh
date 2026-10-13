@@ -59,7 +59,9 @@ npm run format:check >> "$LOG" 2>&1 || { tail -30 "$LOG"; die "格式检查失�
 
 # ---------- 2. 出包 ----------
 echo "==> [2/4] 构建 + electron-builder 打包（约 2-4 分钟，日志 $LOG）"
-rm -f "${OUT_DIR}"/-安装包-*.exe "${OUT_DIR}"/-安装包-*.exe.blockmap
+# 清掉上一代的同名产物：artifactName 是「Pulsar管理工具-安装包-<版本>.exe」，
+# 模式必须带产品名前缀，写成 "-安装包-*" 从来匹配不到任何文件（旧包会一直留在目录里）
+rm -f "${OUT_DIR}"/Pulsar管理工具-安装包-*.exe "${OUT_DIR}"/Pulsar管理工具-安装包-*.exe.blockmap
 # 先单独 build（避免"改了源码却把上一代 dist 打进安装包"），再按 OUT_DIR 打包，
 # 最后跑 verify-package：electron-builder 在输出目录被锁住时可能只写出
 # resources/app.asar 就以 0 退出，安装包能生成但装出来是打不开的半成品，必须在这里拦下

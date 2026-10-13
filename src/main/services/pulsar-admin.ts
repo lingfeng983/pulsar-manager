@@ -276,6 +276,13 @@ export class PulsarAdminClient {
     destroy(): void {
         this.semaphore.reset();
         this.aggregateSemaphore.reset();
+        // 本客户端独占的那个 https.Agent 上还挂着已建好的 TLS 连接：换一次集群
+        // 配置就新建一个客户端，旧 agent 的套接字没人关就一直占着 fd。
+        // 明文请求走 Node 的全局 agent，那是共享的，不能在这里 destroy。
+        const agent = this.http.defaults.httpsAgent;
+        if (agent && typeof (agent as {destroy?: () => void}).destroy === 'function') {
+            (agent as {destroy: () => void}).destroy();
+        }
     }
 }
 

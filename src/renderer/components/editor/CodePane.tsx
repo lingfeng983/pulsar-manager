@@ -61,6 +61,9 @@ const CodePane = forwardRef<CodePaneHandle, CodePaneProps>(function CodePane(
     kindRef.current = kind;
     const initialValue = useRef(value);
     const initialKind = useRef(kind);
+    // 编辑器自己 emit 出去的那份文本：value 回流时靠它判定"这就是我刚写的内容"，
+    // 省掉一次整篇 doc.toString()——5MB 报文每敲一键序列化两遍是肉眼可见的卡。
+    const emitted = useRef<string | null>(initialValue.current);
 
     const languageCompartment = useRef(new Compartment());
 
@@ -89,7 +92,9 @@ const CodePane = forwardRef<CodePaneHandle, CodePaneProps>(function CodePane(
                     languageCompartment.current.of(languageExtension(initialKind.current)),
                     EditorView.updateListener.of(update => {
                         if (update.docChanged) {
-                            onChangeRef.current?.(update.state.doc.toString());
+                            const text = update.state.doc.toString();
+                            emitted.current = text;
+                            onChangeRef.current?.(text);
                         }
                     }),
                     EditorView.contentAttributes.of({'aria-label': ariaLabel, 'aria-multiline': 'true'}),
@@ -114,10 +119,16 @@ const CodePane = forwardRef<CodePaneHandle, CodePaneProps>(function CodePane(
         if (!view) {
             return;
         }
-        const current = view.state.doc.toString();
-        if (current !== value) {
-            view.dispatch({changes: {from: 0, to: current.length, insert: value}});
+        if (value === emitted.current) {
+            return;
         }
+        const doc = view.state.doc;
+        // 长度都不等就没必要序列化全文比对；等长时才需要读一遍确认不是外部塞进来的同长度内容。
+        if (doc.length === value.length && doc.toString() === value) {
+            return;
+        }
+        emitted.current = value;
+        view.dispatch({changes: {from: 0, to: doc.length, insert: value}});
     }, [value]);
 
     useEffect(() => {

@@ -213,7 +213,9 @@ const ResourceTree: React.FC = () => {
                                 <span style={{fontSize: 'var(--font-size-xs)'}}>{topicName}</span>
                             </Space>
                         ),
-                        key: `topic-${clusterId}-${tenant}-${namespace}-${topicName}`,
+                        // persistent 与 non-persistent 同名 topic 是两行，键里必须带 scheme，
+                        // 否则 React 撞 key（渲染错乱）且第 488 行的按前缀清理会连带误伤
+                        key: `topic-${clusterId}-${tenant}-${namespace}-${topic.persistent ? 'p' : 'n'}-${topicName}`,
                         dataRef: {
                             type: 'topic' as const,
                             clusterId,
@@ -345,6 +347,10 @@ const ResourceTree: React.FC = () => {
         return filterNodes(treeData);
     }, [treeData, topicFilter]);
 
+    // 展开 effect 需要读最新筛选树但不希望被它的每次增量变化重新触发，故走 ref。
+    const visibleTreeDataRef = useRef<DataNode[]>([]);
+    visibleTreeDataRef.current = visibleTreeData;
+
     const matchedTopicCount = useMemo(() => {
         if (!topicFilter.trim()) {
             return 0;
@@ -408,6 +414,8 @@ const ResourceTree: React.FC = () => {
     }, [topicFilter, treeData, reloadNodeChildren]);
 
     // 命中项要一眼看见：进入筛选就展开全部幸存分支，清空时还原本来的展开状态。
+    // 只在 query 变化时展开一次，而不是每次 visibleTreeData 增量更新都重放——否则
+    // 补拉命名空间/筛选期树变化会把用户中途手动折叠的分支又重新展开。
     useEffect(() => {
         const query = topicFilter.trim();
         if (!query) {
@@ -429,9 +437,9 @@ const ResourceTree: React.FC = () => {
                 }
             }
         };
-        collect(visibleTreeData);
+        collect(visibleTreeDataRef.current);
         setExpandedKeys(keys);
-    }, [topicFilter, visibleTreeData]);
+    }, [topicFilter]);
 
     // 订阅缓存失效事件：别的页面（Topic 详情页删 Topic、命名空间页建 Topic）改完
     // 数据只清缓存，而本组件把子节点存在自己的 treeData 里，不重读就永远显示旧列表。
@@ -470,6 +478,21 @@ const ResourceTree: React.FC = () => {
             return existing ? {...entry, children: existing.children} : entry;
         });
         setTreeData(next);
+        // 集群移除后，它名下所有节点的加载代次键都失去意义：reloadEpochRef 是只增不减
+        // 的 Map，不清就会在长时间多集群会话里无界增长。按当前树仍存在的集群前缀清掉。
+        const liveIds = next.map(entry => String(entry.key).slice('cluster-'.length));
+        for (const key of reloadEpochRef.current.keys()) {
+            const belongs = liveIds.some(
+                id =>
+                    key === `cluster-${id}` ||
+                    key.startsWith(`tenant-${id}-`) ||
+                    key.startsWith(`ns-${id}-`) ||
+                    key.startsWith(`topic-${id}-`),
+            );
+            if (!belongs) {
+                reloadEpochRef.current.delete(key);
+            }
+        }
         // 集群被删掉后，展开列表里会留下它的 key（以及它下面的租户/命名空间）；
         // 本地的 expandedKeys 不会自己收缩，顺手把树里已经不存在的 key 丢掉。
         setExpandedKeys(keys => {
@@ -669,6 +692,10 @@ const ResourceTree: React.FC = () => {
                                 persistent: dataRef.persistent,
                             }),
                         );
+                    } else if (dataRef?.type === 'tenant') {
+                        addTab(tenantTab(dataRef.clusterId ?? '', dataRef.tenant ?? ''));
+                    } else if (dataRef?.type === 'namespace') {
+                        addTab(namespaceTab(dataRef.clusterId ?? '', dataRef.tenant ?? '', dataRef.namespace ?? ''));
                     } else if (dataRef?.type === 'cluster') {
                         setActiveCluster(dataRef.clusterId ?? '');
                     }

@@ -145,12 +145,24 @@ const ConsumerWorkspace: React.FC<ConsumerWorkspaceProps> = ({
     useEffect(() => {
         const samples: Record<string, number> = {};
         const timer = window.setInterval(() => {
-            const next: Record<string, number> = {};
+            // 没有会话就不要每秒空写一次 state（整棵树跟着重渲染）；页签在后台时
+            // 也停表，但 samples 仍要跟上新读数，否则回到前台第一秒的速率虚高。
+            const seenNow: Record<string, number> = {};
             for (const session of sessionsRef.current) {
-                const seen = (basesRef.current[session.sessionId] || 0) + (countsRef.current[session.sessionId] || 0);
-                const prev = samples[session.sessionId];
-                next[session.sessionId] = prev === undefined ? 0 : Math.max(0, seen - prev);
-                samples[session.sessionId] = seen;
+                seenNow[session.sessionId] =
+                    (basesRef.current[session.sessionId] || 0) + (countsRef.current[session.sessionId] || 0);
+            }
+            if (sessionsRef.current.length === 0 || document.hidden) {
+                for (const [sessionId, seen] of Object.entries(seenNow)) {
+                    samples[sessionId] = seen;
+                }
+                return;
+            }
+            const next: Record<string, number> = {};
+            for (const [sessionId, seen] of Object.entries(seenNow)) {
+                const prev = samples[sessionId];
+                next[sessionId] = prev === undefined ? 0 : Math.max(0, seen - prev);
+                samples[sessionId] = seen;
             }
             setRates(next);
         }, 1000);
@@ -435,6 +447,9 @@ const ConsumerWorkspace: React.FC<ConsumerWorkspaceProps> = ({
                 // 只报"保存失败"用户会去查集群连接。
                 message.error(response.error || '保存失败');
             }
+        } catch (saveError) {
+            message.error('保存失败');
+            console.error('Failed to save consumer config:', saveError);
         } finally {
             setSaving(false);
         }
