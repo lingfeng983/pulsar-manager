@@ -328,8 +328,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // 在线更新
     update: {
         getVersion: () => Promise.resolve({success: true, data: process.versions.app}),
-        tokenStatus: () => ipcRenderer.invoke('update:tokenStatus'),
-        setToken: (token: string) => ipcRenderer.invoke('update:setToken', token),
         check: () => ipcRenderer.invoke('update:check'),
         download: (url: string) => ipcRenderer.invoke('update:download', url),
         install: () => ipcRenderer.invoke('update:install'),
@@ -568,8 +566,6 @@ declare global {
             };
             update: {
                 getVersion: () => Promise<APIResponse<string>>;
-                tokenStatus: () => Promise<APIResponse<{configured: boolean}>>;
-                setToken: (token: string) => Promise<APIResponse<void>>;
                 check: () => Promise<
                     APIResponse<{
                         currentVersion: string;

@@ -10,9 +10,8 @@ import {createLogger} from '../utils/logger';
 const log = createLogger('Update');
 
 // 更新源是公开的分发仓库 lingfeng983/pulsar-manager-dist：只放发行版与安装包，
-// 源码仓库 pulsar-manager 保持私有。公开仓库的发行版与附件（attach_files）读取不需要
-// access_token，所以用户不必再自备令牌；令牌仍然支持（配置过就带上），留的是
-// "把更新源指到私有仓"这条路。
+// 源码仓库 pulsar-manager 保持私有且不挂发行版。公开仓库的发行版与附件
+// （attach_files）匿名就能读，所以检查与下载全程不需要 access_token。
 const GITEE_OWNER = 'lingfeng983';
 const GITEE_REPO = 'pulsar-manager-dist';
 const API_BASE = 'https://gitee.com/api/v5';
@@ -65,11 +64,9 @@ function isAllowedAssetUrl(raw: string): boolean {
 // 一个谎报 Content-Length 或对端持续吐数据的响应就能把磁盘写满。
 const MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024;
 
-// 最近一次检查得到的下载目标。令牌只留在主进程：一旦把它拼进下发给渲染层的
-// downloadUrl，页面里的任何脚本都能读走它。
+// 最近一次检查得到的下载目标；downloadUpdate 只认这份，渲染层传什么都不认。
 interface PendingRelease {
     publicUrl: string;
-    tokenizedUrl: string;
     fileName: string;
     size: number;
     sha256: string;
@@ -87,12 +84,10 @@ function sha256FromNotes(notes: string): string {
     return matched[1].toLowerCase();
 }
 
-export async function checkForUpdate(token: string | undefined): Promise<UpdateCheckResult> {
+export async function checkForUpdate(): Promise<UpdateCheckResult> {
     const currentVersion = app.getVersion();
-    const params: Record<string, string> = token ? {access_token: token} : {};
 
     const releasesResp = await axios.get(`${API_BASE}/repos/${GITEE_OWNER}/${GITEE_REPO}/releases`, {
-        params,
         timeout: 15000,
     });
     const releases: Array<{tag_name?: string; name?: string; body?: string; id?: number | string}> = Array.isArray(
@@ -130,7 +125,6 @@ export async function checkForUpdate(token: string | undefined): Promise<UpdateC
         // 带令牌也一样回 HTML 404（实测），走到那里就等于永远找不到安装包。
         `${API_BASE}/repos/${GITEE_OWNER}/${GITEE_REPO}/releases/${latest.id}/attach_files`,
         {
-            params,
             timeout: 15000,
         },
     );
@@ -160,17 +154,8 @@ export async function checkForUpdate(token: string | undefined): Promise<UpdateC
         throw new Error('发行版附件地址不是受信任的 gitee 域名');
     }
     const sha256 = sha256FromNotes(latest.body || '');
-    const sep = exe.browser_download_url.includes('?') ? '&' : '?';
-    // 公开分发仓匿名就能下；令牌只作为"更新源指向私有仓"时的兜底，且只留在主进程
-    const tokenizedUrl = token
-        ? `${exe.browser_download_url}${sep}access_token=${encodeURIComponent(token)}`
-        : exe.browser_download_url;
-    if (token && !isAllowedAssetUrl(tokenizedUrl)) {
-        throw new Error('附件下载地址拼接令牌后不再是受信任的 gitee 域名');
-    }
     pending = {
         publicUrl: exe.browser_download_url,
-        tokenizedUrl,
         fileName: exe.name || `PulsarManager-${latestVersion}-Setup.exe`,
         size: exe.size || 0,
         sha256,
@@ -291,7 +276,7 @@ export async function downloadUpdate(downloadUrl: string): Promise<string> {
     const {target, part} = packageTarget(dir, pending.fileName);
     try {
         fs.mkdirSync(dir, {recursive: true});
-        const resp = await openTrustedStream(pending.tokenizedUrl);
+        const resp = await openTrustedStream(pending.publicUrl);
         const total = Number(resp.headers['content-length'] || 0);
         if (total > MAX_DOWNLOAD_BYTES) {
             destroyStream(resp.data);

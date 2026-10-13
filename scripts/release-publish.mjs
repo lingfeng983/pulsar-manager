@@ -7,11 +7,12 @@
 // 中文经参数传进来会被破坏成 U+FFFD。
 //
 // 两个仓库各司其职：
-//   源码仓（私有）留提交历史与发行说明，不再挂安装包；
+//   源码仓（私有）只留提交历史与标签，不再挂发行版；
 //   分发仓（公开）只放发行版与安装包，应用内「检查更新」读它——公开仓库的
-//   releases/attachments 读取不需要 access_token，用户就不用自己建令牌了。
-// 安装包因此只上传一次（到分发仓），源码仓那个同名发行版上的历史 exe 会被删掉，
-// 否则同一版本有两个渠道、两份可能对不上的包。
+//   releases/attach_files 匿名就能读，用户不用配任何东西。
+// 安装包因此只上传一次（到分发仓）。源码仓上残留的旧发行版（每个还挂着一份 80MB 的
+// exe）由 purgeSourceReleases 连附件一起删掉：那是渠道切换前的遗留，留着既占私有仓
+// 容量，又给出"同一版本两个渠道两份包"的错觉。
 //
 // 行为：分发仓不存在就创建（公开）；发行版没有就建、有就更新标题与正文；同名旧附件
 // 先删再传；最后按版本号只保留最近 GITEE_DIST_KEEP（默认 3）个版本的安装包。
@@ -171,14 +172,13 @@ async function listAttachments(repo, releaseId) {
     return (await api(`${repoApi(repo)}/releases/${releaseId}/attach_files`)) || [];
 }
 
-// 一个发行版里只该有一个 exe：应用内「检查更新」在有多个 exe 时按"最大的那个"挑，
-// 留旧包在原地就会把旧版本发给用户。keepName 为 null 表示把 exe 全清掉。
-async function dropExeAttachments(repo, releaseId, keepName) {
+// 一个发行版里只该有刚上传的那份安装包：应用内「检查更新」在有多个 exe 时按"最大的
+// 那个"挑，留旧包或 Gitee 自动生成的源码包在原地就会把错的东西发给用户。
+async function dropAttachments(repo, releaseId, keepName) {
     for (const item of await listAttachments(repo, releaseId)) {
         const itemName = item.name || '';
         const itemShowName = item.show_name || '';
-        const isExe = itemName.toLowerCase().endsWith('.exe') || itemShowName.toLowerCase().endsWith('.exe');
-        if (isExe && itemName !== keepName && itemShowName !== keepName) {
+        if (itemName !== keepName && itemShowName !== keepName) {
             await api(`${repoApi(repo)}/releases/${releaseId}/attach_files/${item.id}`, {method: 'DELETE'});
             console.log(`${repo}: 删除旧附件 ${itemName || itemShowName}（id=${item.id}）`);
         }
@@ -188,7 +188,7 @@ async function dropExeAttachments(repo, releaseId, keepName) {
 async function uploadAttachment(repo, releaseId, artifact) {
     const name = path.basename(artifact);
     const localSize = fs.statSync(artifact).size;
-    await dropExeAttachments(repo, releaseId, null);
+    await dropAttachments(repo, releaseId, null);
     const form = new FormData();
     form.append('access_token', readToken());
     form.append('release_id', String(releaseId));
@@ -305,12 +305,27 @@ async function pruneDistReleases(currentTag) {
     }
 }
 
+// 源码仓不发版：那里的历史发行版是渠道切换前的遗留，安装包已经全部在分发仓。
+// 只删发行版（附件跟着没了），git 标签与提交历史原样保留——release.sh 仍在源码仓打标签。
+async function purgeSourceReleases() {
+    const releases = (await api(`${repoApi(REPO)}/releases`)) || [];
+    for (const release of releases) {
+        await api(`${repoApi(REPO)}/releases/${release.id}`, {method: 'DELETE'});
+        console.log(`${REPO}: 删除发行版 ${release.tag_name || release.id}（id=${release.id}）`);
+    }
+}
+
 async function main() {
     const [tag, titleFile, bodyFile, artifactArg] = process.argv.slice(2);
     // release.sh 用它先建好分发仓、再拿 master 的 sha 决定要不要初始化提交
     if (tag === 'ensure-dist') {
         await ensureDistRepo();
         process.stdout.write(`${(await masterSha(DIST_REPO)) || ''}\n`);
+        return;
+    }
+    // 单独清理源码仓的历史发行版（正常发版时 main 末尾自动做，这条是给渠道切换用的）
+    if (tag === 'purge-source') {
+        await purgeSourceReleases();
         return;
     }
     if (!tag || !titleFile || !bodyFile) {
@@ -329,21 +344,16 @@ async function main() {
     }
     await ensureDistPublic();
 
-    // 先发分发仓，源码仓的正文里才能带上准确的下载地址
+    // 分发仓是唯一发版处，正文里的下载地址就是它自己的附件
     const distRelease = await upsertRelease(DIST_REPO, tag, name, body);
     const downloadUrl = await uploadAttachment(DIST_REPO, distRelease.id, artifact);
     const distPage = `https://gitee.com/${OWNER}/${DIST_REPO}/releases/tag/${tag}`;
 
-    const sourceBody = `${body}\n\n- 安装包下载：${distPage}\n- 直链：${downloadUrl}`;
-    const sourceRelease = await upsertRelease(REPO, tag, name, sourceBody);
-    // 安装包只留一份（在分发仓）：源码仓这份是渠道切换前的遗留，留着就有两份可能对不上的包
-    await dropExeAttachments(REPO, sourceRelease.id, null);
-
+    await purgeSourceReleases();
     await pruneDistReleases(tag);
 
     console.log(`page=${distPage}`);
     console.log(`download=${downloadUrl}`);
-    console.log(`source-page=https://gitee.com/${OWNER}/${REPO}/releases/tag/${tag}`);
 }
 
 main().catch(error => {

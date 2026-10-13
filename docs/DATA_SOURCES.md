@@ -526,10 +526,8 @@ Admin REST 没有发消息与 peek 的端点（真实 broker 上返回 HTML 404�
 
 | IPC 通道 | 方向 | 功能 |
 |---------|------|------|
-| `update:tokenStatus` | renderer → main | 查询本机是否已配置 Gitee 只读令牌 |
-| `update:setToken` | renderer → main | 加密保存令牌 |
-| `update:check` | renderer → main | 拉取最新发行版并比对版本号 |
-| `update:download` | renderer → main | 下载发行版 exe 附件 |
+| `update:check` | renderer → main | 匿名读取公开分发仓 `pulsar-manager-dist` 的最新发行版并比对版本号 |
+| `update:download` | renderer → main | 下载发行版 exe 附件（逐跳复核 gitee 域名、按发行说明里的 SHA256 校验） |
 | `update:install` | renderer → main | 静默安装并重启 |
 
 ### 4.11 生产者（`producer-handlers.ts`）

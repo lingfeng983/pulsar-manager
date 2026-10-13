@@ -351,10 +351,7 @@ const ConfigCenter: React.FC = () => {
                                         应用版本：<Tag color="blue">{meta.appVersion}</Tag>
                                     </Text>
                                     <Text copyable={{text: meta.databasePath}}>本地数据库：{meta.databasePath}</Text>
-                                    <Text className="hint-text">
-                                        快捷键绑定在"快捷键配置"页里单独管理与导入导出；Gitee 更新令牌在"设置 →
-                                        检查更新"里配置。
-                                    </Text>
+                                    <Text className="hint-text">快捷键绑定在"快捷键配置"页里单独管理与导入导出。</Text>
                                 </Space>
                             ) : null}
                         </StateBlock>

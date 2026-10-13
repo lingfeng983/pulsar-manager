@@ -309,7 +309,7 @@ const TopNav: React.FC = () => {
         }
     };
 
-    // 检查更新：真实流程收敛到 UpdateModal（检查/令牌/下载/安装）
+    // 检查更新：真实流程收敛到 UpdateModal（检查/下载/安装）
     const [updateModalOpen, setUpdateModalOpen] = useState(false);
 
     // 设置菜单点击处理

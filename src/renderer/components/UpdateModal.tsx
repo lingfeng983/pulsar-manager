@@ -1,35 +1,19 @@
 import React, {useState, useEffect, useCallback, useRef} from 'react';
-import {Modal, Alert, Button, Collapse, Space, Input, Progress, Typography, Descriptions, message} from 'antd';
+import {Modal, Alert, Button, Space, Progress, Typography, Descriptions, message} from 'antd';
 
 type CheckResult = NonNullable<Awaited<ReturnType<typeof window.electronAPI.update.check>>['data']>;
 
 const formatBytes = (n: number): string =>
     n > 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${(n / 1024).toFixed(0)} KB`;
 
-// 令牌状态必须是三态：布尔初值 false 会让"读取中"先闪一条"未配置"的警告，
-// 明明配好了却先看到红字。unknown 用来区分"读失败"和"确实没配"。
-// 更新源现在是公开分发仓库，没配令牌是正常状态，所以缺令牌只报 info 不报警告——
-// 一条红字会让用户以为自己必须去建一枚令牌。
-type TokenStatus = 'loading' | 'configured' | 'missing' | 'unknown';
-
-const TOKEN_ALERT: Record<TokenStatus, {type: 'info' | 'success'; message: string}> = {
-    loading: {type: 'info', message: '正在读取令牌状态...'},
-    configured: {type: 'success', message: '已配置访问令牌'},
-    missing: {type: 'info', message: '未配置访问令牌（公开更新源不需要）'},
-    unknown: {type: 'info', message: '令牌状态读取失败，不影响公开更新源的检查与下载'},
-};
-
 const UpdateModal: React.FC<{open: boolean; onClose: () => void}> = ({open, onClose}) => {
-    const [tokenStatus, setTokenStatus] = useState<TokenStatus>('loading');
-    const [tokenInput, setTokenInput] = useState('');
-    const [savingToken, setSavingToken] = useState(false);
     const [checking, setChecking] = useState(false);
     const [result, setResult] = useState<CheckResult | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [downloading, setDownloading] = useState(false);
     const [progress, setProgress] = useState<{received: number; total: number} | null>(null);
     const [downloaded, setDownloaded] = useState(false);
-    // 检查请求代次：开窗触发的检查与"保存令牌/重试"触发的检查并发时，
+    // 检查请求代次：开窗触发的检查与错误条上的"重试"并发时，
     // 晚到的旧响应不能覆盖新结果。
     const checkRequestRef = useRef(0);
 
@@ -65,17 +49,6 @@ const UpdateModal: React.FC<{open: boolean; onClose: () => void}> = ({open, onCl
 
     useEffect(() => {
         if (!open) return;
-        setTokenStatus('loading');
-        void window.electronAPI.update
-            .tokenStatus()
-            .then(r => {
-                if (r.success && r.data) {
-                    setTokenStatus(r.data.configured ? 'configured' : 'missing');
-                } else {
-                    setTokenStatus('unknown');
-                }
-            })
-            .catch(() => setTokenStatus('unknown'));
         void runCheck();
     }, [open, runCheck]);
 
@@ -93,23 +66,6 @@ const UpdateModal: React.FC<{open: boolean; onClose: () => void}> = ({open, onCl
             }
         });
     }, [open]);
-
-    const handleSaveToken = async () => {
-        setSavingToken(true);
-        try {
-            const response = await window.electronAPI.update.setToken(tokenInput.trim());
-            if (response.success) {
-                message.info(tokenInput.trim() ? '令牌已保存' : '令牌已清除');
-                setTokenInput('');
-                setTokenStatus(tokenInput.trim() ? 'configured' : 'missing');
-                void runCheck();
-            } else {
-                message.error(response.error || '保存失败');
-            }
-        } finally {
-            setSavingToken(false);
-        }
-    };
 
     const handleDownload = async () => {
         if (!result?.downloadUrl) return;
@@ -222,49 +178,6 @@ const UpdateModal: React.FC<{open: boolean; onClose: () => void}> = ({open, onCl
                         }
                     />
                 )}
-
-                {/* 令牌输入收进"高级"：公开更新源用不到它，摆在主区域只会让人以为
-                    必须先建一枚令牌才能更新。配过之后（configured）才把它顶出来，
-                    免得想换掉或清掉时找不到入口。 */}
-                <Collapse
-                    ghost
-                    size="small"
-                    defaultActiveKey={tokenStatus === 'configured' ? ['token'] : []}
-                    items={[
-                        {
-                            key: 'token',
-                            label: '高级：访问令牌（公开更新源无需配置）',
-                            children: (
-                                <Space direction="vertical" style={{width: '100%'}}>
-                                    <Typography.Text type="secondary" style={{fontSize: 'var(--font-size-xs)'}}>
-                                        {TOKEN_ALERT[tokenStatus].message}
-                                        。只有把更新源指向私有仓库时才需要令牌：在 Gitee「设置 → 私人令牌」创建，
-                                        仅需只读仓库权限；本机加密保存，不会上传。
-                                    </Typography.Text>
-                                    <Space.Compact style={{width: '100%'}}>
-                                        <Input.Password
-                                            value={tokenInput}
-                                            onChange={e => setTokenInput(e.target.value)}
-                                            placeholder={
-                                                tokenStatus === 'configured'
-                                                    ? '输入新令牌可覆盖，留空保存即清除'
-                                                    : 'Gitee 私人令牌 (access_token)'
-                                            }
-                                            disabled={tokenStatus === 'loading'}
-                                        />
-                                        <Button
-                                            loading={savingToken}
-                                            disabled={tokenStatus === 'loading'}
-                                            onClick={() => void handleSaveToken()}
-                                        >
-                                            保存
-                                        </Button>
-                                    </Space.Compact>
-                                </Space>
-                            ),
-                        },
-                    ]}
-                />
             </Space>
         </Modal>
     );

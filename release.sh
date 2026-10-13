@@ -15,9 +15,9 @@
 #        在 https://gitee.com/profile/personal_access_tokens 创建，勾选 projects 权限
 #        任何一级都不落仓库：脚本会随 dist 进 asar，内嵌令牌等于随安装包分发凭据
 #
-# 分发仓: 安装包发布到 GITEE_DIST_REPO（默认 pulsar-manager-dist，公开），
+# 分发仓: 唯一的发版处。安装包发布到 GITEE_DIST_REPO（默认 pulsar-manager-dist，公开），
 #        不存在时由脚本创建；只保留最近 GITEE_DIST_KEEP（默认 3）个版本的安装包。
-#        源码仓 ${OWNER}/pulsar-manager 保持私有，同名发行版只留说明与直链。
+#        源码仓 ${OWNER}/pulsar-manager 保持私有，只留提交与标签、不挂发行版。
 #
 # 可重复执行：任何一步失败，修好后再跑一次即可，不会产生重复发行版或重复附件。
 set -euo pipefail
@@ -169,6 +169,6 @@ fi
 printf '%s' "$TITLE" > "$TMP/rel_title.txt"
 
 # 安装包只上传到公开的分发仓（应用内更新读它，用户不需要令牌）；
-# 源码仓那边只留同名发行版的说明并指回分发仓，历史附件由脚本清掉。
+# 源码仓不再发版，脚本会把它上面残留的历史发行版连附件一起删掉。
 node scripts/release-publish.mjs "$TAG" "$TMP/rel_title.txt" "$TMP/rel_body.txt" "$EXE"
 echo "==> 完成：https://gitee.com/${OWNER}/${DIST_REPO}/releases/tag/${TAG}（分发，应用内更新读这里）"
