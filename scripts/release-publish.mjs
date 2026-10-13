@@ -228,13 +228,31 @@ async function ensureDistRepo() {
         body: JSON.stringify({
             access_token: readToken(),
             name: DIST_REPO,
-            // Gitee 的可见性收字符串 "true"/"false"，传布尔值会被当成私有
-            public: 'true',
+            // 建仓参数只有 private 可用（public 会回 "public is invalid"），而 Gitee
+            // 又拒绝在空仓库上改可见性，所以这里先建出来，公开这一步由 ensureDistPublic 做
+            private: false,
             description: 'Pulsar 管理工具安装包分发仓库（应用内自动更新源，只放发行版与安装包，源码在私有仓）',
         }),
     });
-    console.log(`${DIST_REPO}: 已创建公开仓库 ${created.html_url || ''}`);
+    console.log(`${DIST_REPO}: 已创建仓库 ${created.html_url || ''}（稍后设为公开）`);
     return created;
+}
+
+// 分发仓必须公开，否则用户读不到更新源。Gitee 不接受在空仓库上改可见性
+// （"空仓库不支持设置为公开仓库"），所以这一步排在 release.sh 推完 README 锚点提交之后。
+async function ensureDistPublic() {
+    const repo = await api(repoApi(DIST_REPO));
+    if (repo.public === true) {
+        return repo;
+    }
+    // 建仓与改可见性都只认 private 参数（public 会回 "public is invalid"）
+    await api(repoApi(DIST_REPO), {method: 'PATCH', body: JSON.stringify({name: DIST_REPO, private: false})});
+    const after = await api(repoApi(DIST_REPO));
+    if (after.public !== true) {
+        throw new Error(`${DIST_REPO} 仍不是公开仓库：Gitee 拒绝把空仓库设为公开，请先确认 master 上已有提交`);
+    }
+    console.log(`${DIST_REPO}: 已设为公开仓库`);
+    return after;
 }
 
 // 发行版必须挂在一条真实分支上（target_commitish=master），空仓库没有分支可指。
@@ -309,6 +327,7 @@ async function main() {
                 '先往该仓库推一个只含 README 的提交（release.sh 的第 4 步会自动做）',
         );
     }
+    await ensureDistPublic();
 
     // 先发分发仓，源码仓的正文里才能带上准确的下载地址
     const distRelease = await upsertRelease(DIST_REPO, tag, name, body);
