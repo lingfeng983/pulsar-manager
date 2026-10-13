@@ -1,5 +1,5 @@
 import React, {useState, useEffect, useCallback, useRef} from 'react';
-import {Modal, Alert, Button, Space, Input, Progress, Typography, Descriptions, message} from 'antd';
+import {Modal, Alert, Button, Collapse, Space, Input, Progress, Typography, Descriptions, message} from 'antd';
 
 type CheckResult = NonNullable<Awaited<ReturnType<typeof window.electronAPI.update.check>>['data']>;
 
@@ -8,13 +8,15 @@ const formatBytes = (n: number): string =>
 
 // 令牌状态必须是三态：布尔初值 false 会让"读取中"先闪一条"未配置"的警告，
 // 明明配好了却先看到红字。unknown 用来区分"读失败"和"确实没配"。
+// 更新源现在是公开分发仓库，没配令牌是正常状态，所以缺令牌只报 info 不报警告——
+// 一条红字会让用户以为自己必须去建一枚令牌。
 type TokenStatus = 'loading' | 'configured' | 'missing' | 'unknown';
 
-const TOKEN_ALERT: Record<TokenStatus, {type: 'info' | 'success' | 'warning'; message: string}> = {
+const TOKEN_ALERT: Record<TokenStatus, {type: 'info' | 'success'; message: string}> = {
     loading: {type: 'info', message: '正在读取令牌状态...'},
-    configured: {type: 'success', message: 'Gitee 访问令牌已配置'},
-    missing: {type: 'warning', message: 'Gitee 访问令牌未配置（私有仓库检查更新必需）'},
-    unknown: {type: 'warning', message: '令牌状态读取失败，可关闭后重新打开本窗口'},
+    configured: {type: 'success', message: '已配置访问令牌'},
+    missing: {type: 'info', message: '未配置访问令牌（公开更新源不需要）'},
+    unknown: {type: 'info', message: '令牌状态读取失败，不影响公开更新源的检查与下载'},
 };
 
 const UpdateModal: React.FC<{open: boolean; onClose: () => void}> = ({open, onClose}) => {
@@ -219,36 +221,47 @@ const UpdateModal: React.FC<{open: boolean; onClose: () => void}> = ({open, onCl
                     />
                 )}
 
-                <Alert
-                    type={TOKEN_ALERT[tokenStatus].type}
-                    showIcon
-                    message={TOKEN_ALERT[tokenStatus].message}
-                    description={
-                        <Space direction="vertical" style={{width: '100%'}}>
-                            <Space.Compact style={{width: '100%'}}>
-                                <Input.Password
-                                    value={tokenInput}
-                                    onChange={e => setTokenInput(e.target.value)}
-                                    placeholder={
-                                        tokenStatus === 'configured'
-                                            ? '输入新令牌可覆盖，留空保存即清除'
-                                            : 'Gitee 私人令牌 (access_token)'
-                                    }
-                                    disabled={tokenStatus === 'loading'}
-                                />
-                                <Button
-                                    loading={savingToken}
-                                    disabled={tokenStatus === 'loading'}
-                                    onClick={() => void handleSaveToken()}
-                                >
-                                    保存
-                                </Button>
-                            </Space.Compact>
-                            <Typography.Text type="secondary" style={{fontSize: 'var(--font-size-xs)'}}>
-                                令牌在 Gitee「设置 → 私人令牌」创建，仅需只读仓库权限；本机加密保存，不会上传。
-                            </Typography.Text>
-                        </Space>
-                    }
+                {/* 令牌输入收进"高级"：公开更新源用不到它，摆在主区域只会让人以为
+                    必须先建一枚令牌才能更新。配过之后（configured）才把它顶出来，
+                    免得想换掉或清掉时找不到入口。 */}
+                <Collapse
+                    ghost
+                    size="small"
+                    defaultActiveKey={tokenStatus === 'configured' ? ['token'] : []}
+                    items={[
+                        {
+                            key: 'token',
+                            label: '高级：访问令牌（公开更新源无需配置）',
+                            children: (
+                                <Space direction="vertical" style={{width: '100%'}}>
+                                    <Typography.Text type="secondary" style={{fontSize: 'var(--font-size-xs)'}}>
+                                        {TOKEN_ALERT[tokenStatus].message}
+                                        。只有把更新源指向私有仓库时才需要令牌：在 Gitee「设置 → 私人令牌」创建，
+                                        仅需只读仓库权限；本机加密保存，不会上传。
+                                    </Typography.Text>
+                                    <Space.Compact style={{width: '100%'}}>
+                                        <Input.Password
+                                            value={tokenInput}
+                                            onChange={e => setTokenInput(e.target.value)}
+                                            placeholder={
+                                                tokenStatus === 'configured'
+                                                    ? '输入新令牌可覆盖，留空保存即清除'
+                                                    : 'Gitee 私人令牌 (access_token)'
+                                            }
+                                            disabled={tokenStatus === 'loading'}
+                                        />
+                                        <Button
+                                            loading={savingToken}
+                                            disabled={tokenStatus === 'loading'}
+                                            onClick={() => void handleSaveToken()}
+                                        >
+                                            保存
+                                        </Button>
+                                    </Space.Compact>
+                                </Space>
+                            ),
+                        },
+                    ]}
                 />
             </Space>
         </Modal>

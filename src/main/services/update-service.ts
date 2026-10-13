@@ -9,10 +9,12 @@ import {createLogger} from '../utils/logger';
 
 const log = createLogger('Update');
 
-// 发行版托管在 Gitee 私有仓库 lingfeng983/pulsar-manager，
-// 私有仓库的 releases/attachments API 必须带 access_token 才能读取。
+// 更新源是公开的分发仓库 lingfeng983/pulsar-manager-dist：只放发行版与安装包，
+// 源码仓库 pulsar-manager 保持私有。公开仓库的 releases/attachments 读取不需要
+// access_token，所以用户不必再自备令牌；令牌仍然支持（配置过就带上），留的是
+// "把更新源指到私有仓"这条路。
 const GITEE_OWNER = 'lingfeng983';
-const GITEE_REPO = 'pulsar-manager';
+const GITEE_REPO = 'pulsar-manager-dist';
 const API_BASE = 'https://gitee.com/api/v5';
 
 export interface UpdateCheckResult {

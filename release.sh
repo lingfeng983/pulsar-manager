@@ -10,8 +10,14 @@
 #        IDE 的文件索引器可能长期锁住旧输出目录里的 app.asar，electron-builder
 #        清空目录时会直接失败。换个空目录即可绕开：OUT_DIR=release-next ./release.sh
 #
-# 凭证:  环境变量 GITEE_TOKEN，或仓库根目录 .gitee_token 文件
-#        （在 https://gitee.com/profile/personal_access_tokens 创建，勾选 projects 权限）
+# 凭证:  环境变量 GITEE_TOKEN，或仓库根目录 .gitee_token 文件，
+#        再否则取 Windows 凭据管理器里 gitee.com 那份（git push 用的同一令牌，API 也认）
+#        在 https://gitee.com/profile/personal_access_tokens 创建，勾选 projects 权限
+#        任何一级都不落仓库：脚本会随 dist 进 asar，内嵌令牌等于随安装包分发凭据
+#
+# 分发仓: 安装包发布到 GITEE_DIST_REPO（默认 pulsar-manager-dist，公开），
+#        不存在时由脚本创建；只保留最近 GITEE_DIST_KEEP（默认 3）个版本的安装包。
+#        源码仓 ${OWNER}/pulsar-manager 保持私有，同名发行版只留说明与直链。
 #
 # 可重复执行：任何一步失败，修好后再跑一次即可，不会产生重复发行版或重复附件。
 set -euo pipefail
@@ -19,6 +25,9 @@ cd "$(dirname "$0")"
 
 OWNER="lingfeng983"
 REPO="pulsar-manager"
+# 安装包与发行版发布到这个公开仓库，应用内「检查更新」读它：公开仓库读取不需要
+# access_token，用户不用再自备令牌；源码仓保持私有。
+DIST_REPO="${GITEE_DIST_REPO:-pulsar-manager-dist}"
 OUT_DIR="${OUT_DIR:-release}"
 LOG="${OUT_DIR}/release.log"
 
@@ -28,12 +37,33 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 # ---------- 0. 前置检查 ----------
+# 令牌来源依次：GITEE_TOKEN 环境变量 → 仓库根 .gitee_token → Windows 凭据管理器。
+# 凭据管理器里存的就是 git push 用的那份私人令牌，Gitee 的 API 同样认它，所以本机
+# 发版不需要再准备第二份凭证。不把它写进代码：本脚本与 scripts/ 会随 dist 进 asar，
+# 内嵌（哪怕加密）等于把凭据交给每一个装了安装包的人。
+token_from_credential_manager() {
+  command -v git-credential-manager >/dev/null 2>&1 || return 0
+  # GCM_INTERACTIVE=never：没存过这条记录时直接失败返回，而不是弹窗要用户登录，
+  # 否则发版脚本会卡在一个看不见的交互提示上。
+  # 只取 password 那一行；不回显、不进日志，git 找不到 helper 时静默返回空
+  printf 'protocol=https\nhost=gitee.com\n\n' \
+    | GCM_INTERACTIVE=never git credential-manager get 2>/dev/null \
+    | sed -n 's/^password=//p' | tr -d '\r\n'
+}
+
 TOKEN="${GITEE_TOKEN:-}"
 if [ -z "$TOKEN" ] && [ -f .gitee_token ]; then
   TOKEN="$(tr -d '\r\n' < .gitee_token)"
 fi
-[ -n "$TOKEN" ] || die "缺少 Gitee 令牌：设置 GITEE_TOKEN 环境变量，或把个人访问令牌写入 .gitee_token"
+if [ -z "$TOKEN" ]; then
+  TOKEN="$(token_from_credential_manager)"
+fi
+[ -n "$TOKEN" ] || die "缺少 Gitee 令牌：设置 GITEE_TOKEN 环境变量、把个人访问令牌写入 .gitee_token，或先用 git 拉取一次让 Windows 凭据管理器存有该仓库的令牌"
 export GITEE_TOKEN="$TOKEN"
+
+# 令牌失效要在出包之前就说：electron-builder 要跑两三分钟，别让用户等完才在第 4 步吃 401
+API_OK="$(curl -s -o /dev/null -w '%{http_code}' "https://gitee.com/api/v5/user?access_token=${TOKEN}" || echo 000)"
+[ "$API_OK" = "200" ] || die "Gitee 令牌不可用（HTTP $API_OK）：到 https://gitee.com/profile/personal_access_tokens 重新生成（勾选 projects 权限）后覆盖 .gitee_token"
 
 [ -z "$(git status --porcelain)" ] || die "工作区有未提交改动，请先提交"
 git fetch -q origin master --tags || die "无法访问 origin（网络/凭证问题？）"
@@ -88,6 +118,28 @@ fi
 
 # ---------- 4. 发行版 ----------
 echo "==> [4/4] 创建或更新发行版 $TAG"
+
+# 分发仓（公开）先确保存在并有一条 master：Gitee 的发行版必须挂在真实提交上，
+# 而新建的空仓库没有分支可指，所以推一个只含 README 的提交过去当锚点。
+DIST_URL="https://gitee.com/${OWNER}/${DIST_REPO}.git"
+DIST_SHA="$(node scripts/release-publish.mjs ensure-dist | tail -1)"
+if [ -z "$DIST_SHA" ]; then
+  echo "    $DIST_REPO 是空仓库，初始化 master"
+  DIST_INIT="$(mktemp -d)"
+  git init -q "$DIST_INIT"
+  git -C "$DIST_INIT" checkout -q -b master
+  {
+    echo "# ${DIST_REPO}"
+    echo
+    echo "Pulsar 管理工具的安装包分发仓库，只放发行版与安装包；源码在私有仓库 ${OWNER}/${REPO}。"
+    echo "本仓库由 ${OWNER}/${REPO} 的 release.sh 自动发布，请勿手工提交。"
+  } > "${DIST_INIT}/README.md"
+  git -C "$DIST_INIT" add README.md
+  git -C "$DIST_INIT" commit -q -m "init: 安装包分发仓库（只放发行版与安装包）"
+  git -C "$DIST_INIT" push -q "$DIST_URL" master || die "无法初始化 $DIST_URL（Gitee 令牌对新建仓库没写权限？）"
+  rm -rf "$DIST_INIT"
+fi
+
 PREV_TAG="$(git tag -l --sort=-v:refname | grep -vx "$TAG" | head -1 || true)"
 if [ -n "$PREV_TAG" ]; then
   RANGE_DESC="自 ${PREV_TAG} 以来"
@@ -116,5 +168,7 @@ EOF
 fi
 printf '%s' "$TITLE" > "$TMP/rel_title.txt"
 
+# 安装包只上传到公开的分发仓（应用内更新读它，用户不需要令牌）；
+# 源码仓那边只留同名发行版的说明并指回分发仓，历史附件由脚本清掉。
 node scripts/release-publish.mjs "$TAG" "$TMP/rel_title.txt" "$TMP/rel_body.txt" "$EXE"
-echo "==> 完成：https://gitee.com/${OWNER}/${REPO}/releases/tag/${TAG}"
+echo "==> 完成：https://gitee.com/${OWNER}/${DIST_REPO}/releases/tag/${TAG}（分发，应用内更新读这里）"

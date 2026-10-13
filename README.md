@@ -71,7 +71,7 @@ Topic 详情页的「消息浏览器」有三种模式，互不混淆（不是�
 - 配置迁移：一键导出集群配置与应用设置为 JSON；导出**不含任何凭据**（Token / TLS 证书、SSH 密码与私钥都以加密形式存在本机），导入方需要重新填一次凭据。导入只做新增，同名集群跳过并列出名字，整包在一个事务里完成
 - 「恢复默认」只重置界面与刷新设置，不动集群配置；「清空操作日志」带二次确认
 - 本地数据库带 `user_version` 增量迁移，旧库升级按版本逐步改造，不要求删库重建
-- 「设置 → 检查更新」比对 Gitee 最新发行版版本号，下载 exe 附件后静默安装并重启
+- 「设置 → 检查更新」比对公开分发仓库的最新发行版版本号，下载 exe 附件后静默安装并重启（无需令牌）
 
 ### 插件市场
 
@@ -177,9 +177,10 @@ npm run build:main && npm run build
 ./release.sh v1.1.0 "标题" notes.md   # 指定标题与正文
 ```
 
-- **凭证**：环境变量 `GITEE_TOKEN`，或仓库根目录的 `.gitee_token` 文件（在 <https://gitee.com/profile/personal_access_tokens> 创建，勾选 projects 权限）。该文件已在 `.gitignore` 里，严禁入库。
+- **凭证**：依次取环境变量 `GITEE_TOKEN`、仓库根目录的 `.gitee_token` 文件（已在 `.gitignore` 里，严禁入库）、Windows 凭据管理器中 `gitee.com` 那条记录——第三份与 `git push` 用的是同一枚私人令牌，Gitee 的 API 同样认它，所以本机日常发版不需要额外准备凭证。令牌绝不写进代码或加密打包进仓库：`release.sh` 与 `scripts/` 会随 dist 进 asar，内嵌（哪怕加密）等于把凭据交给每个装了安装包的人；在 <https://gitee.com/profile/personal_access_tokens> 创建时勾选 projects 权限。脚本在出包之前就用 `GET /api/v5/user` 验一次令牌，避免构建两三分钟后才在第 4 步吃 401。
 - **前置条件**：工作区干净，且本地 HEAD 与 `origin/master` 一致——发行版必须对应一个已推送的提交。
-- **产物**：`release/Pulsar管理工具-安装包-<version>.exe` 作为附件挂到发行版，正文自动带上大小、SHA256、提交号与变更列表；完整构建日志在 `release/release.log`。
+- **产物与发布位置**：`release/Pulsar管理工具-安装包-<version>.exe` 只上传到公开的分发仓 `pulsar-manager-dist`（不存在时脚本自动创建，首次会推一个只含 README 的提交当发行版锚点，因为 Gitee 的发行版必须挂在真实提交上）；源码仓的同名发行版只留说明与分发仓直链，历史 exe 附件由脚本删掉，免得同一版本有两个渠道。完整构建日志在 `release/release.log`。
+- **分发仓只保留最近 3 个版本的安装包**（`GITEE_DIST_KEEP` 可调）：一个包 81MB，堆十几份就撞 Gitee 的仓库容量上限。删的是发行版及其附件，标签留着不影响脚本重复执行。
 - **可重复执行**：标签已存在且指向当前提交就复用（发行版转为更新，同名附件先删再传）；指向别的提交则直接报错，不会把新包挂到旧标签上。任何一步失败，修好后重跑即可，不会产生重复发行版或重复附件。
 - 中文标题与正文由 `release.sh` 写入 UTF-8 临时文件再交给 `scripts/release-publish.mjs`，**不走命令行参数**——Windows 控制台是 GBK，直接传参会把中文变成乱码。
 
@@ -209,7 +210,7 @@ npm run build:main && npm run build
 以下是**当前确实没做**的部分，界面不会假装它们可用：
 
 - **SSH 隧道的边界**：启用后应用在本机起两条随机端口转发（Admin 与 Broker 各一条），集群地址自动改写到隧道上，TLS 仍按用户填写的原始主机名校验证书。两点限制：原生客户端（消息收发）无法指定 SNI，所以「TLS + SSH 隧道」会被明确拒绝，请改用 `pulsar://` 明文经隧道；topic lookup 之后 broker 回源的地址若本机不可达，原生收发仍需直连或代理
-- **在线更新依赖 Gitee 私有仓库 API**：设置→检查更新 会拉取最新发行版并对比版本号，下载其 exe 附件后静默安装重启；私有仓库必须先在更新弹窗里配置只读 access_token（本机加密存储）。仓库地址写死为 `lingfeng983/pulsar-manager`，换仓库需改 `src/main/services/update-service.ts`
+- **在线更新走公开分发仓库**：设置→检查更新 读取 `lingfeng983/pulsar-manager-dist`（公开，只放发行版与安装包）的最新发行版，比对版本号后下载 exe 附件并校验 SHA256，再静默安装重启。公开仓库读取不需要 access_token，用户不用配任何东西；更新弹窗里的「高级：访问令牌」只在把更新源改指私有仓库时才用得上（本机加密存储，不上传）。源码仓库保持私有。仓库地址写死在两处：应用侧 `src/main/services/update-service.ts`，发版侧 `release.sh` 的 `DIST_REPO`（可用 `GITEE_DIST_REPO` 覆盖）——换仓库两处必须一起改，否则发出去的包读不到新版本。
 - **快速压测的延迟口径**：统计的是 `send()` 调用到 broker 确认的时间，包含客户端在途队列的排队；单生产者并发调大时 P50 会显著上升，这不是 broker 变慢
 - **消费没有逐条手动 ack**：只有"自动 ack"开关，关掉之后消息就一直不确认
 - **消息浏览器没有 peek / 重投 / 按 ID 定位**：只能从头或从某个时间点开始读，不能"看一眼订阅游标下一条再决定消不消费"，也不能把一条已收到的消息原样再发一次

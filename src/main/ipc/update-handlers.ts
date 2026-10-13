@@ -63,11 +63,14 @@ export function registerUpdateHandlers() {
             return {success: true, data: result};
         } catch (error) {
             const status = (error as {response?: {status?: number}})?.response?.status;
-            // 私有仓库无令牌时 Gitee 返回 404（防探测），带错误令牌返回 401/403
+            // 更新源是公开分发仓，正常不需要令牌；Gitee 对"仓库不存在/没有发行版"
+            // 一律回 404，所以这里不能再把它说成"令牌缺失"。
             if (status === 401 || status === 403 || status === 404) {
                 return {
                     success: false,
-                    error: 'Gitee 访问令牌缺失或无效：本仓库是私有仓库，检查更新需要在下方配置 access_token',
+                    error:
+                        '更新源不可读：公开分发仓库 pulsar-manager-dist 还没有发行版，或它已被改为私有/删除。' +
+                        '需要私有源时可在高级里配置 access_token',
                 };
             }
             log.error('update:check failed', formatError(error));
