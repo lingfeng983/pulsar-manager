@@ -10,7 +10,7 @@ import {createLogger} from '../utils/logger';
 const log = createLogger('Update');
 
 // 更新源是公开的分发仓库 lingfeng983/pulsar-manager-dist：只放发行版与安装包，
-// 源码仓库 pulsar-manager 保持私有。公开仓库的 releases/attachments 读取不需要
+// 源码仓库 pulsar-manager 保持私有。公开仓库的发行版与附件（attach_files）读取不需要
 // access_token，所以用户不必再自备令牌；令牌仍然支持（配置过就带上），留的是
 // "把更新源指到私有仓"这条路。
 const GITEE_OWNER = 'lingfeng983';
@@ -126,45 +126,52 @@ export async function checkForUpdate(token: string | undefined): Promise<UpdateC
     }
 
     const attResp = await axios.get(
-        `${API_BASE}/repos/${GITEE_OWNER}/${GITEE_REPO}/releases/${latest.id}/attachments`,
+        // 路由是 attach_files：/releases/{id}/attachments 在 Gitee 上不存在，
+        // 带令牌也一样回 HTML 404（实测），走到那里就等于永远找不到安装包。
+        `${API_BASE}/repos/${GITEE_OWNER}/${GITEE_REPO}/releases/${latest.id}/attach_files`,
         {
             params,
             timeout: 15000,
         },
     );
-    const attachments: Array<{show_name?: string; name?: string; download_url?: string; url?: string; size?: number}> =
-        Array.isArray(attResp.data) ? attResp.data : [];
+    // 附件对象只有 id/name/size/uploader/browser_download_url 这五个字段（实测），
+    // 没有 show_name，也没有 download_url；旧的取值方式让每条附件都过不了下面的过滤。
+    const attachments: Array<{name?: string; size?: number; browser_download_url?: string}> = Array.isArray(
+        attResp.data,
+    )
+        ? attResp.data
+        : [];
     const exe = attachments
         .filter(a => {
-            const n = a.show_name || a.name || '';
-            return n.toLowerCase().endsWith('.exe') && !!a.download_url;
+            const n = a.name || '';
+            return n.toLowerCase().endsWith('.exe') && !!a.browser_download_url;
         })
         // 同版本可能有多个 exe，取名字含"安装包"的，再退化为最大的那个
         .sort((a, b) => {
-            const aPkg = (a.show_name || '').includes('安装包') ? 1 : 0;
-            const bPkg = (b.show_name || '').includes('安装包') ? 1 : 0;
+            const aPkg = (a.name || '').includes('安装包') ? 1 : 0;
+            const bPkg = (b.name || '').includes('安装包') ? 1 : 0;
             if (aPkg !== bPkg) return bPkg - aPkg;
             return (b.size || 0) - (a.size || 0);
         })[0];
-    if (!exe?.download_url) {
+    if (!exe?.browser_download_url) {
         throw new Error(`最新版本 ${latestVersion} 没有可下载的 exe 安装包附件`);
     }
-    if (!isAllowedAssetUrl(exe.download_url)) {
+    if (!isAllowedAssetUrl(exe.browser_download_url)) {
         throw new Error('发行版附件地址不是受信任的 gitee 域名');
     }
     const sha256 = sha256FromNotes(latest.body || '');
-    const sep = exe.download_url.includes('?') ? '&' : '?';
-    // 私有仓库的附件地址必须带令牌才能拉下来，但令牌只留在主进程
+    const sep = exe.browser_download_url.includes('?') ? '&' : '?';
+    // 公开分发仓匿名就能下；令牌只作为"更新源指向私有仓"时的兜底，且只留在主进程
     const tokenizedUrl = token
-        ? `${exe.download_url}${sep}access_token=${encodeURIComponent(token)}`
-        : exe.download_url;
+        ? `${exe.browser_download_url}${sep}access_token=${encodeURIComponent(token)}`
+        : exe.browser_download_url;
     if (token && !isAllowedAssetUrl(tokenizedUrl)) {
         throw new Error('附件下载地址拼接令牌后不再是受信任的 gitee 域名');
     }
     pending = {
-        publicUrl: exe.download_url,
+        publicUrl: exe.browser_download_url,
         tokenizedUrl,
-        fileName: exe.show_name || `PulsarManager-${latestVersion}-Setup.exe`,
+        fileName: exe.name || `PulsarManager-${latestVersion}-Setup.exe`,
         size: exe.size || 0,
         sha256,
     };

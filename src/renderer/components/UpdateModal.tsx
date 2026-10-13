@@ -160,7 +160,9 @@ const UpdateModal: React.FC<{open: boolean; onClose: () => void}> = ({open, onCl
                 {checking && <Alert type="info" showIcon message="正在检查更新..." />}
 
                 {result && !checking && (
-                    <Descriptions column={1} size="small" bordered>
+                    // 标签列必须给固定宽度：表格是 auto 布局，更新说明那种整段 pre-wrap
+                    // 的长文本会把标签列压到最小宽度，「当前版本」竖着一字一行。
+                    <Descriptions column={1} size="small" bordered labelStyle={{width: 92, whiteSpace: 'nowrap'}}>
                         <Descriptions.Item label="当前版本">{result.currentVersion}</Descriptions.Item>
                         <Descriptions.Item label="最新版本">
                             {result.latestVersion}
