@@ -152,6 +152,11 @@ fi
 
 if [ -n "${3:-}" ] && [ -f "${3:-}" ]; then
   cp "$3" "$TMP/rel_body.txt"
+  # 应用内「检查更新」的校验值只从发行说明正文里那一行取（update-service.ts 的
+  # sha256FromNotes），自定义正文漏了它就等于给所有旧客户端发一条"发现新版本但拒绝
+  # 下载"的更新——更新通道发出去收不回来，所以在这里拦住。
+  grep -Eq 'SHA256[：:] *`?[0-9a-fA-F]{64}' "$TMP/rel_body.txt" \
+    || die "正文文件 $3 缺少「- SHA256：\`<64 位十六进制>\`」这一行，应用内更新无法校验安装包（本次构建的 SHA256：${SHA}）"
 else
   cat > "$TMP/rel_body.txt" <<EOF
 Pulsar 管理工具 ${TAG}，Windows x64 安装包。
