@@ -185,6 +185,8 @@ npm run build:main && npm run build
 - **分发仓只保留最近 3 个版本的安装包**（`GITEE_DIST_KEEP` 可调）：一个包 81MB，堆十几份就撞 Gitee 的仓库容量上限。删的是发行版及其附件，标签留着不影响脚本重复执行。
 - **可重复执行**：标签已存在且指向当前提交就复用（发行版转为更新，同名附件先删再传）；指向别的提交则直接报错，不会把新包挂到旧标签上。任何一步失败，修好后重跑即可，不会产生重复发行版或重复附件。
 - 中文标题与正文由 `release.sh` 写入 UTF-8 临时文件再交给 `scripts/release-publish.mjs`，**不走命令行参数**——Windows 控制台是 GBK，直接传参会把中文变成乱码。
+- **自定义正文必须带 `- SHA256：\`<64 位>\`` 这一行**（应用内「检查更新」的校验值只从发行说明正文里取，见 `update-service.ts` 的 `sha256FromNotes`）。安装包要打完包才有 SHA，正文却是发版前写好的，所以正文里可以直接写 `@SHA256@`，脚本在算完校验值后替换掉；漏了这行脚本在上传前就 `die`，不会把一条"所有旧客户端读得到版本却拒绝下载"的更新发出去。
+- **出包门禁**：`scripts/verify-package.mjs` 除了查 exe / app.asar / 原生模块在不在，还会读主程序 exe 的属性面板（文件说明、产品名称、公司、版权、原始文件名称、文件版本、产品版本）并逐项核对——这些字段由 `scripts/after-pack.js` 写入，版本值与 `package.json` 同源，所以「设置 → 关于」里看到的版本、exe 属性里的版本和发行版标签是同一个数。
 
 ## 架构约束
 
@@ -200,6 +202,7 @@ npm run build:main && npm run build
 8. **渲染层依赖必须留在 `devDependencies`。** antd / echarts / react 等由 Vite 打进 `dist/renderer`，主进程编译产物只 `require` axios、better-sqlite3、pulsar-client、ssh2、uuid、zod。把渲染层依赖挪回 `dependencies`，electron-builder 会把它们的源码再塞进 asar（实测 157 MiB），安装包随即越过 Gitee 附件 100 MB 上限而被拒。
 9. **`batchingEnabled` 与 `chunkingEnabled` 不能同时为 true。** 原生绑定（pulsar-client 1.18 的 C++ 层）在这两项都开时直接 abort 整个主进程，实测没有 JS 异常也没有 crashpad 转储。三处同时挡：Zod 校验 `refine` 拒绝、构造 producer 时 `chunkingEnabled && !batchingEnabled`、界面上开了批发送就把分块开关置灰。
 10. **代码框的颜色与字号只能写 CSS 变量。** CodeMirror 主题经 style-mod 原样塞进生成的样式表，变量在浏览器里按当前 `<html>` 解析，所以三套主题与四档字号都自动跟随；写成 `#fff` 或固定 px，实测就是"整页变暗了只有编辑器还白底"。
+11. **版本号的唯一来源是 `package.json`，展示它的两处都必须走它。** 「设置 → 关于」读 `update:getVersion`（主进程 `app.getVersion()`）——这条以前是 preload 本地拼的 `process.versions.app`，那是 Electron 运行时版本，发多少个版本它都不变；exe 的属性面板由 `scripts/after-pack.js` 用 `app-builder rcedit` 写（`electron-builder.json` 的 `win.signAndEditExecutable` 为 false，因为 electron-builder 自带的那步会把 `OriginalFilename` 清空、且只写 productName），改完在 `verify-package` 里逐项核对，装到用户机器上才不会是"Electron / GitHub, Inc. / electron.exe"。`rcedit` 要先解出 `winCodeSign` 包，子进程 PATH 里必须有 `7zip-bin` 的 `7za`，直接调用 app-builder 时没人塞就会报 `exec: "7za": executable file not found`。
 
 ## 本地数据
 

@@ -10,6 +10,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
+import {execFileSync} from 'node:child_process';
 
 const builderConfig = JSON.parse(fs.readFileSync(path.resolve('electron-builder.json'), 'utf-8'));
 const outputDir = path.resolve(process.argv[2] || builderConfig.directories?.output || 'release');
@@ -65,13 +66,74 @@ function readAsarVersion(asarPath) {
 const problems = [];
 const fail = message => problems.push(message);
 
+/**
+ * 读 exe 的属性面板数据（VS_VERSION_INFO）。
+ * 路径经环境变量传进去：这串文件名带空格，拼进 -Command 里再套一层引号很容易被
+ * 引号规则吃掉，PowerShell 与 shell 两套转义混在一起出错时是静默的。
+ * 输出编码必须显式改成 UTF-8：PowerShell 默认按控制台代码页（本机是 cp936）吐字符，
+ * 用 utf8 读回来就是一串乱码，会把"其实写对了"的 FileDescription 判成失败。
+ */
+function readExeVersionInfo(exePath) {
+    try {
+        const out = execFileSync(
+            'powershell.exe',
+            [
+                '-NoProfile',
+                '-NonInteractive',
+                '-Command',
+                '[Console]::OutputEncoding=[Text.Encoding]::UTF8; $i=(Get-Item -LiteralPath $env:EXE_PATH).VersionInfo; $i | ConvertTo-Json -Compress',
+            ],
+            {env: {...process.env, EXE_PATH: exePath}, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore']},
+        );
+        return JSON.parse(out.trim());
+    } catch (error) {
+        fail(
+            `读不到 exe 版本信息（${error.message}）——属性校验不能跳过，跳过的话 Electron 那份默认值会一路发到用户机器上`,
+        );
+        return null;
+    }
+}
+
+// 期望值与 scripts/after-pack.js 写的那一份对齐：这里查的正是发版时最容易漏的字段，
+// 装完在资源管理器里看到 "Electron / GitHub, Inc. / electron.exe / 29.x" 就是它没生效
+function checkExeMetadata(exePath, version) {
+    const info = readExeVersionInfo(exePath);
+    if (!info) {
+        return;
+    }
+    const expect = {
+        FileDescription: 'Pulsar 管理工具',
+        ProductName: 'Pulsar Manager',
+        InternalName: 'Pulsar Manager',
+        OriginalFilename: 'Pulsar Manager.exe',
+        CompanyName: 'Pulsar Manager Team',
+        LegalCopyright: 'Pulsar Manager Team',
+    };
+    for (const [field, needle] of Object.entries(expect)) {
+        const actual = String(info[field] ?? '');
+        if (!actual.includes(needle)) {
+            fail(`exe 属性 ${field} 是「${actual || '(空)'}」，应包含「${needle}」（afterPack 没生效？）`);
+        }
+    }
+    for (const field of ['FileVersion', 'ProductVersion']) {
+        const actual = String(info[field] ?? '');
+        if (!actual.startsWith(version)) {
+            fail(`exe 属性 ${field} 是「${actual || '(空)'}」，与 package.json 的 ${version} 不符`);
+        }
+    }
+    return info;
+}
+
 const unpackedDir = findUnpackedDir();
 if (!unpackedDir) {
     fail(`在 ${outputDir} 下找不到 ${process.platform} 的 --dir 输出目录（win-unpacked / mac* / linux-unpacked）`);
 } else {
     const exeNames = EXECUTABLES[process.platform] || EXECUTABLES.linux;
-    if (!exeNames.some(name => fs.existsSync(path.join(unpackedDir, name)))) {
+    const exeName = exeNames.find(name => fs.existsSync(path.join(unpackedDir, name)));
+    if (!exeName) {
         fail(`缺少应用可执行文件（期望 ${exeNames.join(' 或 ')}）——产物是被文件锁截断的半成品`);
+    } else if (process.platform === 'win32') {
+        checkExeMetadata(path.join(unpackedDir, exeName), sourceVersion);
     }
 
     const asarPath = path.join(unpackedDir, 'resources', 'app.asar');

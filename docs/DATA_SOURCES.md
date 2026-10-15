@@ -538,9 +538,12 @@ Admin REST 没有发消息与 peek 的端点（真实 broker 上返回 HTML 404�
 
 | IPC 通道 | 方向 | 功能 |
 |---------|------|------|
+| `update:getVersion` | renderer → main | 返回 `app.getVersion()`，「设置 → 关于」的版本号读它（以前是 preload 本地返回 `process.versions.app`，那是 Electron 运行时版本，与发版号无关） |
 | `update:check` | renderer → main | 匿名读取公开分发仓 `pulsar-manager-dist` 的最新发行版并比对版本号 |
 | `update:download` | renderer → main | 下载发行版 exe 附件（逐跳复核 gitee 域名、按发行说明里的 SHA256 校验） |
 | `update:install` | renderer → main | 静默安装并重启 |
+
+**版本号的三处落点**：`package.json` 的 `version` 是唯一来源，① `app.getVersion()`（关于弹窗与 `checkForUpdate` 的 currentVersion）、② 主程序 exe 的属性面板（`scripts/after-pack.js` 用 `app-builder rcedit` 写文件说明/产品名称/公司/版权/原始文件名称/文件版本/产品版本，`electron-builder.json` 的 `win.signAndEditExecutable` 关掉，因为自带那一步会把 `OriginalFilename` 清空）、③ 发行版标签与安装包文件名。②由 `scripts/verify-package.mjs` 在出包后逐项核对（读属性时 PowerShell 要显式 `[Console]::OutputEncoding=UTF8`，否则中文按 cp936 吐回来是乱码，会把写对了的字段判成失败）。
 
 ### 4.11 生产者（`producer-handlers.ts`）
 

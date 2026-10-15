@@ -327,7 +327,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
     // 在线更新
     update: {
-        getVersion: () => Promise.resolve({success: true, data: process.versions.app}),
+        // 走主进程取 app.getVersion()：这里以前返回 process.versions.app，那是 Electron
+        // 运行时版本，跟 package.json 的版本号没有任何关系
+        getVersion: () => ipcRenderer.invoke('update:getVersion'),
         check: () => ipcRenderer.invoke('update:check'),
         download: (url: string) => ipcRenderer.invoke('update:download', url),
         install: () => ipcRenderer.invoke('update:install'),

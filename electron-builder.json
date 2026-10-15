@@ -1,6 +1,8 @@
 {
     "appId": "com.pulsar.manager",
     "productName": "Pulsar Manager",
+    "copyright": "Copyright (C) Pulsar Manager Team",
+    "afterPack": "./scripts/after-pack.js",
     "directories": {
         "output": "release",
         "buildResources": "build"

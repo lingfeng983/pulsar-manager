@@ -1,3 +1,4 @@
+import {app} from 'electron';
 import {ensureDbInitialized, formatError, registerRawHandler} from './_shared';
 import {checkForUpdate, downloadUpdate, installLastDownload} from '../services/update-service';
 import {createLogger} from '../utils/logger';
@@ -5,6 +6,16 @@ import {createLogger} from '../utils/logger';
 const log = createLogger('IPC');
 
 export function registerUpdateHandlers() {
+    // 「关于」弹窗要的是应用版本。以前这条是 preload 里本地拼的 process.versions.app，
+    // 那是 Electron 运行时版本（29.4.6 这种），发多少个版本它都不变。
+    registerRawHandler('update:getVersion', async () => {
+        try {
+            return {success: true, data: app.getVersion()};
+        } catch (error) {
+            return {success: false, error: formatError(error)};
+        }
+    });
+
     registerRawHandler('update:check', async () => {
         try {
             ensureDbInitialized();

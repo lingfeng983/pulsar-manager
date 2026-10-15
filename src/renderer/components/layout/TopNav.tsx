@@ -65,7 +65,8 @@ const TopNav: React.FC = () => {
     const [searchLoading, setSearchLoading] = useState(false);
     const searchRef = useRef<any>(null);
     const searchRequestRef = useRef(0);
-    const [appVersion, setAppVersion] = useState('1.0.0');
+    // 初值不写死版本号：写死的那份会一直挂在弹窗上，IPC 失败时用户看到的就是个假版本
+    const [appVersion, setAppVersion] = useState('');
     const platform = useShortcutStore(state => state.platform);
     const shortcutConfig = useShortcutStore(state => state.config);
     const shortcutBinding = resolveBinding(shortcutConfig, platform, 'openShortcutConfig');
@@ -521,7 +522,7 @@ const TopNav: React.FC = () => {
                 <div style={{textAlign: 'center'}}>
                     <div style={{fontSize: 32, marginBottom: 'var(--spacing-sm)'}}>⚡</div>
                     <h3 style={{marginBottom: 'var(--spacing-sm)'}}>Pulsar Manager</h3>
-                    <p className="hint-text">版本 {appVersion}</p>
+                    <p className="hint-text">版本 {appVersion || '读取中'}</p>
                     <div style={{marginTop: 'var(--spacing-xl)', textAlign: 'left'}}>
                         <p>一个功能强大的 Apache Pulsar 桌面管理工具。</p>
                         <p style={{marginTop: 'var(--spacing-sm)'}}>
