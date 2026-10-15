@@ -26,6 +26,7 @@ import {
     SendOutlined,
     ReloadOutlined,
     AlignLeftOutlined,
+    ProfileOutlined,
 } from '@ant-design/icons';
 import type {TableColumnsType} from 'antd';
 import type {Message, MessageBatch, ProducerMessageOptions, SessionEndEvent} from '../types';
@@ -64,6 +65,44 @@ const OptRow: React.FC<{label: ReactNode; hint: string; children: ReactNode}> = 
 
 type StreamMode = 'consume' | 'read';
 type PanelMode = 'send' | StreamMode;
+
+const PROPERTIES_HINT =
+    '任意键值的字符串属性，随消息一起存进 broker，接收列表的 Properties 列就是它。' +
+    '值只会是字符串：数字与布尔发出去会转成文本；XML 按叶子摊平成点路径（props.env → test）。';
+
+// 两种写法各给一份起手的默认模板。XML 的根标签会进键名前缀（<props><env> → props.env），
+// JSON 的嵌套值会被摊成字符串，这两条 PROPERTIES_HINT 里都写了。
+const PROPERTIES_TEMPLATES: Record<'json' | 'xml', string> = {
+    json: `{\n  "env": "test",\n  "traceId": "pm-0001"\n}`,
+    xml: `<props>\n  <env>test</env>\n  <traceId>pm-0001</traceId>\n</props>`,
+};
+
+// 把 XML 摊平成 properties 的键值表：叶子按点路径成键（<props><env>test</env></props>
+// → props.env），同名兄弟按出现顺序补 [n]。properties 的值只会是字符串，
+// 所以取 textContent，混合内容丢掉的标记与空白在这里不影响读值。
+function flattenXmlProperties(raw: string): Record<string, string> {
+    const doc = new DOMParser().parseFromString(raw, 'application/xml');
+    if (doc.getElementsByTagName('parsererror').length > 0 || !doc.documentElement) {
+        throw new DOMException('XML 解析失败');
+    }
+    const out: Record<string, string> = {};
+    const seen = new Map<string, number>();
+    const walk = (node: Element, path: string) => {
+        const children = Array.from(node.children);
+        if (children.length === 0) {
+            const count = (seen.get(path) ?? 0) + 1;
+            seen.set(path, count);
+            out[count > 1 ? `${path}[${count}]` : path] = node.textContent ?? '';
+            return;
+        }
+        for (const child of children) {
+            walk(child, `${path}.${child.tagName}`);
+        }
+    };
+    const root = doc.documentElement;
+    walk(root, root.tagName);
+    return out;
+}
 
 interface MessageBrowserProps {
     clusterId: string;
@@ -105,6 +144,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
     const [sendText, setSendText] = useState('');
     const [sendKind, setSendKind] = useState<PayloadKind>('json');
     const [sendProperties, setSendProperties] = useState('');
+    const [sendPropertiesKind, setSendPropertiesKind] = useState<'json' | 'xml'>('json');
     const [sendLoading, setSendLoading] = useState(false);
     const [lastMessageId, setLastMessageId] = useState<string | null>(null);
 
@@ -148,6 +188,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
     const earlyEvents = useRef<{batches: MessageBatch[]; ends: SessionEndEvent[]}>({batches: [], ends: []});
 
     const sendPaneRef = useRef<CodePaneHandle | null>(null);
+    const propsPaneRef = useRef<CodePaneHandle | null>(null);
 
     const stopActiveSession = useCallback(async (notify: boolean) => {
         const session = sessionRef.current;
@@ -315,13 +356,52 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
         }
     }, [clusterId, tenant, namespace, topic, persistent, subscription]);
 
+    // properties 只接受扁平键值，但写法随选中的类型走：JSON 对象里写了数字/布尔
+    // 一律转成字符串投出去（broker 存的本来就只有字符串），XML 按叶子摊平成点路径。
     const parseProperties = (): Record<string, string> | undefined => {
         const raw = sendProperties.trim();
         if (!raw) {
             return undefined;
         }
-        const parsed = JSON.parse(raw) as Record<string, string>;
-        return parsed;
+        if (sendPropertiesKind === 'xml') {
+            return flattenXmlProperties(raw);
+        }
+        const parsed = JSON.parse(raw) as Record<string, unknown>;
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            throw new TypeError('properties 需要是 JSON 对象');
+        }
+        const out: Record<string, string> = {};
+        for (const [key, value] of Object.entries(parsed)) {
+            out[key] =
+                value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
+                    ? String(value)
+                    : JSON.stringify(value);
+        }
+        return out;
+    };
+
+    const handleFormatProperties = () => {
+        if (!propsPaneRef.current?.format()) {
+            message.warning(
+                sendPropertiesKind === 'json' ? '属性不是合法 JSON，无法格式化' : '属性格式不符合 XML，无法缩进',
+            );
+        }
+    };
+
+    // 换写法时，框里还是空的或另一份没动过的模板就顺手换成对应写法；
+    // 用户改过的内容一律不覆盖，要换模板走「模板」按钮（覆盖后编辑器内 Ctrl+Z 还能撤）。
+    const handlePropertiesKindChange = (kind: 'json' | 'xml') => {
+        const current = sendProperties.trim();
+        const untouched = !current || Object.values(PROPERTIES_TEMPLATES).some(tpl => tpl.trim() === current);
+        setSendPropertiesKind(kind);
+        if (untouched) {
+            setSendProperties(PROPERTIES_TEMPLATES[kind]);
+        }
+    };
+
+    const applyPropertiesTemplate = (kind: 'json' | 'xml') => {
+        setSendPropertiesKind(kind);
+        setSendProperties(PROPERTIES_TEMPLATES[kind]);
     };
 
     // 格式化失败几乎都是"正文本来就不是合法 JSON"，说清这一点而不是只说失败：
@@ -371,7 +451,9 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
         try {
             properties = parseProperties();
         } catch {
-            message.error('属性必须是合法的 JSON 对象，例如 {"k":"v"}');
+            message.error(
+                sendPropertiesKind === 'json' ? '属性需要是合法的 JSON 对象，例如 {"k":"v"}' : '属性需要是合法的 XML',
+            );
             return;
         }
         if (sendEventMode === 'fixed' && !sendEventTime) {
@@ -696,6 +778,8 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                     value={sendText}
                     kind={sendKind}
                     editable
+                    resizable
+                    storageKey="pulsar-manager.message.body-height"
                     height={220}
                     ariaLabel="消息内容"
                     onChange={setSendText}
@@ -782,19 +866,55 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                     </OptRow>
                 </div>
                 <div className="opt-group">
-                    <div className="opt-group-title">自定义属性（JSON）</div>
-                    <OptRow
-                        label="properties"
-                        hint="任意键值的字符串属性，随消息一起存进 broker，接收列表的 Properties 列就是它。值只会是字符串：数字与布尔要发出去得写成 “1”，对面自己转。"
-                    >
-                        <Input
+                    <div className="opt-group-title">自定义属性（JSON / XML）</div>
+                    {/* 多行编辑占整块宽度，塞进 OptRow 会被 96px 标签挤成一条缝，
+                        所以写法选择与格式化排在上面，CodePane 独自在下方铺开 */}
+                    <div style={{display: 'flex', gap: 4, alignItems: 'center', marginBottom: 4}}>
+                        <Select
                             size="small"
-                            aria-label="消息属性 JSON"
-                            value={sendProperties}
-                            onChange={event => setSendProperties(event.target.value)}
-                            placeholder='{"env":"test","trace":"abc"}'
+                            aria-label="属性写法"
+                            value={sendPropertiesKind}
+                            onChange={value => handlePropertiesKindChange(value)}
+                            options={[
+                                {value: 'json', label: 'JSON'},
+                                {value: 'xml', label: 'XML'},
+                            ]}
+                            style={{width: 90}}
                         />
-                    </OptRow>
+                        <Button size="small" type="text" icon={<AlignLeftOutlined />} onClick={handleFormatProperties}>
+                            格式化
+                        </Button>
+                        <Dropdown
+                            trigger={['click']}
+                            menu={{
+                                items: [
+                                    {key: 'json', label: 'JSON 模板'},
+                                    {key: 'xml', label: 'XML 模板'},
+                                ],
+                                onClick: ({key}) => applyPropertiesTemplate(key as 'json' | 'xml'),
+                            }}
+                        >
+                            <Tooltip title="插入默认模板，会覆盖框里的内容（编辑器内 Ctrl+Z 可撤销）">
+                                <Button size="small" type="text" icon={<ProfileOutlined />}>
+                                    模板
+                                </Button>
+                            </Tooltip>
+                        </Dropdown>
+                        <Tooltip title={PROPERTIES_HINT}>
+                            <span className="hint-text">properties 写法</span>
+                        </Tooltip>
+                    </div>
+                    <CodePane
+                        ref={propsPaneRef}
+                        value={sendProperties}
+                        kind={sendPropertiesKind}
+                        editable
+                        resizable
+                        storageKey="pulsar-manager.message.properties-height"
+                        height={140}
+                        ariaLabel="消息属性"
+                        onChange={setSendProperties}
+                    />
                     <div className="hint-text">
                         这里给的是单条消息能自带的那几项参数。批大小、压缩、发送超时这些是 producer
                         级的，单次发送每次现建一条 producer，用默认值；要调它们去生产者工作台建常驻会话。

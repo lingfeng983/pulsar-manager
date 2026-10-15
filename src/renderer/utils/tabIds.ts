@@ -35,21 +35,19 @@ export const topicTab = (ref: TopicTabRef): TabItem => ({
 // 生产者工作台与 Topic 详情分成两个页签（id 前缀不同但都从 topicTabId 派生）：
 // 详情里的轻量发送不留连接，工作台挂的是常驻 producer，同一个页签里用户会分不清
 // 关掉这个标签到底断没断掉那条 producer。
-export const producerTabId = (ref: TopicTabRef): string => `producer-${topicTabId(ref)}`;
-
+// 工作台允许对同一条 topic 多开：base id 只用来认归属（集群/topic），tabs.addTab
+// 看到 MULTI_INSTANCE_TYPES 会给每个实例发一个带序号的独立 id。
 export const producerTab = (ref: TopicTabRef): TabItem => ({
-    id: producerTabId(ref),
+    id: `producer-${topicTabId(ref)}`,
     title: `${topicTitle(ref)} 生产`,
     type: 'producer',
     data: {...ref, persistent: ref.persistent !== false},
 });
 
 // 消费者工作台同样独立成页签：一条 topic 上常常要一边看着订阅收消息、
-// 一边在详情里翻订阅列表，两个方向各自留一个页签比挤在一页里清楚。
-export const consumerTabId = (ref: TopicTabRef): string => `consumer-${topicTabId(ref)}`;
-
+// 一边在详情里翻订阅列表，两个方向各自留一个页签比挤在一页里清楚。多开规则同生产者。
 export const consumerTab = (ref: TopicTabRef): TabItem => ({
-    id: consumerTabId(ref),
+    id: `consumer-${topicTabId(ref)}`,
     title: `${topicTitle(ref)} 消费`,
     type: 'consumer',
     data: {...ref, persistent: ref.persistent !== false},
@@ -74,13 +72,15 @@ export const tenantTab = (clusterId: string, tenant: string): TabItem => ({
     data: {clusterId, tenant},
 });
 
-export const topologyTabId = (clusterId: string): string => `topology-${clusterId}`;
+// 不带 clusterId 的是资源树工具栏/首页入口的"全局拓扑"（多集群同屏），
+// 带上则是某个集群的单簇拓扑页签（集群气泡下钻、资源树右键进来的都是它）。
+export const topologyTabId = (clusterId?: string): string => (clusterId ? `topology-${clusterId}` : 'topology');
 
-export const topologyTab = (clusterId: string, clusterName?: string): TabItem => ({
+export const topologyTab = (clusterId?: string, clusterName?: string): TabItem => ({
     id: topologyTabId(clusterId),
-    title: `${clusterName || '集群'}拓扑`,
+    title: clusterId ? `${clusterName || '集群'}拓扑` : '集群拓扑',
     type: 'topology',
-    data: {clusterId},
+    data: clusterId ? {clusterId} : undefined,
 });
 
 // 不带 clusterId 的是资源树工具栏里的"全局监控"（跨集群自动选一个），带上则是某个集群的监控页签。

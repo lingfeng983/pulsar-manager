@@ -24,16 +24,17 @@
 
 ### 2.1 首页 (Home.tsx)
 
-首页分「列表视图」与「拓扑视图」两个模式，都不做跨集群聚合统计。
+首页只做集群列表，不做跨集群聚合统计。原「拓扑视图」与集群拓扑页同源同图（同一个聚合 IPC、同一份 graphOption），已合并进集群拓扑页签；首页工具栏上的拓扑图标只是打开该页签（全局形态）的入口。
 
 **数据来源：**
-- **集群列表**（列表视图）: `window.electronAPI.cluster.list()`
+- **集群列表**: `window.electronAPI.cluster.list()`
   - IPC: `cluster:list`（Handler: `src/main/ipc/cluster-handlers.ts`）
   - 数据源: SQLite `clusters` 表
   - 字段: id, name, serviceUrl, webServiceUrl, status, version
   - 名称/地址筛选与状态四选一下拉都在渲染层做（集群数量本来就小，不为过滤再发一轮 IPC），筛空时表格显「没有符合筛选条件的集群」
-- **集群状态探活**: 挂载即 `refreshClusterStatus()` → IPC `cluster:checkStatus`（口径见 2.7），列表里的 `status` 是探活写回的持久列；「刷新集群状态」走同一轮，成功与失败都出 toast
-- **集群拓扑**（拓扑视图）: 由 `HomeTopology` 组件负责，取数见 2.6；放大缩小 / 刷新 / 全屏四个图标与节点计数默认 portal 到页头这一行，进入全屏后改画在图内右上角（全屏独占的是图这一层，工具栏留在页头就等于「退出全屏」被盖住）
+- **集群状态探活**: 由 Layout 层的 `useClusterStatusAutoRefresh` 统一驱动——挂载即探一次，之后按配置中心的「集群状态刷新间隔」（`statusRefreshSeconds`，默认 60 秒，0 为仅启动时）轮询；首页与侧边栏色点读的是同一份 cluster store，一轮探活两处同时更新。`Home` 自己只 `fetchClusters()`；「刷新集群状态」按钮走同一轮 `cluster:checkStatus`，成功与失败都出 toast
+- **版本列**: 探活成功且库里没有版本时顺带 `resolveVersion()` 补一次（口径见 2.7），broker 就地升级后在集群页编辑重存即可刷新
+- **打开集群拓扑**: `addTab(topologyTab())`（`src/renderer/utils/tabIds.ts`，不带 clusterId 即全局形态，页签 id 固定 `topology`）
 - **状态管理**: `useClusterStore` (Zustand)
   - 位置: `src/renderer/store/cluster.ts`
   - 方法: `fetchClusters()`, `refreshClusterStatus()`, `deleteClusterAsync()`
@@ -141,6 +142,9 @@
 - **API**: `window.electronAPI.messages.send()`
 - **IPC**: `messages:send`
 - **实现**: 原生客户端 `producer.send()`，返回真实 `messageId`；属性为可选 JSON 对象（键值各限 1024 字符、条数上限 100）
+- **属性两种写法**（`sendPropertiesKind`）: JSON 直接 `JSON.parse` 后把值一律 `String()` 化（broker 存的本来就只有字符串，对象/数组走 `JSON.stringify`）；XML 由 `flattenXmlProperties` 按叶子摊平成点路径（`<props><env>test</env></props>` → `props.env`），根标签变成键前缀这一点是刻意的——只取叶子会让多个同名子节点互相覆盖。两条路最终都提交同一个扁平 `Record<string, string>`，主进程侧不感知写法
+- **「模板」下拉**: 往属性框插入 JSON / XML 默认样例（`PROPERTIES_TEMPLATES`），插入即覆盖框内内容（编辑器内 Ctrl+Z 可撤销），并同步把「properties 写法」切成模板对应的那种。切换写法时只在**框为空或仍是未被改动过的模板原文**时自动换成对应模板，手改过的内容原样留着——否则用户写了一半的配置会被一次点击吃掉
+- **正文框与属性框可拖动改高**: `CodePane` 的 `resizable` + `storageKey`。高度用 `Compartment` 重配 `EditorView.theme`，**不重建编辑器实例**（重建会丢撤销历史和光标）；范围 80–1200px，松手时写进 localStorage（`pulsar-manager.message.body-height` / `.properties-height`），下次挂载读回来，读不到或读坏都用组件默认高。拖动只挂 document 级 `mousemove` / `mouseup` 并额外挂 `window blur`——鼠标在 iframe 外或别的窗口松开会留下一个永远不结束的拖拽
 - **单条消息参数**（`options: ProducerMessageOptions`，界面按字段列出而非让人拼 JSON）: `partitionKey`、`eventTimeMode`（none/now/fixed）+ `eventTime`、`deliverAfterMs` 或 `deliverAt`、`properties`。批大小、压缩、发送超时是 producer 级参数，单次发送每次现建一条 producer 用默认值，要调它们去生产者工作台
 
 #### 2.4.4 消息数据结构
@@ -195,12 +199,14 @@ interface Message {
 
 ---
 
-### 2.6 集群拓扑 (HomeTopology.tsx / ClusterTopology)
+### 2.6 集群拓扑 (ClusterTopology.tsx)
+
+一个组件两种形态：不带 `clusterId` 的页签（id 固定 `topology`，首页图标与顶栏「拓扑」按钮的入口）是**全局视图**——多集群同屏、按集群抽样；带 `clusterId` 的页签（点集群气泡下钻、资源树右键进入，id `topology-{clusterId}`）是**单集群视图**——整簇全展开。原 `HomeTopology` 与本页同源同图，已删除合并。
 
 **数据来源：**
 
 #### 2.6.1 拓扑数据
-- **API**: `window.electronAPI.topology.getClusterTopology()`
+- **API**: `window.electronAPI.topology.getClusterTopology(clusterId, limits?)`
 - **IPC**: `topology:getClusterTopology`（Handler: `src/main/ipc/metrics-handlers.ts`）
 - **Pulsar API**:
   - Broker 列表: `GET /admin/v2/brokers`
@@ -208,7 +214,10 @@ interface Message {
   - 命名空间: `GET /admin/v2/namespaces/{tenant}`
   - Topic 列表: `GET /admin/v2/namespaces/{tenant}/{namespace}/topics`
   - Topic 统计: `GET /admin/v2/{...}/{topic}/stats`
-- **规模上限**: 渲染层按场景传入 `limits`（首页概览只取少量节点），主进程再与全局上限取较小值
+- **规模上限**: 全局视图对每个已连接集群并发拉一轮并传入 `GLOBAL_TOPOLOGY_LIMITS`（3 租户 / 每租户 2 命名空间 / 每命名空间 3 topic / 全局 8 topic），主进程再与全局上限取较小值；单集群视图不传 limits。全局视图只画 cluster/broker/topic 三层，订阅与分区不进图（类型选择框与图例里也不列，避免死项）
+- **降级气泡**: 离线集群与单个集群拉取失败都仍落一个只有集群节点的降级气泡（失败原因汇总进顶部横幅），不让它整条从图上消失；全局视图里节点 id 一律带集群前缀，避免两个集群上的同名 topic 撞 id
+- **刷新节奏**: 页签激活（`PaneActiveContext`）时才首拉与轮询，切走即停；轮询复用配置中心的 `statusRefreshSeconds`（与首页状态探活同一节奏，0 为仅打开时拉一次）。代价是单集群模式每轮一次整簇拓扑 IPC，嫌重可调大间隔
+- **图例**: `buildTopologyOption` 按形态传 `legendTypes`（全局 cluster/broker/topic；单集群除 cluster 外四类），只列这种形态真的画得出来的类型
 
 #### 2.6.2 拓扑数据类型
 ```typescript
@@ -244,10 +253,13 @@ interface ClusterTopology {
 - **边权重**: 基于 `msgRateIn`
 - **配色**: 运行时从 CSS 变量读取，跟随亮色/暗色/护眼三套主题
 
-### 2.7 资源树筛选与集群探活 (ResourceTree.tsx / store/cluster.ts)
+### 2.7 资源树、全局筛选与集群探活 (ResourceTree.tsx / utils/textFilter.ts / store/cluster.ts)
 
-- **树顶部的 topic 筛选**是纯渲染层过滤，不额外发 IPC：查询串按空白分词，每个词都要命中；词内先试连续子串，退而求其次才允许跳字子序列（`tns` 命中 `tenant-ns`），实现见 `src/renderer/utils/fuzzyMatch.ts`。命中的 topic 保留其租户/命名空间分支，筛空时给出明确提示而不是显一棵空树
-- **首屏探活**：`Home` 挂载即 `fetchClusters()` 之后 fire-and-forget 调 `refreshClusterStatus()` → IPC `cluster:checkStatus`（`src/main/ipc/cluster-handlers.ts`），逐集群走 Admin 健康检查、把结果写回 `clusters.status` 并返回整份列表；页面不被它阻塞，`checking` 期间复用同一轮不重复发
+- **一套筛选语义**：全应用所有"输入框裁列表"的地方共用 `src/renderer/utils/textFilter.ts` 的 `matchesFilter(候选字段数组, 查询串)`——首页集群列表（名称+地址）、命名空间详情的 topic 列表、资源树的 topic 筛选、集群拓扑的节点筛选、插件市场（名称/id/描述/作者）、顶栏全局搜索（按类型逐字段）。规则只有三条：按空白分词、每个词都必须命中、词内先试连续子串再退到跳字子序列（`tns` 命中 `tenant-ns`），大小写不敏感。**明确不支持正则与通配符**：`^t1$` 就是字面量，实测在拓扑/资源树/命名空间/全局搜索四处都筛不出任何东西，不存在"输入被当模式解释"的注入面。下拉的搜索走同一文件的 `filterByLabel`（antd 默认实现只按单个属性做连续子串，会和上面的分词规则打架）
+- **树筛选的保留规则**：命中的 topic 保留其租户/命名空间分支；父级节点自身命中就整支留下（搜 `prod` 的人要的是那套环境下的全部 topic）；还没加载过子节点的分支一律留着，否则未展开的集群会被筛成"没有"。纯渲染层过滤，不额外发 IPC，筛空时给出明确提示而不是显一棵空树。拓扑同理：中间层（集群/Broker）只在仍与幸存叶子相连时留下
+- **顶栏左侧操作区**：`⚡Pulsar Manager` 大标题已删除，原压在侧边栏顶部的「监控」「拓扑」「折叠」三个按钮上移到顶栏左上角（`TopNav.tsx`），折叠态这里只剩一个展开按钮；侧边栏因此只保留 topic 筛选输入框。折叠状态存在 `src/renderer/store/layout.ts`（localStorage 键 `pulsar-manager.sidebar-collapsed`），不进 SQLite 配置库——它和侧边栏宽度一样属于窗口摆放，不该出现在配置中心的可重置项里
+- **状态探活与轮询**：探活由 Layout 层的 `useClusterStatusAutoRefresh`（`src/renderer/hooks/useClusterStatusAutoRefresh.ts`）统一驱动——挂载即 `refreshClusterStatus()` 一次，之后按设置项 `statusRefreshSeconds`（配置中心「集群状态刷新间隔」，默认 60 秒，0 为仅启动时）轮询；`refreshClusterStatus` 自带 in-flight 去重，手动刷新按钮与轮询撞在一起也只打一轮。IPC `cluster:checkStatus`（`src/main/ipc/cluster-handlers.ts`）逐集群走 Admin 健康检查、把结果写回 `clusters.status` 并返回整份列表；页面不被它阻塞
+- **版本补齐**：探活成功且库里 `version` 为空时顺带 `resolveVersion()`——优先 `GET /metrics` 里的 `pulsar_version_info{version="..."}`（实测 `/admin/v2/clusters/{name}` 在 3.3.9 standalone 上并不带 version 字段，`/admin/v2/version` 直接 404），退回集群信息里的 version，两条都取不到就留空不猜。只在库内无版本时拉（/metrics 是全量文本，不进每轮轮询）；broker 就地升级后在集群页编辑重存即可刷新
 - **为什么必须探活**：`clusters.status` 是 SQLite 里的持久列，不探活的话首屏显的是上次退出时留在库里的那份，集群早就停了界面还是一片"在线"
 - 顶部导航/首页的「刷新集群状态」走同一个 `cluster:checkStatus`，成功与失败都出 toast
 

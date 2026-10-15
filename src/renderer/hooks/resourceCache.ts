@@ -5,7 +5,7 @@ import type {Tenant, Topic, TopicStats} from '../types';
  *
  * 此前 useResources 把 LRUCache 建在 hook 内部，导致每个组件各持一份缓存、
  * 互不共享，且 hook 只能保存单一 namespaces/topics 结果，无法支撑 ResourceTree /
- * TopNav / HomeTopology 这类需要按集群、租户循环取多份的场景。
+ * TopNav / 集群拓扑全局视图这类需要按集群、租户循环取多份的场景。
  *
  * 这里把缓存提升为模块级单例，并暴露「返回值」形式的加载器，任何组件都能复用
  * 同一份缓存；useResources 只是它之上的一层响应式封装。

@@ -1,4 +1,12 @@
-import {forwardRef, useEffect, useImperativeHandle, useRef} from 'react';
+import {
+    forwardRef,
+    useCallback,
+    useEffect,
+    useImperativeHandle,
+    useRef,
+    useState,
+    type MouseEvent as ReactMouseEvent,
+} from 'react';
 import {Compartment, EditorState} from '@codemirror/state';
 import {
     EditorView,
@@ -34,7 +42,26 @@ interface CodePaneProps {
     ariaLabel: string;
     height?: number;
     editable?: boolean;
+    /** 底边可上下拖动改高度；配合 storageKey 让拖出来的尺寸跨页签保留。 */
+    resizable?: boolean;
+    /** 给了就把高度存进 localStorage，重开页签不回到默认值。 */
+    storageKey?: string;
     onChange?: (value: string) => void;
+}
+
+const RESIZE_MIN = 80;
+const RESIZE_MAX = 1200;
+
+function readStoredHeight(key: string | undefined, fallback: number): number {
+    if (!key) {
+        return fallback;
+    }
+    try {
+        const saved = Number(localStorage.getItem(key));
+        return saved >= RESIZE_MIN && saved <= RESIZE_MAX ? saved : fallback;
+    } catch {
+        return fallback;
+    }
 }
 
 function languageExtension(kind: PayloadKind) {
@@ -48,12 +75,23 @@ function languageExtension(kind: PayloadKind) {
     return [];
 }
 
+// 高度钉在 '&' 上并让 scroller 自己滚：不给的话编辑器按内容长高，
+// 在 flex 容器里就是每敲一行整页跳一次。走 Compartment 是为了拖动改高度时
+// 只换这一条主题，不重建编辑器（重建会丢撤销历史与光标）。
+function heightTheme(px: number) {
+    return EditorView.theme({'&': {height: `${px}px`}, '.cm-scroller': {overflow: 'auto'}});
+}
+
 const CodePane = forwardRef<CodePaneHandle, CodePaneProps>(function CodePane(
-    {value, kind, ariaLabel, height = 320, editable = false, onChange},
+    {value, kind, ariaLabel, height = 320, editable = false, resizable = false, storageKey, onChange},
     ref,
 ) {
     const hostRef = useRef<HTMLDivElement | null>(null);
     const viewRef = useRef<EditorView | null>(null);
+    const [paneHeight, setPaneHeight] = useState(() => readStoredHeight(storageKey, height));
+    const paneHeightRef = useRef(paneHeight);
+    paneHeightRef.current = paneHeight;
+    const dragCleanupRef = useRef<(() => void) | null>(null);
     // 回调放 ref：进 effect 依赖的话每次输入都会重建编辑器，光标弹回开头、撤销历史也没了
     const onChangeRef = useRef(onChange);
     onChangeRef.current = onChange;
@@ -66,6 +104,7 @@ const CodePane = forwardRef<CodePaneHandle, CodePaneProps>(function CodePane(
     const emitted = useRef<string | null>(initialValue.current);
 
     const languageCompartment = useRef(new Compartment());
+    const heightCompartment = useRef(new Compartment());
 
     useEffect(() => {
         const host = hostRef.current;
@@ -86,9 +125,7 @@ const CodePane = forwardRef<CodePaneHandle, CodePaneProps>(function CodePane(
                     EditorView.lineWrapping,
                     EditorView.editable.of(editable),
                     EditorState.readOnly.of(!editable),
-                    // 高度钉在 '&' 上并让 scroller 自己滚：不给的话编辑器按内容长高，
-                    // 在 flex 容器里就是每敲一行整页跳一次。
-                    EditorView.theme({'&': {height: `${height}px`}, '.cm-scroller': {overflow: 'auto'}}),
+                    heightCompartment.current.of(heightTheme(paneHeightRef.current)),
                     languageCompartment.current.of(languageExtension(initialKind.current)),
                     EditorView.updateListener.of(update => {
                         if (update.docChanged) {
@@ -135,6 +172,50 @@ const CodePane = forwardRef<CodePaneHandle, CodePaneProps>(function CodePane(
         viewRef.current?.dispatch({effects: [languageCompartment.current.reconfigure(languageExtension(kind))]});
     }, [kind]);
 
+    useEffect(() => {
+        viewRef.current?.dispatch({effects: [heightCompartment.current.reconfigure(heightTheme(paneHeight))]});
+    }, [paneHeight]);
+
+    // 卸载时若还拖着，收回全局样式与监听（和侧边栏拖宽同一套做法）
+    useEffect(() => () => dragCleanupRef.current?.(), []);
+
+    const handleResizeStart = useCallback(
+        (event: ReactMouseEvent) => {
+            event.preventDefault();
+            const startY = event.clientY;
+            const startHeight = paneHeightRef.current;
+            const onMove = (moveEvent: MouseEvent) => {
+                setPaneHeight(Math.min(RESIZE_MAX, Math.max(RESIZE_MIN, startHeight + moveEvent.clientY - startY)));
+            };
+            const cleanup = () => {
+                if (dragCleanupRef.current !== cleanup) {
+                    return;
+                }
+                dragCleanupRef.current = null;
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', cleanup);
+                window.removeEventListener('blur', cleanup);
+                document.body.style.userSelect = '';
+                document.body.style.cursor = '';
+                if (storageKey) {
+                    try {
+                        localStorage.setItem(storageKey, String(paneHeightRef.current));
+                    } catch {
+                        // 存不下就只丢持久化，本次拖动的高度照常生效
+                    }
+                }
+            };
+            dragCleanupRef.current = cleanup;
+            document.body.style.userSelect = 'none';
+            document.body.style.cursor = 'ns-resize';
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', cleanup);
+            // 在窗口外松手时 mouseup 送不回来，blur 兜底结束拖动
+            window.addEventListener('blur', cleanup);
+        },
+        [storageKey],
+    );
+
     useImperativeHandle(
         ref,
         () => ({
@@ -164,7 +245,21 @@ const CodePane = forwardRef<CodePaneHandle, CodePaneProps>(function CodePane(
         [],
     );
 
-    return <div className="json-editor" ref={hostRef} style={{height}} />;
+    if (!resizable) {
+        return <div className="json-editor" ref={hostRef} style={{height: paneHeight}} />;
+    }
+    return (
+        <div style={{position: 'relative', paddingBottom: 7}}>
+            <div className="json-editor" ref={hostRef} style={{height: paneHeight}} />
+            <div
+                className="code-pane-resize"
+                title="按住上下拖动调整高度"
+                aria-label={`${ariaLabel} 高度调节`}
+                role="separator"
+                onMouseDown={handleResizeStart}
+            />
+        </div>
+    );
 });
 
 // 只在可编辑时挂的那一批：撤销历史、括号闭合、缩进与键位。

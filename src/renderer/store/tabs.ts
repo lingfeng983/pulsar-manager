@@ -7,6 +7,24 @@ export interface TabItem {
     data?: any;
 }
 
+// 生产者/消费者工作台允许对同一条 topic 多开：每个实例挂着独立的发送/消费配置。
+const MULTI_INSTANCE_TYPES = new Set(['producer', 'consumer']);
+
+// 多开的实例 id：base id（producer-/consumer- + topic 身份）只认归属，
+// 序号从 1 起、与已有序号撞车就递增，标题同步带上序号，两个并排页签才分得出。
+function allocateInstanceTab(tab: TabItem, tabs: TabItem[]): TabItem {
+    let seq = 1;
+    while (tabs.some(t => t.id === `${tab.id}#${seq}`)) {
+        seq += 1;
+    }
+    return {
+        ...tab,
+        id: `${tab.id}#${seq}`,
+        title: `${tab.title} #${seq}`,
+        data: {...tab.data, instanceSeq: seq},
+    };
+}
+
 interface TabState {
     tabs: TabItem[];
     activeTabId: string;
@@ -21,6 +39,10 @@ export const useTabStore = create<TabState>(set => ({
     activeTabId: 'home',
     addTab: tab =>
         set(state => {
+            if (MULTI_INSTANCE_TYPES.has(tab.type)) {
+                const fresh = allocateInstanceTab(tab, state.tabs);
+                return {tabs: [...state.tabs, fresh], activeTabId: fresh.id};
+            }
             // 命中已存在的页签：标题与 data 用最新一次调用覆盖（同一资源的入口不止一个，
             // 参数可能更完整），但绝不能把页签重新挂载成第二个实例。
             if (state.tabs.some(t => t.id === tab.id)) {

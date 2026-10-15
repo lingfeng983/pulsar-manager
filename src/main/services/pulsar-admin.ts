@@ -225,6 +225,30 @@ export class PulsarAdminClient {
         return this.resourceAPI.healthCheck();
     }
 
+    async getVersion() {
+        return this.resourceAPI.getVersion();
+    }
+
+    // 版本的两条通道按可靠性排：/metrics 的 pulsar_version_info 是 broker 自带指标，
+    // 部署里普遍有；/clusters/{name} 的 version 反而经常缺席，只当兜底。
+    // 两条都读不到就返回 undefined，让首页版本列继续显示 "-"，不猜版本。
+    async resolveVersion(): Promise<string | undefined> {
+        try {
+            const fromMetrics = await this.resourceAPI.getVersion();
+            if (fromMetrics) {
+                return fromMetrics;
+            }
+        } catch {
+            // 没开 /metrics 的部署走集群详情兜底
+        }
+        try {
+            const info = await this.getClusterInfo();
+            return info.version || undefined;
+        } catch {
+            return undefined;
+        }
+    }
+
     async testConnection(): Promise<{connected: boolean; version?: string}> {
         try {
             const isHealthy = await this.healthCheck();

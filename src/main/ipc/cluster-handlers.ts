@@ -25,6 +25,7 @@ import {
     ensureDbInitialized,
     getAdminClient,
     markClusterStatus,
+    markClusterVersion,
     persistSshConfig,
     reuseSshConfig,
     establishTunnel,
@@ -151,7 +152,21 @@ export function registerClusterHandlers() {
                             // 集群在探活途中被删掉了，不是"连不上"
                             return;
                         }
-                        markClusterStatus(cluster.id, (await client.healthCheck()) ? 'connected' : 'disconnected');
+                        if (await client.healthCheck()) {
+                            markClusterStatus(cluster.id, 'connected');
+                            // 探活顺带补版本：首页版本列以前只有"测试连接"弹窗会看到，
+                            // 落库后列表直接显示。/metrics 一次是全量文本，只在库里没有
+                            // 版本时取；broker 就地升级后版本号在集群页编辑重存即可刷新。
+                            // 读不到版本（权限受限、没开 /metrics）只跳过，不能把在线集群误判成离线。
+                            if (!cluster.version) {
+                                const version = await client.resolveVersion();
+                                if (version) {
+                                    markClusterVersion(cluster.id, version);
+                                }
+                            }
+                        } else {
+                            markClusterStatus(cluster.id, 'disconnected');
+                        }
                     } catch {
                         // 建连本身失败（隧道起不来、配置坏掉）与连不上等价
                         markClusterStatus(cluster.id, 'disconnected');

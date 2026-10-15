@@ -1,9 +1,10 @@
 import type {EChartsOption} from 'echarts';
 import type {TopologyPalette} from '../../utils/topologyColors';
+import {matchesFilter} from '../../utils/textFilter';
 
 /**
- * 两张拓扑图（首页总览 / 集群拓扑）共用的图模型与 option 构造。
- * 之前两边各写一份 node/link/tooltip 组装，字段和配色一直在分叉：
+ * 集群拓扑两种形态（全局多集群同屏 / 单集群下钻）共用的图模型与 option 构造。
+ * 曾经首页与集群拓扑各写一份 node/link/tooltip 组装，字段和配色一直在分叉：
  * 首页改一次配色就要记得改另一处，边和节点的类型也对不上。
  */
 export type TopologyNodeType = 'cluster' | 'broker' | 'topic' | 'partition' | 'subscription';
@@ -371,13 +372,7 @@ export function buildTopologyOption(params: {
 const LEAF_TYPES: TopologyNodeType[] = ['topic', 'partition', 'subscription'];
 
 function matchesQuery(node: TopologyGraphNode, query: string): boolean {
-    if (!query) {
-        return true;
-    }
-    const haystack = [node.name, node.topicPath, node.tenant, node.namespace, node.clusterName]
-        .filter(Boolean)
-        .join(' ');
-    return haystack.toLowerCase().includes(query.toLowerCase());
+    return matchesFilter([node.name, node.topicPath, node.tenant, node.namespace, node.clusterName], query);
 }
 
 /**

@@ -1,9 +1,9 @@
 import React, {useEffect, useMemo, useState} from 'react';
-import {Card, Table, Tag, Button, Input, Select, Space, Switch, message} from 'antd';
-import {ClusterOutlined, PlusOutlined, BarChartOutlined, AppstoreOutlined, ReloadOutlined} from '@ant-design/icons';
+import {Card, Table, Tag, Button, Input, Select, Space, message} from 'antd';
+import {ClusterOutlined, PlusOutlined, BarChartOutlined, ReloadOutlined} from '@ant-design/icons';
 import {useClusterStore} from '../store/cluster';
+import {useTabStore} from '../store/tabs';
 import ClusterConfigModal from './ClusterConfig';
-import HomeTopology from '../components/HomeTopology';
 import PageShell from '../components/common/PageShell';
 import IconButton from '../components/common/IconButton';
 import StateBlock from '../components/common/StateBlock';
@@ -11,6 +11,8 @@ import ErrorBanner from '../components/common/ErrorBanner';
 import {useConfirmDanger} from '../components/common/dangerConfirm';
 import type {ClusterConfig} from '../types';
 import {useCommand} from '../hooks/useKeybindings';
+import {topologyTab} from '../utils/tabIds';
+import {matchesFilter} from '../utils/textFilter';
 
 type StatusFilter = 'all' | 'connected' | 'warning' | 'disconnected';
 
@@ -23,14 +25,18 @@ const STATUS_OPTIONS: {label: string; value: StatusFilter}[] = [
 
 const HomePage: React.FC = () => {
     const confirmDanger = useConfirmDanger();
-    const [viewMode, setViewMode] = useState<'list' | 'topology'>('list');
     const [query, setQuery] = useState('');
     const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
     const [modalOpen, setModalOpen] = useState(false);
     const [editingCluster, setEditingCluster] = useState<ClusterConfig | null>(null);
-    // 拓扑视图的计数与图操作要出现在页头这一行，但那些状态都在 HomeTopology 里，
-    // 所以页头留一个挂载点，由它 portal 进来（搬状态等于把整块拓扑逻辑上提一层）。
-    const [topoSlot, setTopoSlot] = useState<HTMLElement | null>(null);
+
+    const {addTab} = useTabStore();
+
+    // 打开全局拓扑页签：原首页的"拓扑视图"与集群拓扑页同源同图，
+    // 合并后首页只留这个入口，图本体在 ClusterTopology（不带 clusterId 的形态）。
+    const handleOpenTopology = () => {
+        addTab(topologyTab());
+    };
 
     const {
         clusters,
@@ -46,10 +52,9 @@ const HomePage: React.FC = () => {
 
     useEffect(() => {
         void fetchClusters();
-        // 首屏就探一次活：列表里的状态是上次退出时落库的，不探就会一直挂着旧值。
-        // 探活慢（不可达集群最坏要试完四个候选端点），所以不挡页面，探完自己刷徽标。
-        void refreshClusterStatus();
-    }, [fetchClusters, refreshClusterStatus]);
+        // 状态探活（首屏一次 + 按配置中心间隔轮询）在 Layout 层统一跑，
+        // 这里只负责把本地库里的列表取出来。
+    }, [fetchClusters]);
 
     const handleRefreshStatus = async () => {
         const ok = await refreshClusterStatus();
@@ -62,15 +67,11 @@ const HomePage: React.FC = () => {
 
     // 筛选在渲染层做：集群数量本来就小，为了过滤再发一轮 IPC 没有意义。
     const filteredClusters = useMemo(() => {
-        const text = query.trim().toLowerCase();
         return clusters.filter(cluster => {
             if (statusFilter !== 'all' && (cluster.status ?? 'disconnected') !== statusFilter) {
                 return false;
             }
-            if (!text) {
-                return true;
-            }
-            return `${cluster.name} ${cluster.serviceUrl}`.toLowerCase().includes(text);
+            return matchesFilter([cluster.name, cluster.serviceUrl], query);
         });
     }, [clusters, query, statusFilter]);
 
@@ -174,44 +175,29 @@ const HomePage: React.FC = () => {
         <PageShell
             actions={
                 <>
-                    {viewMode === 'list' ? (
-                        <>
-                            {/* 列表视图才有的筛选：拓扑视图画的是全部集群，筛它没有对应对象 */}
-                            <Input
-                                allowClear
-                                aria-label="按集群名称或地址筛选"
-                                placeholder="筛选名称/地址"
-                                value={query}
-                                onChange={event => setQuery(event.target.value)}
-                                style={{width: 180}}
-                            />
-                            <Select<StatusFilter>
-                                aria-label="按状态筛选集群"
-                                value={statusFilter}
-                                onChange={value => setStatusFilter(value)}
-                                options={STATUS_OPTIONS}
-                                style={{width: 100}}
-                            />
-                            <IconButton
-                                icon={<ReloadOutlined />}
-                                label="刷新集群状态"
-                                loading={loading || checking}
-                                onClick={() => void handleRefreshStatus()}
-                            />
-                        </>
-                    ) : (
-                        /* 拓扑视图：计数与放大缩小/刷新/全屏由 HomeTopology portal 进这个占位 */
-                        <span ref={setTopoSlot} className="page-actions-slot" />
-                    )}
+                    <Input
+                        allowClear
+                        aria-label="按集群名称或地址筛选"
+                        placeholder="筛选名称/地址"
+                        value={query}
+                        onChange={event => setQuery(event.target.value)}
+                        style={{width: 180}}
+                    />
+                    <Select<StatusFilter>
+                        aria-label="按状态筛选集群"
+                        value={statusFilter}
+                        onChange={value => setStatusFilter(value)}
+                        options={STATUS_OPTIONS}
+                        style={{width: 100}}
+                    />
+                    <IconButton
+                        icon={<ReloadOutlined />}
+                        label="刷新集群状态"
+                        loading={loading || checking}
+                        onClick={() => void handleRefreshStatus()}
+                    />
                     <span className="page-actions-right">
-                        <Switch
-                            aria-label="切换列表视图与拓扑视图"
-                            checkedChildren={<AppstoreOutlined />}
-                            unCheckedChildren={<BarChartOutlined />}
-                            checked={viewMode === 'topology'}
-                            onChange={checked => setViewMode(checked ? 'topology' : 'list')}
-                        />
-                        <span className="hint-text">{viewMode === 'list' ? '列表视图' : '拓扑视图'}</span>
+                        <IconButton icon={<BarChartOutlined />} label="打开集群拓扑" onClick={handleOpenTopology} />
                         <Button type="primary" icon={<PlusOutlined />} onClick={handleAddCluster}>
                             添加集群
                         </Button>
@@ -221,35 +207,30 @@ const HomePage: React.FC = () => {
         >
             <ErrorBanner error={error} />
 
-            {viewMode === 'list' ? (
-                <Card variant="borderless">
-                    <StateBlock
-                        loading={loading && clusters.length === 0}
-                        empty={clusters.length === 0 || filteredClusters.length === 0}
-                        emptyText={clusters.length === 0 ? '暂无集群配置' : '没有符合筛选条件的集群'}
-                        onRetry={fetchClusters}
-                        action={
-                            clusters.length === 0 ? (
-                                <Button type="primary" onClick={handleAddCluster}>
-                                    添加第一个集群
-                                </Button>
-                            ) : undefined
-                        }
-                    >
-                        <Table
-                            columns={columns}
-                            dataSource={filteredClusters}
-                            rowKey="id"
-                            pagination={false}
-                            size="small"
-                            scroll={{x: 'max-content'}}
-                        />
-                    </StateBlock>
-                </Card>
-            ) : (
-                /* 拓扑视图 */
-                <HomeTopology toolbarContainer={topoSlot} />
-            )}
+            <Card variant="borderless">
+                <StateBlock
+                    loading={loading && clusters.length === 0}
+                    empty={clusters.length === 0 || filteredClusters.length === 0}
+                    emptyText={clusters.length === 0 ? '暂无集群配置' : '没有符合筛选条件的集群'}
+                    onRetry={fetchClusters}
+                    action={
+                        clusters.length === 0 ? (
+                            <Button type="primary" onClick={handleAddCluster}>
+                                添加第一个集群
+                            </Button>
+                        ) : undefined
+                    }
+                >
+                    <Table
+                        columns={columns}
+                        dataSource={filteredClusters}
+                        rowKey="id"
+                        pagination={false}
+                        size="small"
+                        scroll={{x: 'max-content'}}
+                    />
+                </StateBlock>
+            </Card>
 
             {/* 集群配置弹窗 */}
             <ClusterConfigModal

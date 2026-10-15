@@ -1064,6 +1064,15 @@ export function markClusterStatus(clusterId: string, status: 'connected' | 'disc
     }
 }
 
+// 版本与状态同理只在变化时落库：轮询每次都写会把 updated_at 一直顶掉。
+export function markClusterVersion(clusterId: string, version: string): void {
+    const cluster = getClusterById(clusterId);
+    if (!cluster || cluster.version === version) {
+        return;
+    }
+    updateCluster(clusterId, {version});
+}
+
 // ========== IPC 请求来源校验 ==========
 
 // 只有应用自身的页面可以调用 IPC。开发环境走 Vite dev server，

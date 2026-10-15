@@ -8,6 +8,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     autoRefresh: true,
     refreshIntervalSeconds: 30,
     fontSize: 'large',
+    statusRefreshSeconds: 60,
 };
 
 // 字号档位写成 <html data-font-size>，index.css 里三档 --font-size-* 随之切换。

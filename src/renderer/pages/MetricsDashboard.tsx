@@ -6,6 +6,7 @@ import dayjs from 'dayjs';
 import {useClusterStore} from '../store/cluster';
 import {useSettingsStore} from '../store/settings';
 import {formatThroughput, toKilobytesPerSecond} from '../utils/format';
+import {filterByLabel} from '../utils/textFilter';
 import {useTopologyPalette, type TopologyPalette} from '../utils/topologyColors';
 import {useFontFactor} from '../utils/fontScale';
 import {useCommand, PaneActiveContext} from '../hooks/useKeybindings';
@@ -585,7 +586,7 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                         style={{width: 220}}
                         loading={topicsLoading}
                         showSearch
-                        optionFilterProp="label"
+                        filterOption={filterByLabel}
                         placeholder="监控维度"
                         options={[
                             {value: '', label: '集群总体'},

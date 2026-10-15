@@ -187,6 +187,9 @@ export interface ProducerStats {
     address?: string;
     connectedSince?: string;
     clientVersion?: string;
+    // 生产者的接入类型：ExclusiveMode / SharedMode / Peer 之类，broker 原样报什么就存什么；
+    // 老版本 broker 不给这个字段，界面上按"未知"处理而不是硬造一个默认值
+    accessMode?: string;
 }
 
 export interface ConsumerStats {
@@ -203,6 +206,9 @@ export interface ConsumerStats {
     clientVersion?: string;
     // 该消费者所属订阅，用于在扁平列表里区分来源
     subscription: string;
+    // 订阅类型（exclusive/shared/failover/key_shared），消费者级字段优先、
+    // 订阅级兜底，两级都没有就留给界面显示"未知"
+    subscriptionType?: string;
 }
 
 export interface TopicStats {
@@ -748,12 +754,14 @@ export type FontSizeLevel = 'small' | 'medium' | 'large' | 'xlarge';
 
 // 界面与刷新相关的可持久化设置。每一项都必须被真实消费：
 // truncateLength 用于消息列表正文截断，autoRefresh / refreshIntervalSeconds
-// 是监控页的刷新节奏。加了字段不接线，就是又一个死设置。
+// 是监控页的刷新节奏，statusRefreshSeconds 是首页与侧边栏集群状态的轮询节奏。
+// 加了字段不接线，就是又一个死设置。
 export interface AppSettings {
     truncateLength: number;
     autoRefresh: boolean;
     refreshIntervalSeconds: number;
     fontSize: FontSizeLevel;
+    statusRefreshSeconds: number;
 }
 
 export interface ExportedSshConfig {

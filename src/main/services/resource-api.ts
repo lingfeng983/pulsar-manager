@@ -216,6 +216,13 @@ function normalizeTopicStats(raw: unknown, base: TopicStats, partitions: string[
                 connectedSince: rawConsumer?.connectedSince,
                 clientVersion: rawConsumer?.clientVersion,
                 subscription: name,
+                // 消费者级 type 优先；有的 broker 只在订阅级报 type，兜底到它
+                subscriptionType:
+                    typeof rawConsumer?.type === 'string'
+                        ? rawConsumer.type
+                        : typeof sub?.type === 'string'
+                          ? sub.type
+                          : undefined,
             });
         }
     }
@@ -230,6 +237,7 @@ function normalizeTopicStats(raw: unknown, base: TopicStats, partitions: string[
         address: raw?.address,
         connectedSince: raw?.connectedSince,
         clientVersion: raw?.clientVersion,
+        accessMode: typeof raw?.accessMode === 'string' ? raw.accessMode : undefined,
     }));
 
     return {
@@ -794,5 +802,22 @@ export class ResourceAPI {
             }
         }
         return false;
+    }
+
+    // broker 版本，走 /metrics 的 pulsar_version_info 标签。/clusters/{name} 的 version
+    // 字段在不少部署里根本不出现（实测 3.3.9 standalone 的详情 JSON 就没有这个键），
+    // 而 /metrics 是 broker 自带的 Prometheus 端点。超时单独收紧：全局 adminApiTimeout
+    // 可能配到几十秒，指标页大时一次全量读取会把整轮探活拖住。
+    async getVersion(): Promise<string | undefined> {
+        const text = await this.enqueue(async () => {
+            const response = await this.http.get<string>('/metrics', {
+                responseType: 'text',
+                timeout: 5000,
+                transformResponse: [(data: unknown) => data],
+            });
+            return String(response.data ?? '');
+        });
+        // 指标行可能排在几百 KB 之后，扫全文；匹配到的 version 标签本身不含引号
+        return /pulsar_version_info\{[^}]*version="([^"]+)"/.exec(text)?.[1];
     }
 }

@@ -3,6 +3,7 @@ import TopNav from './TopNav';
 import ResourceTree from './ResourceTree';
 import TabWorkspace from './TabWorkspace';
 import {useKeybindings, useCommand} from '../../hooks/useKeybindings';
+import {useClusterStatusAutoRefresh} from '../../hooks/useClusterStatusAutoRefresh';
 import {useThemeStore, type ThemeType} from '../../store/theme';
 import {useTabStore} from '../../store/tabs';
 import {useShortcutStore} from '../../store/shortcuts';
@@ -14,6 +15,8 @@ const Layout: React.FC = () => {
     const addTab = useTabStore(state => state.addTab);
     const theme = useThemeStore(state => state.theme);
     const setTheme = useThemeStore(state => state.setTheme);
+
+    useClusterStatusAutoRefresh();
 
     useEffect(() => {
         void load();

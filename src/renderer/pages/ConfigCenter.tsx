@@ -38,6 +38,15 @@ const REFRESH_OPTIONS = [
     {label: '手动', value: 0},
 ];
 
+// 集群状态探活比普通刷新重（逐集群打 broker），档位从 30 秒起步
+const STATUS_REFRESH_OPTIONS = [
+    {label: '30 秒', value: 30},
+    {label: '1 分钟', value: 60},
+    {label: '5 分钟', value: 300},
+    {label: '10 分钟', value: 600},
+    {label: '仅启动时', value: 0},
+];
+
 // 导入前的本地体检：文件选错（比如拿了日志导出）时给出人话提示，
 // 而不是把整包丢给主进程再回一句 zod 校验失败。
 function looksLikeConfigBundle(raw: unknown): raw is ConfigBundle {
@@ -260,7 +269,7 @@ const ConfigCenter: React.FC = () => {
                 </Col>
 
                 <Col span={12}>
-                    <Card title="监控刷新" size="small">
+                    <Card title="刷新节奏" size="small">
                         <Space direction="vertical" size={8} style={{width: '100%'}}>
                             <div>
                                 <Space size={4}>
@@ -294,6 +303,21 @@ const ConfigCenter: React.FC = () => {
                                 </div>
                                 <Text className="hint-text">
                                     监控面板按此节奏拉取集群统计；选"手动"后只响应刷新按钮
+                                </Text>
+                            </div>
+                            <div>
+                                <Text>集群状态刷新间隔</Text>
+                                <div style={{marginTop: 4}}>
+                                    <Select
+                                        aria-label="集群状态刷新间隔"
+                                        value={settings.statusRefreshSeconds}
+                                        options={STATUS_REFRESH_OPTIONS}
+                                        style={{width: 160}}
+                                        onChange={value => void patch({statusRefreshSeconds: value})}
+                                    />
+                                </div>
+                                <Text className="hint-text">
+                                    首页与侧边栏的集群在线状态启动时自动探一次，之后按此节奏轮询；选"仅启动时"则只探一次
                                 </Text>
                             </div>
                         </Space>

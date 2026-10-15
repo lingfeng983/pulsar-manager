@@ -22,6 +22,7 @@ import PageShell from '../components/common/PageShell';
 import StateBlock from '../components/common/StateBlock';
 import IconButton from '../components/common/IconButton';
 import {useConfirmDanger} from '../components/common/dangerConfirm';
+import {matchesFilter} from '../utils/textFilter';
 
 const {Text, Paragraph} = Typography;
 
@@ -55,7 +56,6 @@ const PluginMarket: React.FC = () => {
     const [busyId, setBusyId] = useState<string | null>(null);
 
     const visible = useMemo(() => {
-        const text = keyword.trim().toLowerCase();
         return entries.filter(plugin => {
             if (!matchesCategory(plugin, category)) {
                 return false;
@@ -66,12 +66,7 @@ const PluginMarket: React.FC = () => {
             if (status === 'available' && plugin.installed) {
                 return false;
             }
-            if (!text) {
-                return true;
-            }
-            return `${plugin.name} ${plugin.id} ${plugin.description ?? ''} ${plugin.author ?? ''}`
-                .toLowerCase()
-                .includes(text);
+            return matchesFilter([plugin.name, plugin.id, plugin.description, plugin.author], keyword);
         });
     }, [entries, keyword, category, status]);
 
@@ -232,11 +227,12 @@ const PluginMarket: React.FC = () => {
 
             <Card size="small">
                 <Space wrap size="small">
-                    <Input.Search
+                    <Input
                         aria-label="搜索插件"
                         placeholder="搜索插件名 / 描述"
                         allowClear
                         style={{width: 220}}
+                        value={keyword}
                         onChange={event => setKeyword(event.target.value)}
                     />
                     <Select

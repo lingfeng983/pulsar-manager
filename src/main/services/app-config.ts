@@ -28,6 +28,7 @@ export const APP_CONFIG_DEFAULTS: AppSettings = {
     autoRefresh: true,
     refreshIntervalSeconds: 30,
     fontSize: 'large',
+    statusRefreshSeconds: 60,
 };
 
 export const AppSettingsSchema = z.object({
@@ -39,6 +40,8 @@ export const AppSettingsSchema = z.object({
     refreshIntervalSeconds: z.number().int().min(0).max(600),
     // 全局字号档位
     fontSize: z.enum(['small', 'medium', 'large', 'xlarge']),
+    // 首页/侧边栏集群状态轮询间隔，0 表示只启动时探一次
+    statusRefreshSeconds: z.number().int().min(0).max(3600),
 });
 
 type AppSettingsField = keyof AppSettings;
@@ -138,7 +141,11 @@ export const ConfigImportSchema = z.object({
     format: z.literal(EXPORT_FORMAT),
     version: z.literal(EXPORT_VERSION),
     // fontSize 是后加的一档：之前导出的文件里没有这个键，缺省时保持当前档位而不是整包报错
-    settings: AppSettingsSchema.extend({fontSize: AppSettingsSchema.shape.fontSize.optional()}),
+    // statusRefreshSeconds 同理——老导出文件里没有它，缺省用当前值而不是拒收整包
+    settings: AppSettingsSchema.extend({
+        fontSize: AppSettingsSchema.shape.fontSize.optional(),
+        statusRefreshSeconds: AppSettingsSchema.shape.statusRefreshSeconds.optional(),
+    }),
     clusters: z.array(ExportedClusterSchema).max(200),
     shortcuts: ExportedShortcutsSchema.nullable().optional(),
 });

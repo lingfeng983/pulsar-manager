@@ -56,6 +56,42 @@ function formatBacklogQuota(bytes: number | undefined, millis: number | undefine
     return `${sizeText} / ${timeText}`;
 }
 
+// broker 报的类型值两套口径不一样：订阅是 exclusive/shared/failover/key_shared，
+// 生产者接入模式是 ExclusiveMode/SharedMode，归一成人话；认不出的原样显示，不硬造。
+function typeLabel(raw?: string): string {
+    switch ((raw || '').toLowerCase().replace(/_/g, ' ')) {
+        case 'exclusive':
+        case 'exclusivemode':
+            return '独占（Exclusive）';
+        case 'shared':
+        case 'sharedmode':
+            return '共享（Shared）';
+        case 'failover':
+            return '故障转移（Failover）';
+        case 'key shared':
+        case 'keyshared':
+        case 'keysharedmode':
+            return 'Key 共享（Key_Shared）';
+        default:
+            return raw || '未知';
+    }
+}
+
+// 悬浮详情的行渲染：跳过没取到的字段，避免整块悬浮框里挂一排"未知"。
+function detailRows(rows: [string, unknown][]): React.ReactNode {
+    const shown = rows.filter(([, value]) => value !== undefined && value !== null && value !== '');
+    if (shown.length === 0) {
+        return null;
+    }
+    return (
+        <div>
+            {shown.map(([label, value]) => (
+                <div key={label}>{`${label}: ${String(value)}`}</div>
+            ))}
+        </div>
+    );
+}
+
 const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, topic, persistent = true}) => {
     const [stats, setStats] = useState<TopicStats | null>(null);
     const [loading, setLoading] = useState(false);
@@ -478,7 +514,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
             title: '类型',
             dataIndex: 'type',
             key: 'type',
-            render: (value: string) => <Tag>{value}</Tag>,
+            render: (value: string) => <Tag>{typeLabel(value)}</Tag>,
         },
         {
             title: '操作',
@@ -502,9 +538,42 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
     // 生产者表格列
     const producerColumns = [
         {
+            // 名称列兼任详情入口：地址、原始速率这些平铺成列会把表格撑出横向滚动，
+            // 悬浮一次看全更贴合"偶尔核对一下"的用法
             title: '生产者名称',
             dataIndex: 'producerName',
             key: 'producerName',
+            render: (name: string, record: TopicStats['producers'][number]) => (
+                <Tooltip
+                    title={detailRows([
+                        ['类型', typeLabel(record.accessMode)],
+                        ['生产者 ID', record.producerId],
+                        ['连接', record.connected ? '在线' : '离线'],
+                        ['地址', record.address],
+                        ['连接时间', record.connectedSince],
+                        ['客户端版本', record.clientVersion],
+                        [
+                            '输入速率',
+                            record.msgRateIn === undefined ? undefined : `${record.msgRateIn.toFixed(4)} msg/s`,
+                        ],
+                        [
+                            '吞吐量',
+                            record.msgThroughputIn === undefined
+                                ? undefined
+                                : `${record.msgThroughputIn.toFixed(1)} B/s`,
+                        ],
+                        ['平均消息大小', record.avgMsgSize === undefined ? undefined : formatBytes(record.avgMsgSize)],
+                    ])}
+                >
+                    <span>{name}</span>
+                </Tooltip>
+            ),
+        },
+        {
+            title: '类型',
+            dataIndex: 'accessMode',
+            key: 'accessMode',
+            render: (value: string | undefined) => <Tag>{typeLabel(value)}</Tag>,
         },
         {
             title: '输入速率',
@@ -531,11 +600,57 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
             title: '消费者名称',
             dataIndex: 'consumerName',
             key: 'consumerName',
+            render: (name: string, record: TopicStats['consumers'][number]) => (
+                <Tooltip
+                    title={detailRows([
+                        ['所属订阅', record.subscription],
+                        ['订阅类型', typeLabel(record.subscriptionType)],
+                        ['连接', record.connected ? '在线' : '离线'],
+                        ['地址', record.address],
+                        ['连接时间', record.connectedSince],
+                        ['客户端版本', record.clientVersion],
+                        [
+                            '输出速率',
+                            record.msgRateOut === undefined ? undefined : `${record.msgRateOut.toFixed(4)} msg/s`,
+                        ],
+                        [
+                            '吞吐量',
+                            record.msgThroughputOut === undefined
+                                ? undefined
+                                : `${record.msgThroughputOut.toFixed(1)} B/s`,
+                        ],
+                        [
+                            '重投速率',
+                            record.msgRateRedeliver === undefined
+                                ? undefined
+                                : `${record.msgRateRedeliver.toFixed(4)} msg/s`,
+                        ],
+                        ['未确认消息', record.unackedMessages],
+                        ['可用信用许可', record.availablePermits],
+                        [
+                            '因未确认积压被阻塞',
+                            record.blockedConsumerOnUnackedMsgs === undefined
+                                ? undefined
+                                : record.blockedConsumerOnUnackedMsgs
+                                  ? '是'
+                                  : '否',
+                        ],
+                    ])}
+                >
+                    <span>{name}</span>
+                </Tooltip>
+            ),
         },
         {
             title: '所属订阅',
             dataIndex: 'subscription',
             key: 'subscription',
+        },
+        {
+            title: '类型',
+            dataIndex: 'subscriptionType',
+            key: 'subscriptionType',
+            render: (value: string | undefined) => <Tag>{typeLabel(value)}</Tag>,
         },
         {
             title: '输出速率',

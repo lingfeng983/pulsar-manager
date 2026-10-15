@@ -1,12 +1,11 @@
 import React, {useState, useEffect, useCallback, useMemo, useRef} from 'react';
-import {Tree, Button, Space, Spin, message, Input} from 'antd';
+import {Tree, Space, Spin, message, Input} from 'antd';
 import type {DataNode} from 'antd/es/tree';
 import {
     ClusterOutlined,
     FolderOutlined,
     DatabaseOutlined,
     TableOutlined,
-    MenuFoldOutlined,
     BarChartOutlined,
     ApartmentOutlined,
     EyeOutlined,
@@ -19,6 +18,7 @@ import {
 } from '@ant-design/icons';
 import {useClusterStore} from '../../store/cluster';
 import {useTabStore} from '../../store/tabs';
+import {useLayoutStore} from '../../store/layout';
 import {
     loadTenants,
     loadNamespaces,
@@ -32,14 +32,13 @@ import {
     type ResourceChangeTarget,
 } from '../../hooks/resourceCache';
 import {shortName} from '../../utils/format';
-import {fuzzyMatch} from '../../utils/fuzzyMatch';
+import {matchesFilter} from '../../utils/textFilter';
 import {topicTab, tenantTab, namespaceTab, topologyTab, metricsTab, producerTab, consumerTab} from '../../utils/tabIds';
 import {useCommand} from '../../hooks/useKeybindings';
 import TenantFormModal from '../tenant/TenantFormModal';
 import TopicFormModal from '../topic/TopicFormModal';
 import ContextMenu, {clampMenuPosition, type ContextMenuItem} from '../common/ContextMenu';
 import StateBlock from '../common/StateBlock';
-import IconButton from '../common/IconButton';
 import {useConfirmDanger, themedModal} from '../common/dangerConfirm';
 import type {Tenant, Topic} from '../../types';
 
@@ -60,9 +59,6 @@ const SIDEBAR_MAX_WIDTH = 640;
 const SIDEBAR_WIDTH_KEY = 'pulsar-manager.sidebar-width';
 // 折叠态只放一个图标按钮
 const SIDEBAR_COLLAPSED_WIDTH = 40;
-// 集群状态探活整个应用只自动跑一次：StrictMode 会把挂载走两遍，侧边栏也不会因为
-// 切页签重新挂载，所以用模块级标记而不是组件 ref。手动点刷新图标不受它限制。
-let statusProbed = false;
 
 // 节点菜单最长的一支（集群：查看/拓扑/监控/分隔/新建租户/分隔/删除）用于定位时估算高度
 const MAX_MENU_ITEMS = 7;
@@ -92,7 +88,8 @@ function containsNodeKey(nodes: DataNode[], key: React.Key): boolean {
 }
 
 const ResourceTree: React.FC = () => {
-    const [collapsed, setCollapsed] = useState(false);
+    // 折叠状态放在 layout store 里：展开/收起的开关在顶栏，树本身在这里
+    const collapsed = useLayoutStore(state => state.sidebarCollapsed);
     const [sidebarWidth, setSidebarWidth] = useState(() => {
         const saved = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY));
         return saved >= SIDEBAR_MIN_WIDTH && saved <= SIDEBAR_MAX_WIDTH ? saved : 240;
@@ -317,7 +314,7 @@ const ResourceTree: React.FC = () => {
             for (const node of nodes) {
                 const ref = (node as ResourceTreeNode).dataRef;
                 if (ref?.type === 'topic') {
-                    if (fuzzyMatch(ref.topic, query)) {
+                    if (matchesFilter([ref.topic], query)) {
                         kept.push(node);
                     }
                     continue;
@@ -328,7 +325,7 @@ const ResourceTree: React.FC = () => {
                         : ref?.type === 'tenant'
                           ? ref.tenant
                           : String(ref?.cluster?.name ?? '');
-                if (fuzzyMatch(ownName, query)) {
+                if (matchesFilter([ownName], query)) {
                     kept.push(node);
                     continue;
                 }
@@ -501,15 +498,8 @@ const ResourceTree: React.FC = () => {
         });
     }, [clusterToTreeData]);
 
-    // 首屏自动探活：树里的状态徽标读的是落库列，不探的话上次退出时"在线"的集群
-    // 会一直绿着。探活在后台跑，回来的时候由 store 更新 clusters 触发本组件重渲染。
-    useEffect(() => {
-        if (statusProbed) {
-            return;
-        }
-        statusProbed = true;
-        void refreshClusterStatus();
-    }, [refreshClusterStatus]);
+    // 首屏自动探活与后续轮询由 Layout 的 useClusterStatusAutoRefresh 统一负责，
+    // 树里的状态徽标跟着 store 的 clusters 变化重渲染。
 
     // 响应集群展开事件
     useEffect(() => {
@@ -1013,16 +1003,6 @@ const ResourceTree: React.FC = () => {
         void handleRefresh();
     });
 
-    // 打开监控仪表盘（全局页签：跨集群自动选一个已连接集群）
-    const handleOpenMetrics = useCallback(() => {
-        addTab(metricsTab());
-    }, [addTab]);
-
-    // 打开拓扑可视化
-    const handleOpenTopology = useCallback(() => {
-        addTab({id: 'topology', title: '集群拓扑', type: 'topology'});
-    }, [addTab]);
-
     // 左右拖动调整侧边栏宽度
     const dragCleanupRef = useRef<(() => void) | null>(null);
 
@@ -1095,7 +1075,7 @@ const ResourceTree: React.FC = () => {
                     }}
                 />
             )}
-            {/* 工具栏 */}
+            {/* 侧边栏里只剩 topic 筛选：监控/拓扑/折叠三个开关已经上移到顶栏 */}
             {!collapsed && (
                 <div
                     style={{
@@ -1103,20 +1083,6 @@ const ResourceTree: React.FC = () => {
                         borderBottom: '1px solid var(--color-border)',
                     }}
                 >
-                    <Space size={4} wrap>
-                        <Button size="small" icon={<BarChartOutlined />} onClick={handleOpenMetrics} title="监控仪表盘">
-                            监控
-                        </Button>
-                        <Button size="small" icon={<ApartmentOutlined />} onClick={handleOpenTopology} title="集群拓扑">
-                            拓扑
-                        </Button>
-                        <IconButton
-                            size="small"
-                            icon={<MenuFoldOutlined />}
-                            label="折叠侧边栏"
-                            onClick={() => setCollapsed(true)}
-                        />
-                    </Space>
                     <Input
                         size="small"
                         allowClear
@@ -1125,7 +1091,7 @@ const ResourceTree: React.FC = () => {
                         prefix={<SearchOutlined style={{color: 'var(--color-text-tertiary)'}} />}
                         value={topicFilter}
                         onChange={event => setTopicFilter(event.target.value)}
-                        style={{width: '100%', marginTop: 'var(--spacing-xs)'}}
+                        style={{width: '100%'}}
                     />
                     {topicFilter.trim() ? (
                         <div className="hint-text" style={{marginTop: 2}}>
@@ -1133,17 +1099,6 @@ const ResourceTree: React.FC = () => {
                         </div>
                     ) : null}
                 </div>
-            )}
-
-            {/* 展开/折叠按钮 */}
-            {collapsed && (
-                <IconButton
-                    size="small"
-                    icon={<MenuFoldOutlined rotate={180} />}
-                    label="展开资源树"
-                    onClick={() => setCollapsed(false)}
-                    style={{margin: 'var(--spacing-sm)'}}
-                />
             )}
 
             {/* 资源树 */}

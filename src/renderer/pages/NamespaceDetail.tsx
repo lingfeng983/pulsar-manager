@@ -4,7 +4,7 @@ import {FileTextOutlined, DatabaseOutlined, TagOutlined, ArrowRightOutlined, Sea
 import {useTabStore} from '../store/tabs';
 import {loadTopics} from '../hooks/resourceCache';
 import {shortName} from '../utils/format';
-import {fuzzyMatch} from '../utils/fuzzyMatch';
+import {matchesFilter} from '../utils/textFilter';
 import {topicTab} from '../utils/tabIds';
 import ResourceDetailPage, {type ResourceStat} from '../components/common/ResourceDetailPage';
 
@@ -113,7 +113,7 @@ const NamespaceDetail: React.FC<NamespaceDetailProps> = ({clusterId, tenant, nam
     // 筛选在渲染层做：topic 清单已经整份在手，为一个输入框再发一轮 IPC 不值当
     const filtering = topicFilter.trim().length > 0;
     const visibleTopics = useMemo(
-        () => (filtering ? topics.filter(t => fuzzyMatch(t.name, topicFilter)) : topics),
+        () => (filtering ? topics.filter(t => matchesFilter([t.name], topicFilter)) : topics),
         [topics, topicFilter, filtering],
     );
 

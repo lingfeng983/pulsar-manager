@@ -11,15 +11,22 @@ import {
     DatabaseOutlined,
     FolderOutlined,
     FileTextOutlined,
+    BarChartOutlined,
+    ApartmentOutlined,
+    MenuFoldOutlined,
+    MenuUnfoldOutlined,
 } from '@ant-design/icons';
 import {useThemeStore} from '../../store/theme';
 import UpdateModal from '../UpdateModal';
 import BenchmarkModal from '../BenchmarkModal';
+import IconButton from '../common/IconButton';
 import {useTabStore} from '../../store/tabs';
 import {useClusterStore} from '../../store/cluster';
+import {useLayoutStore} from '../../store/layout';
 import {loadTenants, loadNamespaces, loadTopics} from '../../hooks/resourceCache';
 import {shortName} from '../../utils/format';
-import {topicTab, tenantTab, namespaceTab, topologyTab} from '../../utils/tabIds';
+import {topicTab, tenantTab, namespaceTab, topologyTab, metricsTab} from '../../utils/tabIds';
+import {matchesFilter} from '../../utils/textFilter';
 import {downloadBlob} from '../../utils/download';
 import {useCommand} from '../../hooks/useKeybindings';
 import {useShortcutStore, resolveBinding} from '../../store/shortcuts';
@@ -46,6 +53,8 @@ const TopNav: React.FC = () => {
     const {theme, setTheme} = useThemeStore();
     const {addTab} = useTabStore();
     const {clusters} = useClusterStore();
+    const sidebarCollapsed = useLayoutStore(state => state.sidebarCollapsed);
+    const toggleSidebar = useLayoutStore(state => state.toggleSidebar);
     // 集群列表收进 ref：扇出搜索读最新值，但不把它放进 searchResources 依赖。否则任何
     // 一次集群探活写回都会换掉 clusters 数组，把防抖 effect 重新触发一遍、重发跨集群 IPC。
     const clustersRef = useRef(clusters);
@@ -103,7 +112,6 @@ const TopNav: React.FC = () => {
             setSearchLoading(true);
             try {
                 const results: SearchResult[] = [];
-                const lower = keyword.toLowerCase();
                 const full = () => results.length >= SEARCH_RESULT_LIMIT || isStale();
 
                 // 搜索集群
@@ -111,7 +119,7 @@ const TopNav: React.FC = () => {
                     if (results.length >= SEARCH_RESULT_LIMIT) {
                         return;
                     }
-                    if (cluster.name.toLowerCase().includes(lower)) {
+                    if (matchesFilter([cluster.name, cluster.serviceUrl], keyword)) {
                         results.push({
                             key: `cluster-${cluster.id}`,
                             label: `${cluster.name}`,
@@ -139,7 +147,7 @@ const TopNav: React.FC = () => {
                             if (full()) {
                                 break;
                             }
-                            if (tenant.name.toLowerCase().includes(lower)) {
+                            if (matchesFilter([tenant.name], keyword)) {
                                 results.push({
                                     key: `tenant-${cluster.id}-${tenant.name}`,
                                     label: `${cluster.name} / ${tenant.name}`,
@@ -160,7 +168,7 @@ const TopNav: React.FC = () => {
                                     }
                                     // 主进程已把 "tenant/ns" 剥成裸命名空间名，这里不能再 shortName，
                                     // 否则多层命名空间（a/b）会被截成 b，取 Topic 时与资源树对不上。
-                                    if (namespace.toLowerCase().includes(lower)) {
+                                    if (matchesFilter([namespace], keyword)) {
                                         results.push({
                                             key: `namespace-${cluster.id}-${tenant.name}-${namespace}`,
                                             label: `${cluster.name} / ${tenant.name} / ${namespace}`,
@@ -180,7 +188,7 @@ const TopNav: React.FC = () => {
                                                 break;
                                             }
                                             const topicName = shortName(topic.name);
-                                            if (topicName.toLowerCase().includes(lower)) {
+                                            if (matchesFilter([topicName], keyword)) {
                                                 results.push({
                                                     key: `topic-${cluster.id}-${tenant.name}-${namespace}-${
                                                         topic.persistent ? 'p' : 'n'
@@ -291,6 +299,16 @@ const TopNav: React.FC = () => {
     // 快速压测：参数与实时进度都在弹窗里，压测本体跑在主进程，关闭弹窗不中断
     const [benchmarkOpen, setBenchmarkOpen] = useState(false);
 
+    // 监控仪表盘（全局页签：跨集群自动选一个已连接集群）
+    const handleOpenMetrics = useCallback(() => {
+        addTab(metricsTab());
+    }, [addTab]);
+
+    // 集群拓扑（全局页签：多集群同屏，页签 id 统一由 topologyTab 拼装）
+    const handleOpenTopology = useCallback(() => {
+        addTab(topologyTab());
+    }, [addTab]);
+
     // 导出日志
     const handleExportLogs = async () => {
         try {
@@ -400,21 +418,36 @@ const TopNav: React.FC = () => {
                 zIndex: 1000,
             }}
         >
-            {/* Logo 区域：与右侧工具区同为 flex:1 1 0，两半等宽才能把搜索框顶在正中 */}
+            {/* 左侧操作区：原来压在侧边栏顶部的 监控/拓扑/折叠 三个按钮。
+                与右侧工具区同为 flex:1 1 0，两半等宽才能把搜索框顶在正中；
+                折叠态这里只剩一个展开按钮，不再跟着 40px 窄栏走宽度。 */}
             <div
                 style={{
                     flex: '1 1 0',
                     minWidth: 0,
                     display: 'flex',
                     alignItems: 'center',
-                    gap: 'var(--spacing-sm)',
-                    fontWeight: 600,
-                    fontSize: 'var(--font-size-lg)',
-                    color: 'var(--color-primary)',
+                    gap: 'var(--spacing-xs)',
                 }}
             >
-                <span style={{fontSize: 'var(--font-size-xl)'}}>⚡</span>
-                <span>Pulsar Manager</span>
+                {sidebarCollapsed ? (
+                    <IconButton size="small" icon={<MenuUnfoldOutlined />} label="展开资源树" onClick={toggleSidebar} />
+                ) : (
+                    <>
+                        <Button size="small" icon={<BarChartOutlined />} title="监控仪表盘" onClick={handleOpenMetrics}>
+                            监控
+                        </Button>
+                        <Button size="small" icon={<ApartmentOutlined />} title="集群拓扑" onClick={handleOpenTopology}>
+                            拓扑
+                        </Button>
+                        <IconButton
+                            size="small"
+                            icon={<MenuFoldOutlined />}
+                            label="折叠侧边栏"
+                            onClick={toggleSidebar}
+                        />
+                    </>
+                )}
             </div>
 
             {/* 全局搜索框：宽度按窗口比例走，窗口拉大它就跟着变宽，不再固定 280px */}

@@ -24,6 +24,7 @@ import {usePluginStore, type PresetOption} from '../store/plugins';
 import {loadNamespaces, loadTenants, loadTopics} from '../hooks/resourceCache';
 import type {LoadTestCompression, LoadTestParams, LoadTestPhase, LoadTestProgress, Topic} from '../types';
 import {formatBytes, formatThroughputAuto, shortName} from '../utils/format';
+import {filterByLabel} from '../utils/textFilter';
 
 const COMPRESSION_OPTIONS: {value: LoadTestCompression; label: string}[] = [
     {value: 'None', label: '不压缩'},
@@ -358,7 +359,7 @@ const BenchmarkModal: React.FC<BenchmarkModalProps> = ({open, onClose}) => {
                         <Form.Item name="clusterId" label="集群" rules={[{required: true, message: '请选择集群'}]}>
                             <Select
                                 showSearch
-                                optionFilterProp="label"
+                                filterOption={filterByLabel}
                                 placeholder="选择集群"
                                 onChange={() => {
                                     form.setFieldsValue({tenant: undefined, namespace: undefined, topic: undefined});
@@ -374,6 +375,7 @@ const BenchmarkModal: React.FC<BenchmarkModalProps> = ({open, onClose}) => {
                         <Form.Item name="tenant" label="租户" rules={[{required: true, message: '请选择租户'}]}>
                             <Select
                                 showSearch
+                                filterOption={filterByLabel}
                                 placeholder="选择租户"
                                 loading={loadingOptions}
                                 options={tenants.map(name => ({value: name, label: name}))}
@@ -389,6 +391,7 @@ const BenchmarkModal: React.FC<BenchmarkModalProps> = ({open, onClose}) => {
                         >
                             <Select
                                 showSearch
+                                filterOption={filterByLabel}
                                 placeholder="选择命名空间"
                                 loading={loadingOptions}
                                 options={namespaces.map(name => ({value: name, label: name}))}
@@ -400,6 +403,7 @@ const BenchmarkModal: React.FC<BenchmarkModalProps> = ({open, onClose}) => {
                         <Form.Item name="topic" label="Topic" rules={[{required: true, message: '请选择 Topic'}]}>
                             <Select
                                 showSearch
+                                filterOption={filterByLabel}
                                 placeholder="选择 Topic"
                                 loading={loadingOptions}
                                 options={topics.map(topic => ({

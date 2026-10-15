@@ -347,13 +347,6 @@ pre,
     min-width: 0;
 }
 
-/* 页头里的挂载点：首页拓扑把计数与图操作 portal 进来。
-   display:contents 让portal 的子节点直接成为工具栏这一行的弹性项，
-   否则它们会被套进一个盒子、跟着整块一起换行错位。 */
-.page-actions-slot {
-    display: contents;
-}
-
 /* 工具栏右端的一组：视图切换与主操作按钮靠行尾，筛选与图操作从行首排起 */
 .page-actions-right {
     display: flex;
@@ -529,28 +522,6 @@ pre,
     height: 100vh;
 }
 
-/* 首页拓扑全屏的是图这一层：UA 给 :fullscreen 元素铺纯黑底，亮色主题下像出了故障。 */
-.topology-chart:fullscreen {
-    background: var(--color-bg-base);
-    padding: var(--spacing-sm);
-}
-
-/* 全屏时工具栏留在页头会被黑底盖住（退出按钮点不到），所以画在图内右上角。 */
-.topology-inline-toolbar {
-    position: absolute;
-    top: var(--spacing-sm);
-    right: var(--spacing-sm);
-    z-index: 2;
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: var(--spacing-sm);
-    padding: 4px var(--spacing-sm);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
-    background: var(--color-bg-elevated);
-}
-
 /* content-holder 是 display:block，antd 没给 .ant-tabs-content 定高，
    于是它按内容塌陷，标签页白白丢掉一截视口高度（图表只能退回 min-height）。
    body/#root 都是 overflow:hidden，页面滚动本就由各页根容器负责，
@@ -568,6 +539,35 @@ pre,
 .json-editor {
     border-radius: var(--radius-sm);
     overflow: hidden;
+}
+
+/* 代码框底边的拖动把手：只在可拖的实例上渲染，中间那条短杠提示"这里能拖"，
+   悬停与拖动时变主色，避免整条底边看起来像编辑器的边框。 */
+.code-pane-resize {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 7px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: ns-resize;
+    user-select: none;
+}
+
+.code-pane-resize::after {
+    content: '';
+    width: 44px;
+    height: 3px;
+    border-radius: 2px;
+    background-color: var(--color-border);
+    transition: background-color 0.15s ease;
+}
+
+.code-pane-resize:hover::after,
+.code-pane-resize:active::after {
+    background-color: var(--color-primary);
 }
 
 /* 占位符底色。用 color-mix 而不是写死的半透明 hex：主题改的是 --color-primary
