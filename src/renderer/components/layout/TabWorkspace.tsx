@@ -12,6 +12,7 @@ import TenantDetail from '../../pages/TenantDetail';
 import NamespaceDetail from '../../pages/NamespaceDetail';
 import MetricsDashboard from '../../pages/MetricsDashboard';
 import AlertCenter from '../../pages/AlertCenter';
+import WorkerCenter from '../../pages/WorkerCenter';
 import ProducerWorkspace from '../../pages/ProducerWorkspace';
 import ConsumerWorkspace from '../../pages/ConsumerWorkspace';
 import ShortcutConfig from '../../pages/ShortcutConfig';
@@ -138,6 +139,14 @@ const TabWorkspace: React.FC = () => {
                 return <MetricsDashboard clusterId={tab.data?.clusterId} />;
             case 'alerts':
                 return <AlertCenter />;
+            case 'worker':
+                return (
+                    <WorkerCenter
+                        clusterId={tab.data?.clusterId}
+                        tenant={tab.data?.tenant}
+                        namespace={tab.data?.namespace}
+                    />
+                );
             case 'topology':
                 return <ClusterTopology clusterId={tab.data?.clusterId} />;
             case 'topic': {

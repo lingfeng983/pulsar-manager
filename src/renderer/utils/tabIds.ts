@@ -96,3 +96,14 @@ export const metricsTab = (clusterId?: string, clusterName?: string): TabItem =>
 // 告警中心是全局单页：规则本来就跨集群列一张表，按集群过滤在页内做，
 // 所以不给每个集群开一个页签（那样徽标与"未恢复"总数就没有落脚点了）。
 export const alertTab = (): TabItem => ({id: 'alerts', title: '告警中心', type: 'alerts'});
+
+// 函数与连接器按集群各开一页：worker 是每套部署自己的东西，
+// 在 A 集群列出的函数不可能出现在 B 集群的表里，合并成一张表只会让人误读归属。
+export const workerTabId = (clusterId?: string): string => (clusterId ? `worker-${clusterId}` : 'worker');
+
+export const workerTab = (clusterId?: string, clusterName?: string): TabItem => ({
+    id: workerTabId(clusterId),
+    title: clusterId ? `${clusterName || '集群'}函数与连接器` : '函数与连接器',
+    type: 'worker',
+    data: clusterId ? {clusterId} : undefined,
+});

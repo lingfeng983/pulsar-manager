@@ -968,6 +968,133 @@ export interface AlertProbeResult {
     metricLabel: string;
 }
 
+export interface PulsarWorkerState {
+    enabled: boolean;
+    // 每个 worker 节点自己报的 id/地址：函数跑在哪个节点上，出问题时第一个要看的就是这个
+    nodes: PulsarWorkerNode[];
+    // 未启用时这里写的是「为什么没启用」的人话原因，不是原始 404
+    notice?: string;
+}
+
+export interface PulsarWorkerNode {
+    workerId: string;
+    workerHostname?: string;
+    port?: number;
+    isLeader?: boolean;
+    // 坐标服务分配的编号，-1 通常意味着这个节点还没拿到 leader 身份
+    assignmentOffset?: number;
+}
+
+export type PulsarInstanceStatus = 'running' | 'stopped' | 'error' | 'unknown';
+
+export interface PulsarFunctionInstance {
+    instanceId: number;
+    status: PulsarInstanceStatus;
+    error?: string;
+    numRestarts?: number;
+    workerId?: string;
+}
+
+// 一个函数/连接器的实例状态折叠成一行摘要：列表页要按实例总数与「有没有出错」着色，
+// 逐个实例展开是详情页的事。
+export interface PulsarRuntimeStatus {
+    numInstances: number;
+    running: number;
+    stopped: number;
+    error: number;
+    instances: PulsarFunctionInstance[];
+}
+
+export type PulsarResourceKind = 'function' | 'sink' | 'source';
+
+// 只列界面一定会展示的字段。broker 返回的 FunctionConfig 有几十个键，
+// 全量映射的结果是一张没人读完的表；其余键原样留在 raw 里给详情抽屉。
+export interface PulsarRuntimeConfig {
+    kind: PulsarResourceKind;
+    tenant: string;
+    namespace: string;
+    name: string;
+    className?: string;
+    // 包位置：function:// 是 worker 已存包的坐标，其余是本地路径或 http(s) 地址
+    archive?: string;
+    inputs?: string[];
+    output?: string;
+    logTopic?: string;
+    parallelism?: number;
+    processingGuarantee?: string;
+    // 函数与连接器共用这套资源字段
+    cpu?: number;
+    ramMb?: number;
+    diskMb?: number;
+    autoAck?: boolean;
+    timeoutMs?: number;
+    // sink/source 特有的 topicToSerDeClassName / configs 等都只出现在 raw 里
+    raw: Record<string, unknown>;
+}
+
+export interface PulsarRuntimeItem {
+    config: PulsarRuntimeConfig;
+    // 状态取不到（例如 worker 正在初始化）时为空，列表按「未知」显示而不是隐藏这一行
+    status?: PulsarRuntimeStatus;
+    stats?: PulsarFunctionStats;
+}
+
+export interface PulsarFunctionStats {
+    received: number;
+    processed: number;
+    successfullyProcessed: number;
+    unsuccessfullyProcessed: number;
+    emitted: number;
+    exceptions: number;
+}
+
+// 触发一次函数的结果：output 是 broker 原样返回的字符串，可能为空——
+// 没有 output topic 的函数返回空是正常现象，不能当成失败。
+export interface PulsarTriggerResult {
+    output: string;
+}
+
+// 内置函数与内置连接器插件：新建表单的候选就来自这里，
+// 让用户手抄 connector.class 全限定名是错的来源。
+export interface PulsarBuiltinDefinition {
+    kind: PulsarResourceKind;
+    name: string;
+    className: string;
+    // 内置包坐标，创建时直接填给 archive 字段
+    archive?: string;
+    description?: string;
+    // 内置连接器的配置项 schema（原始 JSON），详情抽屉里折叠展示
+    configDefinition?: Record<string, unknown>;
+    inputs?: unknown;
+    multiDataInputs?: unknown;
+    output?: unknown;
+}
+
+// 新建函数/连接器的表单载荷：主进程把它拼成 multipart 请求，
+// 只带已填字段，未填的键根本不进请求体。
+// 包只能是坐标（内置函数的 function://、worker 已存过的包、http(s) 地址）：
+// 上传本地 jar 需要文件选择框与流式 multipart，这条实现路径在本机没有可对照的
+// worker 可验，与其上一个测不出对错的入口，不如把坐标写清楚。
+export interface PulsarRuntimeCreateParams {
+    clusterId: string;
+    kind: PulsarResourceKind;
+    tenant: string;
+    namespace: string;
+    name: string;
+    className: string;
+    archive?: string;
+    inputs?: string[];
+    output?: string;
+    logTopic?: string;
+    parallelism?: number;
+    cpu?: number;
+    ramMb?: number;
+    diskMb?: number;
+    processingGuarantee?: string;
+    // 连接器参数（sinkConfig/sourceConfig 的 configs 段）与函数的 userConfig，原样透传
+    userConfig?: Record<string, unknown>;
+}
+
 export interface ExportedSshConfig {
     host: string;
     port: number;

@@ -4,12 +4,14 @@ import {createAxiosClient, Semaphore, PulsarAdminConfig} from './http-client';
 import {REQUEST_CONFIG} from '../config/constants';
 import {ResourceAPI} from './resource-api';
 import {MetricsAPI} from './metrics-api';
-import type {TopicConfigPatch, TopologyLimits} from '../../shared/types';
+import {WorkerAPI} from './worker-api';
+import type {PulsarResourceKind, PulsarRuntimeCreateParams, TopicConfigPatch, TopologyLimits} from '../../shared/types';
 
 // Re-export all types and infrastructure from sub-modules
 export * from './http-client';
 export {ResourceAPI} from './resource-api';
 export {MetricsAPI} from './metrics-api';
+export {WorkerAPI, WorkerUnavailableError} from './worker-api';
 
 // Re-export specific types for convenience (handlers.ts imports these)
 export type {
@@ -39,6 +41,7 @@ export class PulsarAdminClient {
     private aggregateSemaphore: Semaphore;
     private resourceAPI: ResourceAPI;
     private metricsAPI: MetricsAPI;
+    private workerAPI: WorkerAPI;
 
     constructor(config: PulsarAdminConfig) {
         this.http = createAxiosClient(config);
@@ -47,6 +50,7 @@ export class PulsarAdminClient {
         this.aggregateSemaphore = new Semaphore(REQUEST_CONFIG.MAX_CONCURRENT_AGGREGATE);
         this.resourceAPI = new ResourceAPI(this.http, this.semaphore);
         this.metricsAPI = new MetricsAPI(this.http, this.semaphore, this.resourceAPI, this.aggregateSemaphore);
+        this.workerAPI = new WorkerAPI(this.http, this.semaphore);
     }
 
     // ========== 集群操作 ==========
@@ -203,6 +207,69 @@ export class PulsarAdminClient {
 
     async revokeTopicPermission(tenant: string, namespace: string, topic: string, role: string, persistent = true) {
         return this.resourceAPI.revokeTopicPermission(tenant, namespace, topic, role, persistent);
+    }
+
+    // ========== 函数与连接器（Function Worker）==========
+
+    // worker 探测结果是缓存的：进入页面时探一次，之后每个列表调用都复用，
+    // 未启用时抛的是那句翻译过的说明而不是裸 404。
+    async getWorkerState(force = false) {
+        return this.workerAPI.getWorkerState(force);
+    }
+
+    async listRuntimeItems(kind: PulsarResourceKind, tenant: string, namespace: string) {
+        return this.workerAPI.listItems(kind, tenant, namespace);
+    }
+
+    async getRuntimeItem(kind: PulsarResourceKind, tenant: string, namespace: string, name: string) {
+        return this.workerAPI.getItem(kind, tenant, namespace, name);
+    }
+
+    async controlRuntimeItem(
+        kind: PulsarResourceKind,
+        tenant: string,
+        namespace: string,
+        name: string,
+        action: 'start' | 'stop' | 'restart',
+        instanceId?: number,
+    ) {
+        return this.workerAPI.control(kind, tenant, namespace, name, action, instanceId);
+    }
+
+    async deleteRuntimeItem(kind: PulsarResourceKind, tenant: string, namespace: string, name: string) {
+        return this.workerAPI.remove(kind, tenant, namespace, name);
+    }
+
+    async createRuntimeItem(params: PulsarRuntimeCreateParams) {
+        return this.workerAPI.create(params);
+    }
+
+    async triggerFunction(tenant: string, namespace: string, name: string, topic: string, data?: string) {
+        return this.workerAPI.trigger(tenant, namespace, name, topic, data);
+    }
+
+    async listBuiltinRuntime(kind: PulsarResourceKind) {
+        return this.workerAPI.listBuiltins(kind);
+    }
+
+    async getBuiltinRuntimeConfig(kind: PulsarResourceKind, name: string) {
+        return this.workerAPI.getBuiltinConfigDefinition(kind, name);
+    }
+
+    async reloadBuiltinRuntime(kind: PulsarResourceKind) {
+        return this.workerAPI.reloadBuiltins(kind);
+    }
+
+    async getFunctionState(tenant: string, namespace: string, name: string, key: string) {
+        return this.workerAPI.getFunctionState(tenant, namespace, name, key);
+    }
+
+    async setFunctionState(tenant: string, namespace: string, name: string, key: string, value: string) {
+        return this.workerAPI.setFunctionState(tenant, namespace, name, key, value);
+    }
+
+    async getWorkerAssignments() {
+        return this.workerAPI.getAssignments();
     }
 
     // ========== 订阅操作 ==========

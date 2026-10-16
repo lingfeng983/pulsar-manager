@@ -427,6 +427,92 @@ export const AlertEventIdsSchema = z.object({
     ids: z.array(z.number().int().positive()).min(1).max(1000),
 });
 
+// ========== Function Worker：函数与连接器 ==========
+
+export const PulsarResourceKindSchema = z.enum(['function', 'sink', 'source']);
+
+// 命名空间级：列表与新建只要 tenant/namespace，函数名由新建那份额外带
+export const RuntimeNamespaceSchema = z.object({
+    clusterId: ClusterIdSchema,
+    kind: PulsarResourceKindSchema,
+    tenant: TenantSchema,
+    namespace: NamespaceSchema,
+});
+
+// 对象级：函数/连接器名与 topic 名同一字符集。这些值会拼进 Admin API 路径，
+// 放开 "/" 或 ".." 就等于让一个名字能指向别的资源。
+export const RuntimeItemPathSchema = RuntimeNamespaceSchema.extend({
+    name: TopicSchema,
+});
+
+// instanceId 的上限按 parallelism 的实际上限给：worker 对越界实例直接回 500，
+// 提前拦住就能把它变成一句表单校验错误。
+export const RuntimeControlSchema = RuntimeItemPathSchema.extend({
+    action: z.enum(['start', 'stop', 'restart']),
+    instanceId: z.number().int().min(0).max(4095).optional(),
+});
+
+export const FunctionTriggerSchema = RuntimeItemPathSchema.extend({
+    // 触发用的 topic 是完整 URI（含 persistent:// 与 /），不做字符集限制：
+    // 它作为表单字段发出去，不进路径。
+    topic: z.string().trim().min(1).max(255),
+    data: z
+        .string()
+        .max(64 * 1024)
+        .optional(),
+});
+
+// 新建的包位置只接受坐标字符串：内置函数是 function://、worker 存过的包是
+// 同类坐标，外部包是 http(s)。本地上传需要文件选择框与流式 multipart，
+// 这条路径本机没有可对照的 worker 能验，宁缺毋滥。
+const ArchiveSchema = z.string().trim().min(1).max(1024);
+
+export const RuntimeCreateSchema = RuntimeNamespaceSchema.extend({
+    name: TopicSchema,
+    className: z.string().trim().min(1).max(255),
+    archive: ArchiveSchema,
+    inputs: z.array(z.string().trim().min(1).max(255)).max(50).optional(),
+    output: z.string().trim().max(255).optional(),
+    logTopic: z.string().trim().max(255).optional(),
+    parallelism: z.number().int().min(1).max(64).default(1),
+    cpu: z.number().min(0.1).max(64).optional(),
+    ramMb: z
+        .number()
+        .int()
+        .min(128)
+        .max(1024 * 64)
+        .optional(),
+    diskMb: z
+        .number()
+        .int()
+        .min(1024)
+        .max(1024 * 1024)
+        .optional(),
+    processingGuarantee: z.enum(['ATLEAST_ONCE', 'ATMOST_ONCE', 'EFFECTIVELY_ONCE']).optional(),
+    // 连接器参数与函数的 userConfig：形状由所选插件决定，这里只保证是扁平的 JSON 对象
+    userConfig: z.record(z.string(), z.unknown()).optional(),
+});
+
+export const WorkerClusterSchema = z.object({clusterId: ClusterIdSchema});
+
+// 只按「口径」区分的那几档：内置函数/连接器清单与重载
+export const WorkerKindSchema = WorkerClusterSchema.extend({kind: PulsarResourceKindSchema});
+
+export const BuiltinConfigSchema = z.object({
+    clusterId: ClusterIdSchema,
+    kind: PulsarResourceKindSchema,
+    name: TopicSchema,
+});
+
+// state 的键直接进路径、值进表单，长度按 worker 侧实际能接受的来
+export const FunctionStateGetSchema = RuntimeItemPathSchema.extend({
+    key: z.string().trim().min(1).max(255),
+});
+
+export const FunctionStateSetSchema = FunctionStateGetSchema.extend({
+    value: z.string().max(256 * 1024),
+});
+
 // partitions = 0 表示非分区 topic：这两条路径在 Admin API 里是不同的端点，
 // 不能像旧代码那样一律走 /partitions。
 export const CreateTopicSchema = z.object({
@@ -1353,6 +1439,50 @@ export function registerNativeHandler<S extends z.ZodTypeAny, T>(
         'Cluster not found',
         run,
     );
+}
+
+/** 资源变更的审计字段：谁、对哪个对象的哪个动作，成功与失败都记。 */
+export interface MutationAudit {
+    action: string;
+    resource_type: string;
+    resource_id: string;
+    resource_name: string;
+    details?: string;
+}
+
+/**
+ * 需要 admin 客户端、且要落审计的变更通道：无论成功失败都记一条操作日志。
+ * 之前只有 cluster / message 通道记审计，topic / tenant / namespace 的
+ * 增删改一条都没入库，出问题时无法回溯是谁改的；函数与连接器同样属于
+ * 「改了就可能影响线上数据流」的操作，所以共用这一份包装而不是再抄一遍。
+ */
+export function registerMutationHandler<S extends z.ZodTypeAny>(
+    channel: string,
+    schema: S,
+    mapArgs: (args: unknown[]) => unknown,
+    audit: (input: z.infer<S>) => MutationAudit,
+    run: (client: PulsarAdminClient, input: z.infer<S>) => Promise<unknown>,
+): void {
+    registerClientHandler(channel, schema, mapArgs, async (client, input) => {
+        const clusterId = (input as {clusterId: string}).clusterId;
+        const meta = audit(input);
+        const base = {
+            cluster_id: clusterId,
+            action: meta.action,
+            resource_type: meta.resource_type,
+            resource_id: meta.resource_id,
+            resource_name: meta.resource_name,
+            details: meta.details,
+        };
+        try {
+            const data = await run(client, input);
+            insertOperationLog({...base, result: 'success'});
+            return data;
+        } catch (error) {
+            insertOperationLog({...base, result: 'failure', error_message: formatError(error)});
+            throw error;
+        }
+    });
 }
 
 /** 注册一个不需要 Admin 客户端的 IPC handler（仍做来源校验与错误兜底）。 */

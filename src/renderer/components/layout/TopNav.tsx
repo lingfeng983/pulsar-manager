@@ -13,6 +13,7 @@ import {
     FileTextOutlined,
     BarChartOutlined,
     ApartmentOutlined,
+    FunctionOutlined,
     AlertOutlined,
     MenuFoldOutlined,
     MenuUnfoldOutlined,
@@ -27,7 +28,7 @@ import {useAlertStore} from '../../store/alerts';
 import {useLayoutStore} from '../../store/layout';
 import {loadTenants, loadNamespaces, loadTopics} from '../../hooks/resourceCache';
 import {shortName} from '../../utils/format';
-import {topicTab, tenantTab, namespaceTab, topologyTab, metricsTab, alertTab} from '../../utils/tabIds';
+import {topicTab, tenantTab, namespaceTab, topologyTab, metricsTab, alertTab, workerTab} from '../../utils/tabIds';
 import {matchesFilter} from '../../utils/textFilter';
 import {downloadBlob} from '../../utils/download';
 import {useCommand} from '../../hooks/useKeybindings';
@@ -312,6 +313,12 @@ const TopNav: React.FC = () => {
         addTab(topologyTab());
     }, [addTab]);
 
+    // 函数与连接器：不带集群打开时页面自己落到第一个集群，
+    // 顶栏这个入口是「想看 worker」而不是「想看某个集群的 worker」。
+    const handleOpenWorker = useCallback(() => {
+        addTab(workerTab());
+    }, [addTab]);
+
     // 告警中心：徽标是"未恢复事件数"，点开页面并不清空它——
     // 事件要在告警中心里逐条确认或等它自动恢复，徽标跟着界面走才会误导。
     const openAlertCount = useAlertStore(state => state.openCount);
@@ -449,6 +456,14 @@ const TopNav: React.FC = () => {
                         </Button>
                         <Button size="small" icon={<ApartmentOutlined />} title="集群拓扑" onClick={handleOpenTopology}>
                             拓扑
+                        </Button>
+                        <Button
+                            size="small"
+                            icon={<FunctionOutlined />}
+                            title="函数与连接器"
+                            onClick={handleOpenWorker}
+                        >
+                            函数
                         </Button>
                         <Button
                             size="small"

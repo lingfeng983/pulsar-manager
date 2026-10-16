@@ -65,6 +65,12 @@ import type {
     AlertRule,
     AlertRuleUpsertParams,
     AlertProbeResult,
+    PulsarBuiltinDefinition,
+    PulsarResourceKind,
+    PulsarRuntimeCreateParams,
+    PulsarRuntimeItem,
+    PulsarTriggerResult,
+    PulsarWorkerState,
     TopologyLimits,
 } from './shared/types';
 
@@ -418,6 +424,63 @@ contextBridge.exposeInMainWorld('electronAPI', {
         onEvent: (callback: (push: AlertPush) => void) => subscribe(ALERT_EVENT_CHANNEL, callback),
     },
 
+    // 函数与连接器：全部经 admin REST，主进程已经判断过 worker 是否启用，
+    // 未启用时返回的是那句翻译过的说明而不是裸 404。
+    worker: {
+        getState: (clusterId: string, force?: boolean) => ipcRenderer.invoke('worker:state', {clusterId, force}),
+        listItems: (params: {clusterId: string; kind: PulsarResourceKind; tenant: string; namespace: string}) =>
+            ipcRenderer.invoke('worker:items:list', params),
+        getItem: (params: {
+            clusterId: string;
+            kind: PulsarResourceKind;
+            tenant: string;
+            namespace: string;
+            name: string;
+        }) => ipcRenderer.invoke('worker:item:get', params),
+        createItem: (params: PulsarRuntimeCreateParams) => ipcRenderer.invoke('worker:item:create', params),
+        controlItem: (params: {
+            clusterId: string;
+            kind: PulsarResourceKind;
+            tenant: string;
+            namespace: string;
+            name: string;
+            action: 'start' | 'stop' | 'restart';
+            instanceId?: number;
+        }) => ipcRenderer.invoke('worker:item:control', params),
+        deleteItem: (params: {
+            clusterId: string;
+            kind: PulsarResourceKind;
+            tenant: string;
+            namespace: string;
+            name: string;
+        }) => ipcRenderer.invoke('worker:item:delete', params),
+        trigger: (params: {
+            clusterId: string;
+            tenant: string;
+            namespace: string;
+            name: string;
+            topic: string;
+            data?: string;
+        }) => ipcRenderer.invoke('worker:function:trigger', {kind: 'function', ...params}),
+        listBuiltins: (clusterId: string, kind: PulsarResourceKind) =>
+            ipcRenderer.invoke('worker:builtin:list', {clusterId, kind}),
+        builtinConfig: (params: {clusterId: string; kind: PulsarResourceKind; name: string}) =>
+            ipcRenderer.invoke('worker:builtin:config', params),
+        reloadBuiltins: (clusterId: string, kind: PulsarResourceKind) =>
+            ipcRenderer.invoke('worker:builtin:reload', {clusterId, kind}),
+        getStateValue: (params: {clusterId: string; tenant: string; namespace: string; name: string; key: string}) =>
+            ipcRenderer.invoke('worker:function:state:get', {kind: 'function', ...params}),
+        setStateValue: (params: {
+            clusterId: string;
+            tenant: string;
+            namespace: string;
+            name: string;
+            key: string;
+            value: string;
+        }) => ipcRenderer.invoke('worker:function:state:set', {kind: 'function', ...params}),
+        assignments: (clusterId: string) => ipcRenderer.invoke('worker:assignments', {clusterId}),
+    },
+
     // 拓扑
     topology: {
         getClusterTopology: (clusterId: string, limits?: TopologyLimits) =>
@@ -766,6 +829,73 @@ declare global {
                 deleteEvents: (ids: number[]) => Promise<APIResponse<number>>;
                 countOpen: () => Promise<APIResponse<number>>;
                 onEvent: (callback: (push: AlertPush) => void) => () => void;
+            };
+            worker: {
+                getState: (clusterId: string, force?: boolean) => Promise<APIResponse<PulsarWorkerState>>;
+                listItems: (params: {
+                    clusterId: string;
+                    kind: PulsarResourceKind;
+                    tenant: string;
+                    namespace: string;
+                }) => Promise<APIResponse<PulsarRuntimeItem[]>>;
+                getItem: (params: {
+                    clusterId: string;
+                    kind: PulsarResourceKind;
+                    tenant: string;
+                    namespace: string;
+                    name: string;
+                }) => Promise<APIResponse<PulsarRuntimeItem>>;
+                createItem: (params: PulsarRuntimeCreateParams) => Promise<APIResponse<string>>;
+                controlItem: (params: {
+                    clusterId: string;
+                    kind: PulsarResourceKind;
+                    tenant: string;
+                    namespace: string;
+                    name: string;
+                    action: 'start' | 'stop' | 'restart';
+                    instanceId?: number;
+                }) => Promise<APIResponse<void>>;
+                deleteItem: (params: {
+                    clusterId: string;
+                    kind: PulsarResourceKind;
+                    tenant: string;
+                    namespace: string;
+                    name: string;
+                }) => Promise<APIResponse<void>>;
+                trigger: (params: {
+                    clusterId: string;
+                    tenant: string;
+                    namespace: string;
+                    name: string;
+                    topic: string;
+                    data?: string;
+                }) => Promise<APIResponse<PulsarTriggerResult>>;
+                listBuiltins: (
+                    clusterId: string,
+                    kind: PulsarResourceKind,
+                ) => Promise<APIResponse<PulsarBuiltinDefinition[]>>;
+                builtinConfig: (params: {
+                    clusterId: string;
+                    kind: PulsarResourceKind;
+                    name: string;
+                }) => Promise<APIResponse<Record<string, unknown>>>;
+                reloadBuiltins: (clusterId: string, kind: PulsarResourceKind) => Promise<APIResponse<void>>;
+                getStateValue: (params: {
+                    clusterId: string;
+                    tenant: string;
+                    namespace: string;
+                    name: string;
+                    key: string;
+                }) => Promise<APIResponse<string>>;
+                setStateValue: (params: {
+                    clusterId: string;
+                    tenant: string;
+                    namespace: string;
+                    name: string;
+                    key: string;
+                    value: string;
+                }) => Promise<APIResponse<void>>;
+                assignments: (clusterId: string) => Promise<APIResponse<Record<string, string[]>>>;
             };
             topology: {
                 getClusterTopology: (

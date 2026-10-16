@@ -95,6 +95,18 @@ export type {
     AlertRule,
     AlertRuleUpsertParams,
     AlertScope,
+    // 函数与连接器
+    PulsarBuiltinDefinition,
+    PulsarFunctionInstance,
+    PulsarFunctionStats,
+    PulsarResourceKind,
+    PulsarRuntimeConfig,
+    PulsarRuntimeCreateParams,
+    PulsarRuntimeItem,
+    PulsarRuntimeStatus,
+    PulsarTriggerResult,
+    PulsarWorkerNode,
+    PulsarWorkerState,
 } from '../../shared/types';
 
 // 订阅

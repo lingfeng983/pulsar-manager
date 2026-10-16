@@ -11,6 +11,7 @@ import {registerTemplateHandlers} from './template-handlers';
 import {registerProducerHandlers} from './producer-handlers';
 import {registerConsumerHandlers} from './consumer-handlers';
 import {registerAlertHandlers} from './alert-handlers';
+import {registerWorkerHandlers} from './worker-handlers';
 import {ensureDbInitialized, cleanupDatabase} from './_shared';
 
 // Re-export cleanupDatabase for external consumers
@@ -34,4 +35,5 @@ export function registerIPCHandlers() {
     registerProducerHandlers();
     registerConsumerHandlers();
     registerAlertHandlers();
+    registerWorkerHandlers();
 }

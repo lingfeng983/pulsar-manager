@@ -2,9 +2,7 @@ import {
     z,
     markClusterStatus,
     registerClientHandler,
-    insertOperationLog,
-    formatError,
-    PulsarAdminClient,
+    registerMutationHandler,
     ClusterIdSchema,
     TenantPathSchema,
     NamespacePathSchema,
@@ -31,48 +29,6 @@ const ClusterOnlySchema = z.object({clusterId: ClusterIdSchema});
 const UpdateTopicConfigSchema = TopicPathSchema.extend({
     config: TopicConfigPatchSchema,
 });
-
-interface MutationAudit {
-    action: string;
-    resource_type: string;
-    resource_id: string;
-    resource_name: string;
-    details?: string;
-}
-
-/**
- * 资源变更统一包装：无论成功失败都落一条审计。
- * 之前只有 cluster / message 通道记审计，topic / tenant / namespace 的
- * 增删改一条都没入库，出问题时无法回溯是谁改的。
- */
-function registerMutationHandler<S extends z.ZodTypeAny>(
-    channel: string,
-    schema: S,
-    mapArgs: (args: unknown[]) => unknown,
-    audit: (input: z.infer<S>) => MutationAudit,
-    run: (client: PulsarAdminClient, input: z.infer<S>) => Promise<unknown>,
-): void {
-    registerClientHandler(channel, schema, mapArgs, async (client, input) => {
-        const clusterId = (input as {clusterId: string}).clusterId;
-        const meta = audit(input);
-        const base = {
-            cluster_id: clusterId,
-            action: meta.action,
-            resource_type: meta.resource_type,
-            resource_id: meta.resource_id,
-            resource_name: meta.resource_name,
-            details: meta.details,
-        };
-        try {
-            const data = await run(client, input);
-            insertOperationLog({...base, result: 'success'});
-            return data;
-        } catch (error) {
-            insertOperationLog({...base, result: 'failure', error_message: formatError(error)});
-            throw error;
-        }
-    });
-}
 
 export function registerResourceHandlers() {
     registerClientHandler(
