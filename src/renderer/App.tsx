@@ -5,6 +5,7 @@ import {applyTheme, loadPersistedTheme, useThemeStore} from './store/theme';
 import {loadAppSettings, useSettingsStore} from './store/settings';
 import {ANTD_FONT_BASE_PX, antdFontFactor, antdFontTokens} from './utils/fontScale';
 import {loadPlugins} from './store/plugins';
+import {startAlertRuntime} from './store/alerts';
 import Layout from './components/layout/Layout';
 import ErrorBoundary from './components/ErrorBoundary';
 import {DangerConfirmHost} from './components/common/dangerConfirm';
@@ -16,6 +17,8 @@ loadPersistedTheme();
 // 截断长度、刷新间隔这些设置在消费它们的页面挂载前就取一次，避免先按默认值闪一下
 loadAppSettings();
 loadPlugins();
+// 告警推送的订阅要早于任何页面挂载：立案可能发生在窗口收进托盘的时候。
+startAlertRuntime();
 
 // 紧凑档基准：以 large 字号档的 antd 基准文字（12px）为 1 倍，控件高度与内边距按字号档位同比缩放，
 // 否则切到"小"字号后仍然是原来那套 32px 高的按钮，视觉上只小了字没小了面。

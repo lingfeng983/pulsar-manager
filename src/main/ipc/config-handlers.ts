@@ -12,9 +12,21 @@ import {
     writeAppSettings,
 } from '../services/app-config';
 import {ensureDbInitialized, formatError, insertOperationLog, registerHandler} from './_shared';
+import {syncAlertEngine} from '../services/alert-engine';
 import {createLogger} from '../utils/logger';
 
 const log = createLogger('IPC');
+
+// 告警的总开关与评估间隔就在这一次写入里变了，定时器必须跟着重挂：
+// 只写库不重挂的话，"把间隔从 5 分钟改成 10 秒"要等下次启动才生效。
+function rescheduleAlertEngine(): void {
+    try {
+        syncAlertEngine();
+    } catch (error) {
+        // 设置已经存进去了，不能让重挂失败把整次保存报成失败
+        log.error('config: alert engine reschedule failed', formatError(error));
+    }
+}
 
 // zod 的 issue 列表对用户没有意义（"Number must be greater than 20"），
 // 但配置项都是具名字段，取第一条 issue 的路径 + 期望范围足够说清楚。
@@ -44,7 +56,9 @@ export function registerConfigHandlers() {
 
     registerHandler('config:reset', async () => {
         ensureDbInitialized();
-        return resetAppSettings();
+        const settings = resetAppSettings();
+        rescheduleAlertEngine();
+        return settings;
     });
 
     registerHandler('config:meta', async () => {

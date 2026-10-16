@@ -147,6 +147,54 @@ CREATE TABLE IF NOT EXISTS metrics_snapshots (
     FOREIGN KEY (cluster_id) REFERENCES clusters(id) ON DELETE CASCADE
 );
 
+-- 告警规则：作用域定位三件套用空串表示"该维度不参与定位"（与 message_templates
+-- 的 topic_uri 约定同源）。阈值存原生单位，换算只在显示侧做。
+-- 同一集群内规则名唯一：列表里两条同名的规则没人分得出该关哪条。
+CREATE TABLE IF NOT EXISTS alert_rules (
+    id TEXT PRIMARY KEY,
+    cluster_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    scope TEXT NOT NULL,
+    tenant TEXT NOT NULL DEFAULT '',
+    namespace TEXT NOT NULL DEFAULT '',
+    topic TEXT NOT NULL DEFAULT '',
+    persistent INTEGER NOT NULL DEFAULT 1,
+    metric TEXT NOT NULL,
+    comparator TEXT NOT NULL,
+    threshold REAL NOT NULL,
+    consecutive INTEGER NOT NULL DEFAULT 1,
+    notify INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (cluster_id, name),
+    FOREIGN KEY (cluster_id) REFERENCES clusters(id) ON DELETE CASCADE
+);
+
+-- 告警事件：rule_name / scope_label / message 都是立案那一刻写死的文本副本，
+-- 规则后来改名改阈值不该改写历史——用户半年后翻到这条事件时要知道当时卡在哪。
+-- fired_at 等一律 epoch 毫秒（与 metrics_snapshots 同一个理由：按时间范围清理与排序）。
+CREATE TABLE IF NOT EXISTS alert_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_id TEXT NOT NULL,
+    cluster_id TEXT NOT NULL,
+    rule_name TEXT NOT NULL,
+    scope_label TEXT NOT NULL,
+    metric TEXT NOT NULL,
+    comparator TEXT NOT NULL,
+    threshold REAL NOT NULL,
+    value REAL NOT NULL,
+    last_value REAL NOT NULL,
+    state TEXT NOT NULL,
+    message TEXT NOT NULL,
+    fired_at INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL,
+    resolved_at INTEGER,
+    acked_at INTEGER,
+    FOREIGN KEY (rule_id) REFERENCES alert_rules(id) ON DELETE CASCADE,
+    FOREIGN KEY (cluster_id) REFERENCES clusters(id) ON DELETE CASCADE
+);
+
 -- 创建索引
 CREATE INDEX IF NOT EXISTS idx_clusters_status ON clusters(status);
 CREATE INDEX IF NOT EXISTS idx_operation_logs_cluster_id ON operation_logs(cluster_id);
@@ -157,6 +205,11 @@ CREATE INDEX IF NOT EXISTS idx_consumer_configs_scope ON consumer_session_config
 CREATE INDEX IF NOT EXISTS idx_send_history_scope ON send_history(cluster_id, topic_uri);
 CREATE INDEX IF NOT EXISTS idx_send_history_created_at ON send_history(created_at);
 CREATE INDEX IF NOT EXISTS idx_metrics_snapshots_scope ON metrics_snapshots(cluster_id, topic_uri, captured_at);
+CREATE INDEX IF NOT EXISTS idx_alert_rules_cluster ON alert_rules(cluster_id, enabled);
+CREATE INDEX IF NOT EXISTS idx_alert_events_state ON alert_events(state, fired_at);
+-- 一条规则同时只能有一条未恢复事件。这条偏唯一索引是让"是否已立案"这个判断
+-- 不依赖进程内存：重启后引擎照样能看到事件还开着，只刷新观测值、不再弹一次通知。
+CREATE UNIQUE INDEX IF NOT EXISTS idx_alert_events_open ON alert_events(rule_id) WHERE resolved_at IS NULL;
 
 -- 出厂默认设置（INSERT OR IGNORE：用户改过的值不会被启动流程覆盖回去）
 INSERT OR IGNORE INTO user_settings (key, value, updated_at) VALUES

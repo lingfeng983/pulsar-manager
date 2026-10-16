@@ -5,6 +5,7 @@ import {registerIPCHandlers, cleanupDatabase} from './ipc/handlers';
 import {nativeClientManager} from './services/pulsar-native-client';
 import {loadTestManager} from './services/load-test';
 import {sshTunnelManager} from './services/ssh-tunnel';
+import {stopAlertEngine, syncAlertEngine} from './services/alert-engine';
 import {createLogger, setLogFileForMainProcess} from './utils/logger';
 
 // 日志文件路径要在任何 logger 调用之前定下来
@@ -282,6 +283,14 @@ if (!gotTheLock) {
             return;
         }
 
+        // 排在 try 外面：定时器挂不上不该让应用看起来"数据库初始化失败"，
+        // 那一层的语义是"库开不开"，而这里是"告警引擎开不开"。
+        try {
+            syncAlertEngine();
+        } catch (error) {
+            log.error('alert engine start failed', error instanceof Error ? error.message : String(error));
+        }
+
         app.on('activate', () => {
             if (BrowserWindow.getAllWindows().length === 0) {
                 showMainWindow();
@@ -314,6 +323,9 @@ app.on('will-quit', event => {
         return;
     }
     event.preventDefault();
+    // 先停定时器：评估循环正等着 admin 请求时把隧道与原生客户端关掉，
+    // 拿到的就是"半死资源"，而这条路径是有段错误先例的。
+    stopAlertEngine();
     const release = async (step: string, task: () => Promise<void>) => {
         try {
             await task();

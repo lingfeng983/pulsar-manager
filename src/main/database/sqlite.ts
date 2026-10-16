@@ -10,7 +10,7 @@ let db: Database.Database | null = null;
 // schema 版本以 user_version 跟踪。改基线 DDL 时：升 SCHEMA_VERSION，
 // 并把该版本的增量 DDL 写进 migrate()——CREATE TABLE IF NOT EXISTS 对已存在的
 // 旧库什么都不做，没有这套机制，加列只会对新装用户生效，旧库静默落后。
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 
 function migrate(database: Database.Database, from: number): void {
     // v2：refreshInterval 那行出厂值是 30000，而监控页的刷新间隔单位是秒，
@@ -50,6 +50,8 @@ function migrate(database: Database.Database, from: number): void {
     // v8：监控时序快照表 metrics_snapshots。只加新表、没有旧列要补，
     // 启动时执行的那遍基线 DDL 已经把表建好（CREATE TABLE IF NOT EXISTS 对老库同样生效），
     // 这段留着只为说明 v8 确实做过事，与 v5 同一个理由。
+    // v9：告警两张表（alert_rules / alert_events）与那条"一条规则只允许一条未恢复事件"
+    // 的偏唯一索引。同样只加表不动旧列，基线语句对老库生效，这里没有数据要修补。
 }
 
 // 每次启动都执行基线再补迁移：基线全是幂等语句，因此旧库缺的表和出厂设置行
@@ -717,6 +719,231 @@ export function cleanupMetricsSnapshots(retentionDays: number, maxRows: number =
             .run(count.count - maxRows).changes;
     }
     return byAge.changes + byRows;
+}
+
+// ========== 告警规则 ==========
+// 规则整行读写：界面每次提交的是完整草稿（作用域、指标、阈值、开关一起），
+// 所以更新走"全列 SET"而不是动态拼字段——列名固定，也就不需要字段白名单。
+
+export interface AlertRuleRecord {
+    id: string;
+    cluster_id: string;
+    name: string;
+    // SQLite 没有布尔列，0/1 存、由 handler 解回 boolean
+    enabled: number;
+    scope: string;
+    tenant: string;
+    namespace: string;
+    topic: string;
+    persistent: number;
+    metric: string;
+    comparator: string;
+    threshold: number;
+    consecutive: number;
+    notify: number;
+    created_at: string;
+    updated_at: string;
+}
+
+// 主键与时间戳由调用方/DAO 分别补：id 在 handler 里生成（更新时它来自入参，
+// 且 UPDATE 语句不该改主键），时间戳一律由 DAO 写当前时间。
+export type AlertRuleWrite = Omit<AlertRuleRecord, 'id' | 'created_at' | 'updated_at'>;
+
+export function listAlertRules(): AlertRuleRecord[] {
+    const database = getDatabase();
+    return database
+        .prepare('SELECT * FROM alert_rules ORDER BY cluster_id, created_at DESC')
+        .all() as AlertRuleRecord[];
+}
+
+export function getAlertRuleById(id: string): AlertRuleRecord | undefined {
+    const database = getDatabase();
+    return database.prepare('SELECT * FROM alert_rules WHERE id = ?').get(id) as AlertRuleRecord | undefined;
+}
+
+export function insertAlertRule(rule: AlertRuleWrite & {id: string}): void {
+    const database = getDatabase();
+    const now = new Date().toISOString();
+    database
+        .prepare(
+            `INSERT INTO alert_rules (
+               id, cluster_id, name, enabled, scope, tenant, namespace, topic, persistent,
+               metric, comparator, threshold, consecutive, notify, created_at, updated_at
+             ) VALUES (
+               @id, @cluster_id, @name, @enabled, @scope, @tenant, @namespace, @topic, @persistent,
+               @metric, @comparator, @threshold, @consecutive, @notify, @created_at, @updated_at
+             )`,
+        )
+        .run({...rule, created_at: now, updated_at: now});
+}
+
+export function updateAlertRule(id: string, rule: AlertRuleWrite): void {
+    const database = getDatabase();
+    const now = new Date().toISOString();
+    database
+        .prepare(
+            `UPDATE alert_rules SET
+               cluster_id = @cluster_id, name = @name, enabled = @enabled, scope = @scope,
+               tenant = @tenant, namespace = @namespace, topic = @topic, persistent = @persistent,
+               metric = @metric, comparator = @comparator, threshold = @threshold,
+               consecutive = @consecutive, notify = @notify, updated_at = @updated_at
+             WHERE id = @id`,
+        )
+        .run({...rule, id, updated_at: now});
+}
+
+export function deleteAlertRule(id: string): void {
+    const database = getDatabase();
+    // 事件行靠 alert_events.rule_id 的 CASCADE 一起走：删掉规则 = "这个告警我不再关心"，
+    // 留下一堆指向空规则的历史只会让事件列表读不懂。
+    database.prepare('DELETE FROM alert_rules WHERE id = ?').run(id);
+}
+
+// ========== 告警事件 ==========
+
+export interface AlertEventRecord {
+    id: number;
+    rule_id: string;
+    cluster_id: string;
+    rule_name: string;
+    scope_label: string;
+    metric: string;
+    comparator: string;
+    threshold: number;
+    value: number;
+    last_value: number;
+    state: string;
+    message: string;
+    fired_at: number;
+    last_seen_at: number;
+    resolved_at: number | null;
+    acked_at: number | null;
+}
+
+export function insertAlertEvent(event: Omit<AlertEventRecord, 'id'>): number {
+    const database = getDatabase();
+    const result = database
+        .prepare(
+            `INSERT INTO alert_events (
+               rule_id, cluster_id, rule_name, scope_label, metric, comparator, threshold,
+               value, last_value, state, message, fired_at, last_seen_at, resolved_at, acked_at
+             ) VALUES (
+               @rule_id, @cluster_id, @rule_name, @scope_label, @metric, @comparator, @threshold,
+               @value, @last_value, @state, @message, @fired_at, @last_seen_at, @resolved_at, @acked_at
+             )`,
+        )
+        .run({...event, resolved_at: event.resolved_at ?? null, acked_at: event.acked_at ?? null});
+    return Number(result.lastInsertRowid);
+}
+
+// 未恢复事件按规则查：引擎每轮都要知道"这条规则现在是不是已经立案了"，
+// 靠它决定是刷新观测值还是新建事件（也是那条偏唯一索引的另一半）。
+export function getOpenAlertEvent(ruleId: string): AlertEventRecord | undefined {
+    const database = getDatabase();
+    return database
+        .prepare('SELECT * FROM alert_events WHERE rule_id = ? AND resolved_at IS NULL ORDER BY fired_at DESC LIMIT 1')
+        .get(ruleId) as AlertEventRecord | undefined;
+}
+
+export function getAlertEventById(id: number): AlertEventRecord | undefined {
+    const database = getDatabase();
+    return database.prepare('SELECT * FROM alert_events WHERE id = ?').get(id) as AlertEventRecord | undefined;
+}
+
+export interface AlertEventFilter {
+    clusterId?: string;
+    state?: 'firing' | 'resolved';
+    limit: number;
+}
+
+export function listAlertEvents(filter: AlertEventFilter): AlertEventRecord[] {
+    const database = getDatabase();
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    if (filter.clusterId) {
+        conditions.push('cluster_id = ?');
+        params.push(filter.clusterId);
+    }
+    if (filter.state) {
+        // 状态用 resolved_at 判而不是 state 列：两者由同一段代码写，但只有一份能当真相
+        conditions.push(filter.state === 'resolved' ? 'resolved_at IS NOT NULL' : 'resolved_at IS NULL');
+    }
+    params.push(filter.limit);
+    return database
+        .prepare(
+            `SELECT * FROM alert_events
+             ${conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''}
+             ORDER BY fired_at DESC LIMIT ?`,
+        )
+        .all(...params) as AlertEventRecord[];
+}
+
+// 未恢复期间只刷新观测值与时间：规则一直超标时用户看到的是一条越来越新的记录，
+// 而不是每轮多一条重复事件。
+export function observeAlertEvent(id: number, lastValue: number, seenAt: number): void {
+    const database = getDatabase();
+    database
+        .prepare('UPDATE alert_events SET last_value = ?, last_seen_at = ? WHERE id = ?')
+        .run(lastValue, seenAt, id);
+}
+
+export function resolveAlertEvent(id: number, lastValue: number, seenAt: number): void {
+    const database = getDatabase();
+    database
+        .prepare(
+            "UPDATE alert_events SET state = 'resolved', resolved_at = ?, last_value = ?," +
+                ' last_seen_at = ? WHERE id = ?',
+        )
+        .run(seenAt, lastValue, seenAt, id);
+}
+
+export function ackAlertEvents(ids: number[], ackedAt: number): number {
+    if (ids.length === 0) {
+        return 0;
+    }
+    const database = getDatabase();
+    const placeholders = ids.map(() => '?').join(', ');
+    return database
+        .prepare(`UPDATE alert_events SET acked_at = ? WHERE id IN (${placeholders}) AND acked_at IS NULL`)
+        .run(ackedAt, ...ids).changes;
+}
+
+export function deleteAlertEvents(ids: number[]): number {
+    if (ids.length === 0) {
+        return 0;
+    }
+    const database = getDatabase();
+    const placeholders = ids.map(() => '?').join(', ');
+    return database.prepare(`DELETE FROM alert_events WHERE id IN (${placeholders})`).run(...ids).changes;
+}
+
+// 保留策略只动已恢复的事件：未恢复的那条无论多久都是"现在还烧着"，删了就等于把故障藏起来。
+// 行数上限是最后一道闸（清完仍超限时按最旧的先走，含未恢复的，引擎下一轮会重新立案）。
+export function cleanupAlertEvents(retentionDays: number, maxRows: number = 20_000): number {
+    const database = getDatabase();
+    const cutoff = Date.now() - retentionDays * 24 * 3600 * 1000;
+    const byAge = database
+        .prepare('DELETE FROM alert_events WHERE resolved_at IS NOT NULL AND resolved_at < ?')
+        .run(cutoff).changes;
+    const count = database.prepare('SELECT COUNT(*) as count FROM alert_events').get() as {count: number};
+    let byRows = 0;
+    if (count.count > maxRows) {
+        byRows = database
+            .prepare(
+                `DELETE FROM alert_events
+                 WHERE id IN (SELECT id FROM alert_events ORDER BY fired_at ASC LIMIT ?)`,
+            )
+            .run(count.count - maxRows).changes;
+    }
+    return byAge + byRows;
+}
+
+export function countOpenAlertEvents(): number {
+    const database = getDatabase();
+    const row = database.prepare('SELECT COUNT(*) as count FROM alert_events WHERE resolved_at IS NULL').get() as {
+        count: number;
+    };
+    return row.count;
 }
 
 // 用户设置相关操作

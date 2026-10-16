@@ -838,6 +838,12 @@ export interface AppSettings {
     metricsSnapshotEnabled: boolean;
     // 快照保留天数，写入侧顺带按它清理旧行。
     metricsRetentionDays: number;
+    // 告警引擎总开关：关掉就不挂定时器，规则留着也不会评估。
+    alertEnabled: boolean;
+    // 评估间隔（秒）。下限挡的是"每秒把全集群扫一遍"，上限 1 小时。
+    alertCheckSeconds: number;
+    // 已恢复事件的保留天数；未恢复的事件不受保留期约束，一直留到人确认或恢复。
+    alertRetentionDays: number;
 }
 
 // ========== 监控时序快照 ==========
@@ -866,6 +872,100 @@ export interface MetricsSnapshotQuery {
     topicUri?: string;
     hours?: number;
     limit?: number;
+}
+
+// ========== 告警 ==========
+
+export type AlertScope = 'cluster' | 'namespace' | 'topic';
+export type AlertComparator = 'gt' | 'lt';
+export type AlertEventState = 'firing' | 'resolved';
+
+// 采样口径取自归一化后的 TopicStats / AggregatedStats，见 shared/alert-metrics.ts
+// 里每个键的数据源与显示单位。
+export type AlertMetricKey =
+    | 'backlog'
+    | 'msgRateIn'
+    | 'msgRateOut'
+    | 'throughputIn'
+    | 'throughputOut'
+    | 'storageSize'
+    | 'producers'
+    | 'consumers';
+
+export interface AlertRule {
+    id: string;
+    clusterId: string;
+    name: string;
+    enabled: boolean;
+    scope: AlertScope;
+    // 定位三件套：scope 不是 topic/namespace 时用不到的项一律存空串，
+    // 不用 NULL——空串是这套表里"该维度不参与定位"的既有约定。
+    tenant: string;
+    namespace: string;
+    topic: string;
+    persistent: boolean;
+    metric: AlertMetricKey;
+    comparator: AlertComparator;
+    // 阈值存原生单位（条、条/秒、字节/秒、字节），显示换算见 alert-metrics
+    threshold: number;
+    // 连续命中多少轮才立案：一轮抖动不算告警
+    consecutive: number;
+    notify: boolean;
+    createdAt: string;
+    updatedAt: string;
+}
+
+// 新建与编辑共用：不带 id 就是新建（id 由主进程生成）。时间戳由主进程写。
+// 'id' 必须一起 Omit 掉：留着 AlertRule 上那个必填 id 再交集一个可选 id，
+// 得到的仍然是必填，"新建时不传 id"会编译不过。
+export type AlertRuleUpsertParams = Omit<AlertRule, 'id' | 'createdAt' | 'updatedAt'> & {id?: string};
+
+export interface AlertEvent {
+    id: number;
+    ruleId: string;
+    clusterId: string;
+    // 立案那一刻的规则名与作用域文本：规则后来改名、改阈值都不该改写历史
+    ruleName: string;
+    scopeLabel: string;
+    metric: AlertMetricKey;
+    comparator: AlertComparator;
+    threshold: number;
+    // 首次立案时的观测值与最近一轮的观测值（未恢复期间持续刷新）
+    value: number;
+    lastValue: number;
+    state: AlertEventState;
+    message: string;
+    // 以下时间都是 epoch 毫秒：事件按时间范围清理与排序，数值比较不用解析字符串
+    firedAt: number;
+    lastSeenAt: number;
+    resolvedAt?: number | null;
+    ackedAt?: number | null;
+}
+
+export interface AlertEventQuery {
+    clusterId?: string;
+    state?: AlertEventState;
+    limit?: number;
+}
+
+// 主进程 → 渲染进程的新告警推送（桌面通知之外的应用内提醒）。
+// recovered 为真表示这是一条"已恢复"通知。
+export interface AlertPush {
+    kind: 'fired' | 'recovered';
+    event: AlertEvent;
+}
+
+export const ALERT_EVENT_CHANNEL = 'alert:event' as const;
+
+// 「试跑」一条规则的结果：主进程即时取一次数，判定与显示文本都在那边算好，
+// 单位换算规则因此只有 shared/alert-metrics 那一份。
+export interface AlertProbeResult {
+    value: number;
+    breached: boolean;
+    message: string;
+    valueText: string;
+    thresholdText: string;
+    metricLabel: string;
 }
 
 export interface ExportedSshConfig {

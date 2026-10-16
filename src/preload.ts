@@ -59,6 +59,12 @@ import type {
     MetricsSnapshot,
     MetricsSnapshotInput,
     MetricsSnapshotQuery,
+    AlertPush,
+    AlertEvent,
+    AlertEventQuery,
+    AlertRule,
+    AlertRuleUpsertParams,
+    AlertProbeResult,
     TopologyLimits,
 } from './shared/types';
 
@@ -71,6 +77,7 @@ const READ_BATCH_CHANNEL: StreamChannel['readBatch'] = 'msg:read-batch';
 const SESSION_END_CHANNEL: StreamChannel['sessionEnd'] = 'msg:session-end';
 const PRODUCER_STATS_CHANNEL: StreamChannel['producerStats'] = 'msg:producer-stats';
 const LOAD_TEST_PROGRESS_CHANNEL: typeof import('./shared/types').LOAD_TEST_CHANNEL = 'benchmark:progress';
+const ALERT_EVENT_CHANNEL: typeof import('./shared/types').ALERT_EVENT_CHANNEL = 'alert:event';
 
 // 主进程 → 渲染进程的下行订阅。返回反订阅闭包：组件卸载时必须能摘掉监听，
 // 否则切了标签页还在往旧组件推数据。载荷只允许纯 JSON（sandbox 下传不了类实例）。
@@ -394,6 +401,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
         getBrokers: (clusterId: string) => ipcRenderer.invoke('metrics:getBrokers', clusterId),
         recordSnapshot: (snapshot: MetricsSnapshotInput) => ipcRenderer.invoke('metrics:recordSnapshot', snapshot),
         listSnapshots: (query: MetricsSnapshotQuery) => ipcRenderer.invoke('metrics:listSnapshots', query),
+    },
+
+    // 告警：规则与事件都是本地数据，评估由主进程定时器驱动
+    alert: {
+        // 不选集群 = 全部；undefined 进 IPC 载荷会被结构化克隆丢掉字段，这里统一成空串
+        listRules: (clusterId?: string) => ipcRenderer.invoke('alert:rules:list', {clusterId: clusterId || ''}),
+        upsertRule: (params: AlertRuleUpsertParams) => ipcRenderer.invoke('alert:rule:upsert', params),
+        deleteRule: (id: string) => ipcRenderer.invoke('alert:rule:delete', {id}),
+        testRule: (id: string) => ipcRenderer.invoke('alert:rule:test', {id}),
+        listEvents: (query: AlertEventQuery) => ipcRenderer.invoke('alert:events:list', query),
+        ackEvents: (ids: number[]) => ipcRenderer.invoke('alert:events:ack', {ids}),
+        deleteEvents: (ids: number[]) => ipcRenderer.invoke('alert:events:delete', {ids}),
+        countOpen: () => ipcRenderer.invoke('alert:rules:count'),
+        // 引擎的立案/恢复是单向推送，返回反订阅闭包
+        onEvent: (callback: (push: AlertPush) => void) => subscribe(ALERT_EVENT_CHANNEL, callback),
     },
 
     // 拓扑
@@ -732,6 +754,18 @@ declare global {
                 getBrokers: (clusterId: string) => Promise<APIResponse<BrokerInfo>>;
                 recordSnapshot: (snapshot: MetricsSnapshotInput) => Promise<APIResponse<null>>;
                 listSnapshots: (query: MetricsSnapshotQuery) => Promise<APIResponse<MetricsSnapshot[]>>;
+            };
+            // 告警：规则与事件全部来自本地 SQLite，评估在主进程定时器里跑
+            alert: {
+                listRules: (clusterId?: string) => Promise<APIResponse<AlertRule[]>>;
+                upsertRule: (params: AlertRuleUpsertParams) => Promise<APIResponse<AlertRule | null>>;
+                deleteRule: (id: string) => Promise<APIResponse<number>>;
+                testRule: (id: string) => Promise<APIResponse<AlertProbeResult>>;
+                listEvents: (query: AlertEventQuery) => Promise<APIResponse<AlertEvent[]>>;
+                ackEvents: (ids: number[]) => Promise<APIResponse<number>>;
+                deleteEvents: (ids: number[]) => Promise<APIResponse<number>>;
+                countOpen: () => Promise<APIResponse<number>>;
+                onEvent: (callback: (push: AlertPush) => void) => () => void;
             };
             topology: {
                 getClusterTopology: (

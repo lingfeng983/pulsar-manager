@@ -92,3 +92,7 @@ export const metricsTab = (clusterId?: string, clusterName?: string): TabItem =>
     type: 'metrics',
     data: clusterId ? {clusterId} : undefined,
 });
+
+// 告警中心是全局单页：规则本来就跨集群列一张表，按集群过滤在页内做，
+// 所以不给每个集群开一个页签（那样徽标与"未恢复"总数就没有落脚点了）。
+export const alertTab = (): TabItem => ({id: 'alerts', title: '告警中心', type: 'alerts'});

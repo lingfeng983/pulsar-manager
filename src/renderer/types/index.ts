@@ -84,6 +84,17 @@ export type {
     TemplateVariable,
     WorkbenchCopyParams,
     WorkbenchScopeParams,
+    // 告警
+    AlertComparator,
+    AlertEvent,
+    AlertEventQuery,
+    AlertEventState,
+    AlertMetricKey,
+    AlertProbeResult,
+    AlertPush,
+    AlertRule,
+    AlertRuleUpsertParams,
+    AlertScope,
 } from '../../shared/types';
 
 // 订阅

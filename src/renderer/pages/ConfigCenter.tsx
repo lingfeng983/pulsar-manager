@@ -57,6 +57,24 @@ const METRICS_RETENTION_OPTIONS = [
     {label: '90 天', value: 90},
 ];
 
+// 告警评估间隔同样是预设档位：下限 10 秒由主进程的 zod 卡着（一轮要发几十到上千
+// 个 admin 请求，再密就成攻击自己的 broker），这里只把常用几档摆出来。
+const ALERT_CHECK_OPTIONS = [
+    {label: '10 秒', value: 10},
+    {label: '30 秒', value: 30},
+    {label: '1 分钟', value: 60},
+    {label: '5 分钟', value: 300},
+    {label: '15 分钟', value: 900},
+];
+
+// 事件保留：未恢复的事件不受这个天数约束，一直留到确认或恢复为止
+const ALERT_RETENTION_OPTIONS = [
+    {label: '7 天', value: 7},
+    {label: '30 天', value: 30},
+    {label: '90 天', value: 90},
+    {label: '180 天', value: 180},
+];
+
 // 导入前的本地体检：文件选错（比如拿了日志导出）时给出人话提示，
 // 而不是把整包丢给主进程再回一句 zod 校验失败。
 function looksLikeConfigBundle(raw: unknown): raw is ConfigBundle {
@@ -324,6 +342,60 @@ const ConfigCenter: React.FC = () => {
                                 <div style={{marginTop: 4}}>
                                     <Text className="hint-text">
                                         超期的快照点在写入与读取时顺带清理，不额外跑定时器。
+                                    </Text>
+                                </div>
+                            </div>
+                            <div>
+                                <Space size={4}>
+                                    <Text>告警评估</Text>
+                                    <Switch
+                                        aria-label="告警评估"
+                                        checked={settings.alertEnabled}
+                                        onChange={checked => void patch({alertEnabled: checked})}
+                                        size="small"
+                                    />
+                                </Space>
+                                <div style={{marginTop: 4}}>
+                                    <Text className="hint-text">
+                                        开关管的是引擎本身：关掉之后规则仍留着，但不会再评估、也不会发通知。 走 SSH
+                                        隧道的集群会按下面的间隔被唤起一次。
+                                    </Text>
+                                </div>
+                            </div>
+                            <div>
+                                <Space size={4}>
+                                    <Text>评估间隔</Text>
+                                    <Select
+                                        aria-label="告警评估间隔"
+                                        size="small"
+                                        value={settings.alertCheckSeconds}
+                                        options={ALERT_CHECK_OPTIONS}
+                                        style={{width: 120}}
+                                        onChange={value => void patch({alertCheckSeconds: value})}
+                                    />
+                                </Space>
+                                <div style={{marginTop: 4}}>
+                                    <Text className="hint-text">
+                                        命名空间与集群口径一轮要读几十到上千个 Topic 的统计，间隔太短会拖慢 broker
+                                        的响应。
+                                    </Text>
+                                </div>
+                            </div>
+                            <div>
+                                <Space size={4}>
+                                    <Text>事件保留</Text>
+                                    <Select
+                                        aria-label="告警事件保留天数"
+                                        size="small"
+                                        value={settings.alertRetentionDays}
+                                        options={ALERT_RETENTION_OPTIONS}
+                                        style={{width: 120}}
+                                        onChange={value => void patch({alertRetentionDays: value})}
+                                    />
+                                </Space>
+                                <div style={{marginTop: 4}}>
+                                    <Text className="hint-text">
+                                        只清理已恢复的事件；未恢复的那条无论多久都留在列表里，直到它恢复或被确认。
                                     </Text>
                                 </div>
                             </div>

@@ -1,5 +1,5 @@
 import React, {useState, useCallback, useEffect, useRef} from 'react';
-import {Button, Dropdown, Space, message, Modal, AutoComplete, Tag, Tooltip} from 'antd';
+import {Button, Dropdown, Space, message, Modal, AutoComplete, Tag, Tooltip, Badge} from 'antd';
 import {
     SearchOutlined,
     ThunderboltOutlined,
@@ -13,6 +13,7 @@ import {
     FileTextOutlined,
     BarChartOutlined,
     ApartmentOutlined,
+    AlertOutlined,
     MenuFoldOutlined,
     MenuUnfoldOutlined,
 } from '@ant-design/icons';
@@ -22,10 +23,11 @@ import BenchmarkModal from '../BenchmarkModal';
 import IconButton from '../common/IconButton';
 import {useTabStore} from '../../store/tabs';
 import {useClusterStore} from '../../store/cluster';
+import {useAlertStore} from '../../store/alerts';
 import {useLayoutStore} from '../../store/layout';
 import {loadTenants, loadNamespaces, loadTopics} from '../../hooks/resourceCache';
 import {shortName} from '../../utils/format';
-import {topicTab, tenantTab, namespaceTab, topologyTab, metricsTab} from '../../utils/tabIds';
+import {topicTab, tenantTab, namespaceTab, topologyTab, metricsTab, alertTab} from '../../utils/tabIds';
 import {matchesFilter} from '../../utils/textFilter';
 import {downloadBlob} from '../../utils/download';
 import {useCommand} from '../../hooks/useKeybindings';
@@ -310,6 +312,13 @@ const TopNav: React.FC = () => {
         addTab(topologyTab());
     }, [addTab]);
 
+    // 告警中心：徽标是"未恢复事件数"，点开页面并不清空它——
+    // 事件要在告警中心里逐条确认或等它自动恢复，徽标跟着界面走才会误导。
+    const openAlertCount = useAlertStore(state => state.openCount);
+    const handleOpenAlerts = useCallback(() => {
+        addTab(alertTab());
+    }, [addTab]);
+
     // 导出日志
     const handleExportLogs = async () => {
         try {
@@ -440,6 +449,18 @@ const TopNav: React.FC = () => {
                         </Button>
                         <Button size="small" icon={<ApartmentOutlined />} title="集群拓扑" onClick={handleOpenTopology}>
                             拓扑
+                        </Button>
+                        <Button
+                            size="small"
+                            icon={
+                                <Badge count={openAlertCount} size="small" offset={[2, -2]}>
+                                    <AlertOutlined />
+                                </Badge>
+                            }
+                            title="告警中心"
+                            onClick={handleOpenAlerts}
+                        >
+                            告警
                         </Button>
                         <IconButton
                             size="small"

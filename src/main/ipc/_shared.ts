@@ -344,6 +344,89 @@ export const RevokeTopicPermissionSchema = TopicPathSchema.extend({
     role: AuthRoleSchema,
 });
 
+// ========== 告警 ==========
+
+export const ALERT_SCOPES = ['cluster', 'namespace', 'topic'] as const;
+// 与 shared/alert-metrics.ts 里的定义同源：这里只负责"能不能进库"，
+// 标签与单位换算留给那份共享模块，两处各列一遍迟早漏掉一个指标。
+export const ALERT_METRIC_KEYS = [
+    'backlog',
+    'msgRateIn',
+    'msgRateOut',
+    'throughputIn',
+    'throughputOut',
+    'storageSize',
+    'producers',
+    'consumers',
+] as const;
+
+// 作用域定位字段：空串是"该维度不参与定位"，一旦非空就必须与资源树同一套字符集
+// （这些值会拼进 admin 路径，放 "/" 或 ".." 进去就评到别的资源上了）。
+const OptionalTenantSchema = z.union([z.literal(''), TenantSchema]);
+const OptionalNamespaceSchema = z.union([z.literal(''), NamespaceSchema]);
+const OptionalTopicSchema = z.union([z.literal(''), TopicSchema]);
+
+export const AlertRuleUpsertSchema = z
+    .object({
+        // 不带 id = 新建；带 id = 整行覆盖（界面每次提交完整草稿）
+        id: z.string().uuid().optional(),
+        clusterId: ClusterIdSchema,
+        name: z.string().trim().min(1).max(100),
+        enabled: z.boolean().default(true),
+        scope: z.enum(ALERT_SCOPES),
+        tenant: OptionalTenantSchema.default(''),
+        namespace: OptionalNamespaceSchema.default(''),
+        topic: OptionalTopicSchema.default(''),
+        persistent: PersistentSchema,
+        metric: z.enum(ALERT_METRIC_KEYS),
+        comparator: z.enum(['gt', 'lt']),
+        // 原生单位的非负数：所有可比指标（条、条/秒、字节/秒、字节、个数）都不为负
+        threshold: z.number().finite().min(0).max(1e15),
+        consecutive: z.number().int().min(1).max(60).default(1),
+        notify: z.boolean().default(true),
+    })
+    .superRefine((rule, ctx) => {
+        if (rule.scope === 'namespace' && (!rule.tenant || !rule.namespace)) {
+            ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                path: ['namespace'],
+                message: '命名空间口径需要选到租户与命名空间',
+            });
+        }
+        if (rule.scope === 'topic' && (!rule.tenant || !rule.namespace || !rule.topic)) {
+            ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                path: ['topic'],
+                message: 'Topic 口径需要选到租户、命名空间与 Topic',
+            });
+        }
+        // 聚合统计里没有存储量这一项，放行只会让用户配一条永远不会触发的规则
+        if (rule.scope === 'cluster' && rule.metric === 'storageSize') {
+            ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                path: ['metric'],
+                message: '存储大小在集群口径下没有数据源，请改选命名空间或 Topic 口径',
+            });
+        }
+    });
+
+// 列表类通道的集群筛选：空串是「不按集群过滤」。渲染层的集群选择器在没有选中
+// 集群时给的就是空串，硬卡 uuid 会让「打开告警中心」这一步直接校验失败。
+export const OptionalAlertClusterSchema = z.union([z.literal(''), ClusterIdSchema]).optional();
+
+export const AlertRuleIdSchema = z.object({id: z.string().uuid()});
+
+export const AlertEventQuerySchema = z.object({
+    clusterId: OptionalAlertClusterSchema,
+    state: z.enum(['firing', 'resolved']).optional(),
+    limit: z.number().int().min(1).max(5000).default(500),
+});
+
+// 批量确认/删除的单次上限：一次点几千条属于"清库"，界面为此提供的是按状态批量操作
+export const AlertEventIdsSchema = z.object({
+    ids: z.array(z.number().int().positive()).min(1).max(1000),
+});
+
 // partitions = 0 表示非分区 topic：这两条路径在 Admin API 里是不同的端点，
 // 不能像旧代码那样一律走 /partitions。
 export const CreateTopicSchema = z.object({

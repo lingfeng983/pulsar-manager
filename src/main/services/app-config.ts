@@ -32,6 +32,9 @@ export const APP_CONFIG_DEFAULTS: AppSettings = {
     sendHistoryFullBody: false,
     metricsSnapshotEnabled: false,
     metricsRetentionDays: 7,
+    alertEnabled: false,
+    alertCheckSeconds: 60,
+    alertRetentionDays: 30,
 };
 
 export const AppSettingsSchema = z.object({
@@ -52,6 +55,13 @@ export const AppSettingsSchema = z.object({
     metricsSnapshotEnabled: z.boolean(),
     // 快照保留天数，写入与读取两侧都按它清
     metricsRetentionDays: z.number().int().min(1).max(90),
+    // 告警引擎总开关：关掉时不挂定时器，规则与历史都照常保留
+    alertEnabled: z.boolean(),
+    // 评估间隔。下限 10 秒：命名空间与集群口径一次要发几十到上千个请求，
+    // 再密就成 DDoS 了自己的 broker；上限 1 小时。
+    alertCheckSeconds: z.number().int().min(10).max(3600),
+    // 已恢复事件的保留天数（未恢复的事件不受它约束）
+    alertRetentionDays: z.number().int().min(1).max(365),
 });
 
 type AppSettingsField = keyof AppSettings;
@@ -160,6 +170,10 @@ export const ConfigImportSchema = z.object({
         sendHistoryFullBody: AppSettingsSchema.shape.sendHistoryFullBody.optional(),
         metricsSnapshotEnabled: AppSettingsSchema.shape.metricsSnapshotEnabled.optional(),
         metricsRetentionDays: AppSettingsSchema.shape.metricsRetentionDays.optional(),
+        // 告警三项同理：老导出文件里没有它们，缺省时保持当前值而不是拒收整包
+        alertEnabled: AppSettingsSchema.shape.alertEnabled.optional(),
+        alertCheckSeconds: AppSettingsSchema.shape.alertCheckSeconds.optional(),
+        alertRetentionDays: AppSettingsSchema.shape.alertRetentionDays.optional(),
     }),
     clusters: z.array(ExportedClusterSchema).max(200),
     shortcuts: ExportedShortcutsSchema.nullable().optional(),
