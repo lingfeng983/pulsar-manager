@@ -119,7 +119,10 @@ pulsar-manager/
 │       ├── store/             # Zustand：集群、Tab、主题、命令、快捷键、应用设置、插件
 │       └── utils/             # 格式化、导出、拓扑配色、按键解析、统一筛选匹配
 ├── docs/DATA_SOURCES.md       # 每个页面的数据来源说明
+├── build/                     # 应用图标产物（icon.ico / icon.png，由脚本生成，入库）
 ├── release.sh                 # 一键出包 + 发布 Gitee 发行版
+├── scripts/make-icon.mjs      # 图标唯一来源：纯 Node 画图标并生成 build/* 与 src/main/app-icon.ts
+├── scripts/after-pack.js      # 打包阶段用 app-builder rcedit 写 exe 版本信息与图标
 ├── scripts/release-publish.mjs# 调 Gitee API 建/更新发行版并上传附件
 ├── scripts/tunnel-selftest/   # SSH 隧道端到端自检（本机起真 SSH 服务器 + 假 Pulsar 源站）
 ├── scripts/dev-ssh-bridge.js  # 开发期本机 SSH 服务器，供隧道功能实机验证
@@ -154,7 +157,10 @@ npm run build:main   # tsc -p tsconfig.node.json → dist/src/main、dist/src/pr
 npm run build        # 清 dist → tsc -b → build:main → vite build
 npm run electron:pack  # 先完整构建，再出免安装目录 release/win-unpacked
 npm run electron:dist  # 先完整构建，再出 NSIS 安装包 release/Pulsar管理工具-安装包-<version>.exe
+npm run icon           # 重新生成应用图标（build/icon.ico、build/icon.png、src/main/app-icon.ts）
 ```
+
+改应用图标只改 `scripts/make-icon.mjs` 然后跑 `npm run icon`，三个产物都要入库；直接编辑 `src/main/app-icon.ts` 会在下次生成时被覆盖。
 
 数据库结构以 `src/main/database/schema.ts` 里的常量存在，而不是外部 `.sql` 文件：tsc 不拷贝非 TS 资源，走文件读取的话安装包里的其实是某次手工复制进 `dist` 的旧基线，干净环境构建甚至直接找不到文件而启动失败。
 
@@ -203,6 +209,7 @@ npm run build:main && npm run build
 9. **`batchingEnabled` 与 `chunkingEnabled` 不能同时为 true。** 原生绑定（pulsar-client 1.18 的 C++ 层）在这两项都开时直接 abort 整个主进程，实测没有 JS 异常也没有 crashpad 转储。三处同时挡：Zod 校验 `refine` 拒绝、构造 producer 时 `chunkingEnabled && !batchingEnabled`、界面上开了批发送就把分块开关置灰。
 10. **代码框的颜色与字号只能写 CSS 变量。** CodeMirror 主题经 style-mod 原样塞进生成的样式表，变量在浏览器里按当前 `<html>` 解析，所以三套主题与四档字号都自动跟随；写成 `#fff` 或固定 px，实测就是"整页变暗了只有编辑器还白底"。
 11. **版本号的唯一来源是 `package.json`，展示它的两处都必须走它。** 「设置 → 关于」读 `update:getVersion`（主进程 `app.getVersion()`）——这条以前是 preload 本地拼的 `process.versions.app`，那是 Electron 运行时版本，发多少个版本它都不变；exe 的属性面板由 `scripts/after-pack.js` 用 `app-builder rcedit` 写（`electron-builder.json` 的 `win.signAndEditExecutable` 为 false，因为 electron-builder 自带的那步会把 `OriginalFilename` 清空、且只写 productName），改完在 `verify-package` 里逐项核对，装到用户机器上才不会是"Electron / GitHub, Inc. / electron.exe"。`rcedit` 要先解出 `winCodeSign` 包，子进程 PATH 里必须有 `7zip-bin` 的 `7za`，直接调用 app-builder 时没人塞就会报 `exec: "7za": executable file not found`。
+12. **图标只有 `scripts/make-icon.mjs` 一个来源，跑 `npm run icon` 出三个产物。** 任务栏、托盘、exe、页面 favicon 以前是四份各画各的：托盘是主进程内联的 16×16 紫色闪电，`BrowserWindow` 压根没传 `icon`（开发态于是显示 electron.exe 的原子），favicon 又是 index.html 里另一颗紫色 SVG——用户看到的"任务栏和托盘不一致"就是这么来的。现在窗口与托盘都取 `src/main/app-icon.ts` 的 `APP_ICONS`（生成物，勿手改），Windows 上还要 `app.setAppUserModelId('com.pulsar.manager')`：任务栏按 AppUserModelID 分组取图标，不设置时窗口自己传的 icon 会被分组那份盖掉。**ICO 容器必须用未压缩 DIB 目录项**，Vista 之后允许的"目录项直接挂 PNG"体积小三倍，但实测按 DIB 解析的加载器（`System.Drawing.Icon` 这一类，任务栏与属性面板走的就是它）会把 PNG 字节当位图读，画出来是一片彩色噪点。
 
 ## 本地数据
 

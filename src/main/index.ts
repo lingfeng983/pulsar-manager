@@ -1,5 +1,6 @@
 import {app, BrowserWindow, shell, session, dialog, Menu, Tray, nativeImage} from 'electron';
 import path from 'path';
+import {APP_ICONS} from './app-icon';
 import {registerIPCHandlers, cleanupDatabase} from './ipc/handlers';
 import {nativeClientManager} from './services/pulsar-native-client';
 import {loadTestManager} from './services/load-test';
@@ -53,6 +54,13 @@ process.on('unhandledRejection', reason => {
 app.commandLine.appendSwitch('disable-features', 'AutofillServerCommunication');
 app.commandLine.appendSwitch('autofill-server-url', '');
 
+// Windows 按 AppUserModelID 把窗口归到任务栏的同一个分组，分组图标取的是"这一组是谁"
+// 的那份，而不是窗口自己传的 icon。不设置时开发态拿到的是 electron.exe 的默认组（原子
+// 图标），打包态也可能跟安装快捷方式对不上，所以显式钉成 electron-builder.json 的 appId。
+if (process.platform === 'win32') {
+    app.setAppUserModelId('com.pulsar.manager');
+}
+
 // 内容安全策略：仅允许本地资源与本地 Vite dev server，禁止加载远程脚本。
 // dev 环境走 http，Vite HMR 需要 inline/eval；生产是打包后的静态资源，
 // 不含内联脚本也不用 eval，因此收紧到仅 'self'。
@@ -83,11 +91,11 @@ const ipcReady = new Promise<void>(resolve => {
     resolveIpcReady = resolve;
 });
 
-// 托盘图标：16x16 紫色闪电（内联 PNG，避免打包资源路径问题）
-const TRAY_ICON_DATA_URL =
-    'data:image/png;base64,' +
-    'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAALklEQVR4nGNgGPTA3+3pf4o0k20A' +
-    'VTSTZQCyZmyYdpqp7hWGAY0FqhkwMJrpDgASllaMwe0smAAAAABJRU5ErkJggg==';
+// 图标只有 scripts/make-icon.mjs 这一个来源（见该文件头注释）。以前托盘是内联的 16x16
+// 紫色闪电、窗口压根没传 icon，于是任务栏显示的是 Electron 那颗原子，托盘是自己画的闪电，
+// 用户看到的"图标不一致"就是这么来的。
+const trayIcon = nativeImage.createFromDataURL(APP_ICONS.tray);
+const windowIcon = nativeImage.createFromDataURL(APP_ICONS.window);
 
 function showMainWindow() {
     if (!mainWindow) {
@@ -109,7 +117,7 @@ function showMainWindow() {
 }
 
 function createTray() {
-    tray = new Tray(nativeImage.createFromDataURL(TRAY_ICON_DATA_URL));
+    tray = new Tray(trayIcon);
     tray.setToolTip('Pulsar Manager');
     tray.setContextMenu(
         Menu.buildFromTemplate([
@@ -127,6 +135,9 @@ function createWindow() {
         height: 900,
         minWidth: 1000,
         minHeight: 700,
+        // 不传 icon 时，Windows 用 exe 里的那份；开发态跑的是 electron.exe，任务栏就是
+        // Electron 的原子。显式传一份，开发态与打包态看到的是同一个图标。
+        icon: windowIcon,
         webPreferences: {
             preload: path.join(__dirname, '../preload.js'),
             sandbox: true,
