@@ -10,7 +10,7 @@ let db: Database.Database | null = null;
 // schema 版本以 user_version 跟踪。改基线 DDL 时：升 SCHEMA_VERSION，
 // 并把该版本的增量 DDL 写进 migrate()——CREATE TABLE IF NOT EXISTS 对已存在的
 // 旧库什么都不做，没有这套机制，加列只会对新装用户生效，旧库静默落后。
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 7;
 
 function migrate(database: Database.Database, from: number): void {
     // v2：refreshInterval 那行出厂值是 30000，而监控页的刷新间隔单位是秒，
@@ -30,6 +30,23 @@ function migrate(database: Database.Database, from: number): void {
     // v5：生产者/消费者工作台的三张表（模板、会话配置、发送历史）只新增 DDL，
     // 老库靠每次启动的基线语句补齐，这里没有数据要修补——留这段是为了下次加列时
     // 不必回头猜 v5 到底做没做事。
+    // v6：模板加 schema_json（发送时的内联 schema 校验）。新库的基线建表已带这一列，
+    // 老库才需要 ALTER，所以先查表结构再决定加不加——不加判断的话新库会在事务里
+    // 撞上 duplicate column 把整个启动期迁移顶掉。
+    if (from < 6) {
+        const columns = database.prepare('PRAGMA table_info(message_templates)').all() as {name: string}[];
+        if (!columns.some(column => column.name === 'schema_json')) {
+            database.prepare('ALTER TABLE message_templates ADD COLUMN schema_json TEXT').run();
+        }
+    }
+    // v7：发送历史加 body_full（全文留存开关打开时存整篇正文）。
+    // 和 v6 同一个坑：新库基线已带这列，不查表结构直接 ALTER 会 duplicate column 顶掉启动迁移。
+    if (from < 7) {
+        const columns = database.prepare('PRAGMA table_info(send_history)').all() as {name: string}[];
+        if (!columns.some(column => column.name === 'body_full')) {
+            database.prepare('ALTER TABLE send_history ADD COLUMN body_full TEXT').run();
+        }
+    }
 }
 
 // 每次启动都执行基线再补迁移：基线全是幂等语句，因此旧库缺的表和出厂设置行
@@ -330,6 +347,7 @@ export interface MessageTemplateRecord {
     properties_json: string;
     producer_options_json: string;
     schema_mode: string;
+    schema_json?: string | null;
     use_count: number;
     last_used_at?: string | null;
     created_at: string;
@@ -367,14 +385,17 @@ export function insertMessageTemplate(
     const stmt = database.prepare(`
     INSERT INTO message_templates (
       id, cluster_id, topic_uri, name, body, variables_json, properties_json,
-      producer_options_json, schema_mode, use_count, last_used_at, created_at, updated_at
+      producer_options_json, schema_mode, schema_json, use_count, last_used_at, created_at, updated_at
     ) VALUES (
       @id, @cluster_id, @topic_uri, @name, @body, @variables_json, @properties_json,
-      @producer_options_json, @schema_mode, @use_count, @last_used_at, @created_at, @updated_at
+      @producer_options_json, @schema_mode, @schema_json, @use_count, @last_used_at, @created_at, @updated_at
     )
   `);
     stmt.run({
         ...template,
+        // schema 原文没内容时存 NULL 而不是空串：'inline 但 schema 是空的'这种
+        // 半配置状态在列上必须看得出来，空串会被读成"存过 schema"。
+        schema_json: template.schema_json ?? null,
         // 默认值写在展开之后：调用方传 last_used_at: undefined 时，展开会把
         // null 顶掉，而 better-sqlite3 对 undefined 直接抛错而不是当 NULL。
         last_used_at: template.last_used_at ?? null,
@@ -393,6 +414,7 @@ const MESSAGE_TEMPLATE_ALLOWED_FIELDS = new Set([
     'properties_json',
     'producer_options_json',
     'schema_mode',
+    'schema_json',
     'last_used_at',
 ]);
 
@@ -539,7 +561,7 @@ export function touchConsumerSessionConfigUse(id: string): void {
         .run(now, id);
 }
 
-// 发送历史（生产者工作台，只存预览）
+// 发送历史（生产者工作台，默认只存预览；全文留存开关打开时带 body_full）
 export interface SendHistoryRecord {
     // 读出来的行一定有自增主键；写入走 Omit 去掉它
     id: number;
@@ -548,6 +570,7 @@ export interface SendHistoryRecord {
     template_id?: string | null;
     template_name: string;
     body_preview: string;
+    body_full?: string | null;
     body_bytes: number;
     message_count: number;
     message_id?: string | null;
@@ -564,10 +587,10 @@ export function insertSendHistory(
     database
         .prepare(
             `INSERT INTO send_history (
-               cluster_id, topic_uri, template_id, template_name, body_preview,
+               cluster_id, topic_uri, template_id, template_name, body_preview, body_full,
                body_bytes, message_count, message_id, status, error_message, created_at
              ) VALUES (
-               @cluster_id, @topic_uri, @template_id, @template_name, @body_preview,
+               @cluster_id, @topic_uri, @template_id, @template_name, @body_preview, @body_full,
                @body_bytes, @message_count, @message_id, @status, @error_message, @created_at
              )`,
         )
@@ -577,20 +600,29 @@ export function insertSendHistory(
             template_id: entry.template_id ?? null,
             message_id: entry.message_id ?? null,
             error_message: entry.error_message ?? null,
+            body_full: entry.body_full ?? null,
             message_count: entry.message_count ?? 1,
             created_at: now,
         });
 }
 
+// 列表刻意不取 body_full：200 行全文一次进 IPC 太沉，重发要哪一行再单取哪一行。
 export function listSendHistory(clusterId: string, topicUri: string, limit = 200): SendHistoryRecord[] {
     const database = getDatabase();
     return database
         .prepare(
-            `SELECT * FROM send_history
+            `SELECT id, cluster_id, topic_uri, template_id, template_name, body_preview,
+                    body_bytes, message_count, message_id, status, error_message, created_at
+             FROM send_history
              WHERE cluster_id = ? AND topic_uri = ?
              ORDER BY created_at DESC LIMIT ?`,
         )
         .all(clusterId, topicUri, limit) as SendHistoryRecord[];
+}
+
+export function getSendHistoryById(id: number): SendHistoryRecord | undefined {
+    const database = getDatabase();
+    return database.prepare('SELECT * FROM send_history WHERE id = ?').get(id) as SendHistoryRecord | undefined;
 }
 
 // 与操作日志同一套保留策略。不做 VACUUM：WAL 下 DELETE 本来就不缩文件，

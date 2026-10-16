@@ -1,4 +1,6 @@
 import {
+    ConsumerAckSchema,
+    ConsumerNackSchema,
     ConsumerStartSchema,
     ProducerSessionsSchema,
     SessionIdSchema,
@@ -51,5 +53,22 @@ export function registerConsumerHandlers() {
             throw new Error('Invalid session id');
         }
         return {stopped: await nativeClientManager.stopSessionById(parsed.data.sessionId)};
+    });
+
+    // 手动确认：回落定后的会话快照，界面拿它的 pendingAcks 校准自己那份未确认计数。
+    registerHandler('consumer:ack', async (params: unknown) => {
+        const parsed = ConsumerAckSchema.safeParse(params);
+        if (!parsed.success) {
+            throw new Error('确认参数不合法：需要 sessionId 与序号列表');
+        }
+        return nativeClientManager.ackMessages(parsed.data.sessionId, parsed.data.seqs, parsed.data.cumulative);
+    });
+
+    registerHandler('consumer:nack', async (params: unknown) => {
+        const parsed = ConsumerNackSchema.safeParse(params);
+        if (!parsed.success) {
+            throw new Error('重投参数不合法：需要 sessionId 与序号列表');
+        }
+        return nativeClientManager.nackMessages(parsed.data.sessionId, parsed.data.seqs);
     });
 }

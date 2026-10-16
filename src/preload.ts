@@ -16,6 +16,7 @@ import type {
     ConfigImportResult,
     ConfigMeta,
     ConsumeStartParams,
+    ConsumerAckParams,
     ConsumerSessionInfo,
     LoadTestParams,
     LoadTestProgress,
@@ -24,12 +25,14 @@ import type {
     MessageTemplate,
     MessageTemplateUpsertParams,
     OperationLog,
+    PeekParams,
     PluginEntry,
     PluginListResult,
     ProducerFlowParams,
     ProducerRunStats,
     ProducerSendOnceParams,
     ProducerSendParams,
+    PeekResult,
     ProducerSendResult,
     ProducerSessionInfo,
     ProducerSetRateParams,
@@ -208,6 +211,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         startRead: (params: ReadStartParams) => ipcRenderer.invoke('messages:startRead', params),
         stopRead: (sessionId: string) => ipcRenderer.invoke('messages:stopRead', {sessionId}),
         getBacklog: (params: SubscriptionPathParams) => ipcRenderer.invoke('messages:getBacklog', params),
+        peek: (params: PeekParams) => ipcRenderer.invoke('messages:peek', params),
         onConsumeBatch: (callback: (batch: MessageBatch) => void) => subscribe(CONSUME_BATCH_CHANNEL, callback),
         onReadBatch: (callback: (batch: MessageBatch) => void) => subscribe(READ_BATCH_CHANNEL, callback),
         onSessionEnd: (callback: (event: SessionEndEvent) => void) => subscribe(SESSION_END_CHANNEL, callback),
@@ -234,6 +238,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
         start: (params: ConsumeStartParams) => ipcRenderer.invoke('consumer:start', params),
         stop: (sessionId: string) => ipcRenderer.invoke('consumer:stop', {sessionId}),
         listSessions: (clusterId?: string) => ipcRenderer.invoke('consumer:list', {clusterId}),
+        // 手动确认：按主进程登记表的序号确认/重投，回落定后的会话快照（含 pendingAcks）
+        ack: (params: ConsumerAckParams) => ipcRenderer.invoke('consumer:ack', params),
+        nack: (params: ConsumerAckParams) => ipcRenderer.invoke('consumer:nack', params),
     },
 
     // 报文模板库（生产者工作台）：纯本地 SQLite，集群离线也能翻出上次写好的报文
@@ -259,6 +266,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // 发送历史只读；写入在 producer 的发送路径里，界面不能自己编一条成功记录
     sendHistory: {
         list: (params: SendHistoryListParams) => ipcRenderer.invoke('sendHistory:list', params),
+        // 列表不带全文，重发时按行 id 单取
+        get: (id: number) => ipcRenderer.invoke('sendHistory:get', {id}),
     },
 
     // 快速压测：start 拿到 runId 就返回，进度经 benchmark:progress 单向推送
@@ -476,6 +485,7 @@ declare global {
                 startRead: (params: ReadStartParams) => Promise<APIResponse<{sessionId: string}>>;
                 stopRead: (sessionId: string) => Promise<APIResponse<{stopped: boolean}>>;
                 getBacklog: (params: SubscriptionPathParams) => Promise<APIResponse<BacklogInfo>>;
+                peek: (params: PeekParams) => Promise<APIResponse<PeekResult>>;
                 onConsumeBatch: (callback: (batch: MessageBatch) => void) => () => void;
                 onReadBatch: (callback: (batch: MessageBatch) => void) => () => void;
                 onSessionEnd: (callback: (event: SessionEndEvent) => void) => () => void;
@@ -496,6 +506,8 @@ declare global {
                 start: (params: ConsumeStartParams) => Promise<APIResponse<ConsumerSessionInfo>>;
                 stop: (sessionId: string) => Promise<APIResponse<{stopped: boolean}>>;
                 listSessions: (clusterId?: string) => Promise<APIResponse<ConsumerSessionInfo[]>>;
+                ack: (params: ConsumerAckParams) => Promise<APIResponse<ConsumerSessionInfo>>;
+                nack: (params: ConsumerAckParams) => Promise<APIResponse<ConsumerSessionInfo>>;
             };
             template: {
                 list: (params: WorkbenchScopeParams) => Promise<APIResponse<MessageTemplate[]>>;
@@ -515,6 +527,7 @@ declare global {
             };
             sendHistory: {
                 list: (params: SendHistoryListParams) => Promise<APIResponse<SendHistoryEntry[]>>;
+                get: (id: number) => Promise<APIResponse<SendHistoryEntry | null>>;
             };
             benchmark: {
                 start: (params: LoadTestParams) => Promise<APIResponse<{runId: string; topic: string}>>;

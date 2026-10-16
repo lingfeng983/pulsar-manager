@@ -264,6 +264,24 @@ const ConfigCenter: React.FC = () => {
                                     消息浏览器列表里的正文超过该长度即折叠，可点"展开全文"看完整内容
                                 </Text>
                             </div>
+                            <div>
+                                <Space size={4}>
+                                    <Text>发送历史全文留存</Text>
+                                    <Switch
+                                        aria-label="发送历史全文留存"
+                                        checked={settings.sendHistoryFullBody}
+                                        onChange={checked => void patch({sendHistoryFullBody: checked})}
+                                        size="small"
+                                    />
+                                </Space>
+                                <div style={{marginTop: 4}}>
+                                    <Text className="hint-text">
+                                        开启后发送历史连带整篇模板正文落库（单行上限 512
+                                        KB），工作台的历史里才能原样重发； 关掉只留 400
+                                        字符前缀。默认关：全文会让库持续变大。
+                                    </Text>
+                                </div>
+                            </div>
                         </Space>
                     </Card>
                 </Col>

@@ -29,6 +29,7 @@ export const APP_CONFIG_DEFAULTS: AppSettings = {
     refreshIntervalSeconds: 30,
     fontSize: 'large',
     statusRefreshSeconds: 60,
+    sendHistoryFullBody: false,
 };
 
 export const AppSettingsSchema = z.object({
@@ -42,6 +43,8 @@ export const AppSettingsSchema = z.object({
     fontSize: z.enum(['small', 'medium', 'large', 'xlarge']),
     // 首页/侧边栏集群状态轮询间隔，0 表示只启动时探一次
     statusRefreshSeconds: z.number().int().min(0).max(3600),
+    // 发送历史连带正文全文落库（写入方在 producer-handlers 的 recordSendHistory）
+    sendHistoryFullBody: z.boolean(),
 });
 
 type AppSettingsField = keyof AppSettings;
@@ -54,7 +57,8 @@ function decodeField(field: AppSettingsField, raw: string | undefined): unknown 
     if (raw === undefined) {
         return undefined;
     }
-    if (field === 'autoRefresh') {
+    // 布尔项按字符串 true/false 解；以后再加布尔设置不用在这里补特例
+    if (typeof APP_CONFIG_DEFAULTS[field] === 'boolean') {
         if (raw === 'true') return true;
         if (raw === 'false') return false;
         return undefined;
@@ -141,10 +145,11 @@ export const ConfigImportSchema = z.object({
     format: z.literal(EXPORT_FORMAT),
     version: z.literal(EXPORT_VERSION),
     // fontSize 是后加的一档：之前导出的文件里没有这个键，缺省时保持当前档位而不是整包报错
-    // statusRefreshSeconds 同理——老导出文件里没有它，缺省用当前值而不是拒收整包
+    // statusRefreshSeconds / sendHistoryFullBody 同理——老导出文件里没有它们，缺省用当前值而不是拒收整包
     settings: AppSettingsSchema.extend({
         fontSize: AppSettingsSchema.shape.fontSize.optional(),
         statusRefreshSeconds: AppSettingsSchema.shape.statusRefreshSeconds.optional(),
+        sendHistoryFullBody: AppSettingsSchema.shape.sendHistoryFullBody.optional(),
     }),
     clusters: z.array(ExportedClusterSchema).max(200),
     shortcuts: ExportedShortcutsSchema.nullable().optional(),

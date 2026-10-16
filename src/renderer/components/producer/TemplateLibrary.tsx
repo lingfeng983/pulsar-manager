@@ -1,7 +1,7 @@
 import React, {useCallback, useEffect, useState} from 'react';
 import {Button, Checkbox, Input, Popconfirm, Select, Space, Tooltip, message} from 'antd';
 import {CopyOutlined, DeleteOutlined, ReloadOutlined, SaveOutlined} from '@ant-design/icons';
-import type {MessageTemplate, ProducerOptions, TemplateVariable} from '../../types';
+import type {MessageTemplate, ProducerOptions, TemplateSchemaMode, TemplateVariable} from '../../types';
 
 // 模板库：全部在本地 SQLite 里，集群断了也能翻出上次写好的报文——
 // 这正是把它建成本地表而不是每次去 broker 查的理由。
@@ -11,6 +11,8 @@ export interface TemplateDraft {
     body: string;
     variables: TemplateVariable[];
     properties?: Record<string, string>;
+    schemaMode: TemplateSchemaMode;
+    schemaJson?: string;
 }
 
 interface TemplateLibraryProps {
@@ -84,9 +86,9 @@ const TemplateLibrary: React.FC<TemplateLibraryProps> = ({
                 variables: draft.variables,
                 properties: draft.properties,
                 producerOptions,
-                // schema 校验在批次 8 接上，这里先按"不校验"落库，
-                // 存了 inline 却没有校验链路会让用户以为报文被按 schema 检查过。
-                schemaMode: 'none',
+                // 逐条结构校验：'inline' 时把 schemaJson 一并落库，发送路径按它校验。
+                schemaMode: draft.schemaMode,
+                schemaJson: draft.schemaMode === 'inline' ? draft.schemaJson : undefined,
             });
             if (response.success && response.data) {
                 onSaved(response.data);

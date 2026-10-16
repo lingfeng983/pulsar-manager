@@ -14,6 +14,7 @@ import {
 } from './_shared';
 import {nativeClientManager, topicFullName} from '../services/pulsar-native-client';
 import {messageOptions} from '../services/producer-send';
+import {readAppSettings} from '../services/app-config';
 import {sendToRenderer} from './stream';
 import {MESSAGE_STREAM_CHANNELS} from '../../shared/types';
 import type {
@@ -42,6 +43,11 @@ function needOptions(options: unknown): ProducerOptions {
 // 历史只存正文前缀，不存整篇载荷（单条上限 5MB，落库就是几十 GB）。
 const HISTORY_PREVIEW_CHARS = 400;
 
+// 全文留存（配置中心开关）的单行上限：超过就只留前缀——一次 1000 条的
+// 连续发送每轮都记一行，不设上限的话库会被大载荷顶爆，而 512KB 已经远超过
+// "重发上次那条报文"真正需要的体积。
+const HISTORY_FULL_MAX_CHARS = 512 * 1024;
+
 function preview(body: string): string {
     return body.length > HISTORY_PREVIEW_CHARS ? `${body.slice(0, HISTORY_PREVIEW_CHARS)}…` : body;
 }
@@ -61,12 +67,15 @@ function recordSendHistory(entry: {
     failure?: string;
 }): void {
     try {
+        const keepFull = readAppSettings().sendHistoryFullBody && entry.body.length <= HISTORY_FULL_MAX_CHARS;
         insertSendHistory({
             cluster_id: entry.clusterId,
             topic_uri: entry.topic,
             template_id: entry.templateId ?? null,
             template_name: entry.templateName?.trim() || '内联报文',
             body_preview: preview(entry.body),
+            // 只有开了留存且没超上限才有全文；界面据此决定「重发」能不能用
+            body_full: keepFull ? entry.body : null,
             // 逐条正文此时已经在原生层释放（分批解析发送），这里记的是平均每条的体积
             body_bytes: entry.sent > 0 ? Math.round(entry.bytes / entry.sent) : 0,
             message_count: entry.sent,

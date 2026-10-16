@@ -1,6 +1,7 @@
 import {
     ConsumeStartSchema,
     MessageSendSchema,
+    PeekSchema,
     ReadStartSchema,
     SessionIdSchema,
     SubscriptionPathSchema,
@@ -12,7 +13,7 @@ import {
 import {nativeClientManager} from '../services/pulsar-native-client';
 import {sendToRenderer} from './stream';
 import {MESSAGE_STREAM_CHANNELS} from '../../shared/types';
-import type {ConsumeStartParams, MessageBatch, ReadStartParams, SessionEndEvent} from '../../shared/types';
+import type {ConsumeStartParams, MessageBatch, PeekParams, ReadStartParams, SessionEndEvent} from '../../shared/types';
 
 export function registerMessageHandlers() {
     registerNativeHandler(
@@ -70,6 +71,14 @@ export function registerMessageHandlers() {
                 (batch: MessageBatch) => sendToRenderer(MESSAGE_STREAM_CHANNELS.readBatch, batch),
                 (event: SessionEndEvent) => sendToRenderer(MESSAGE_STREAM_CHANNELS.sessionEnd, event),
             ),
+    );
+
+    // 偷看：一次性返回几条内容，不建会话、不确认、原订阅游标纹丝不动。
+    registerNativeHandler(
+        'messages:peek',
+        PeekSchema,
+        ([params]) => params,
+        (config, input: PeekParams) => nativeClientManager.peekMessages(input.clusterId, config, input),
     );
 
     // 停止只需要会话 id，不需要集群连接；会话可能早已因出错自行结束，所以回 stopped 而不是报错。

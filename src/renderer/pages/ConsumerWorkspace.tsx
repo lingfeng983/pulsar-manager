@@ -29,6 +29,7 @@ import type {
     ConsumerSessionConfig,
     ConsumerSessionInfo,
     Message,
+    MessageBatch,
     SessionEndEvent,
 } from '../types';
 import PageShell from '../components/common/PageShell';
@@ -115,6 +116,12 @@ const ConsumerWorkspace: React.FC<ConsumerWorkspaceProps> = ({
     const [detail, setDetail] = useState<Message | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [streamLimit, setStreamLimit] = useState(DEFAULT_STREAM_LIMIT);
+    // 手动确认：主进程按登记表管未确认消息，这里维护一份跟着推送增、跟着确认回落的计数。
+    // pending 的权威值始终来自主进程（认领、每次确认/重投的返回都会覆盖它），
+    // 批次到达只是本地加一，避免"数字停在旧值、用户以为全确认了"。
+    const [pending, setPending] = useState<Record<string, number>>({});
+    const [resolvedSeqs, setResolvedSeqs] = useState<Record<string, Record<number, 'acked' | 'nacked'>>>({});
+    const [ackBusy, setAckBusy] = useState(false);
 
     const sessionsRef = useRef<ConsumerSessionInfo[]>([]);
     sessionsRef.current = sessions;
@@ -130,10 +137,25 @@ const ConsumerWorkspace: React.FC<ConsumerWorkspaceProps> = ({
         }
     }, []);
 
+    // 暂停渲染不代表暂停消费：主进程那边每条都进了未确认登记表，计数必须照加，
+    // 否则「全部确认」之后界面还会留着几段没人认领的"未确认"。
+    const handleBatch = useCallback((batch: MessageBatch) => {
+        let ackables = 0;
+        for (const message of batch.messages) {
+            if (message.ackable === true) {
+                ackables += 1;
+            }
+        }
+        if (ackables > 0) {
+            setPending(current => ({...current, [batch.sessionId]: (current[batch.sessionId] ?? 0) + ackables}));
+        }
+    }, []);
+
     const {buckets, counts, dropped, paused, setPaused, clear} = useMessageStream({
         owns,
         limit: streamLimit,
         onSessionEnd: handleSessionEnd,
+        onBatch: handleBatch,
     });
 
     // 每秒取一次速率：主进程不推消费统计，界面按"这一秒多了几条"自己算，
@@ -231,6 +253,16 @@ const ConsumerWorkspace: React.FC<ConsumerWorkspaceProps> = ({
                     for (const item of mine) {
                         if (!(item.sessionId in next)) {
                             next[item.sessionId] = item.received;
+                        }
+                    }
+                    return next;
+                });
+                // 认领回来的手动会话只知道"主进程此刻压着几条未确认"，从这里接上计数
+                setPending(current => {
+                    const next = {...current};
+                    for (const item of mine) {
+                        if (!(item.sessionId in next)) {
+                            next[item.sessionId] = item.pendingAcks;
                         }
                     }
                     return next;
@@ -348,6 +380,7 @@ const ConsumerWorkspace: React.FC<ConsumerWorkspaceProps> = ({
             if (response.success && response.data) {
                 const info = response.data;
                 setBases(current => ({...current, [info.sessionId]: info.received}));
+                setPending(current => ({...current, [info.sessionId]: info.pendingAcks}));
                 setSessions(current => [...current, info]);
                 setSelected(info.sessionId);
                 message.success(`开始消费：${info.subscription}`);
@@ -368,6 +401,14 @@ const ConsumerWorkspace: React.FC<ConsumerWorkspaceProps> = ({
             return rest;
         });
         setBases(current => {
+            const {[sessionId]: _gone, ...rest} = current;
+            return rest;
+        });
+        setPending(current => {
+            const {[sessionId]: _gone, ...rest} = current;
+            return rest;
+        });
+        setResolvedSeqs(current => {
             const {[sessionId]: _gone, ...rest} = current;
             return rest;
         });
@@ -482,6 +523,116 @@ const ConsumerWorkspace: React.FC<ConsumerWorkspaceProps> = ({
     const messages = selected ? buckets[selected] || [] : [];
     const selectedSession = sessions.find(item => item.sessionId === selected);
     const selectedDropped = selected ? dropped[selected] || 0 : 0;
+
+    // 手动确认只在"还活着的非 autoAck 会话"上开放：会话结束后主进程的登记表已随
+    // 会话销毁，按钮留着只会让用户点出一串"会话不存在"。
+    const manualAck = !!selectedSession && !selectedSession.autoAck && !ended[selectedSession.sessionId];
+    // broker 只接受 Exclusive/Failover 的累计确认（Shared 上必被拒），按钮同步收敛。
+    const cumulativeAllowed =
+        !!selectedSession &&
+        (selectedSession.subscriptionType === 'Exclusive' || selectedSession.subscriptionType === 'Failover');
+
+    const markResolved = (sessionId: string, seqs: number[], state: 'acked' | 'nacked') => {
+        if (seqs.length === 0) {
+            return;
+        }
+        setResolvedSeqs(current => {
+            const bucket = {...(current[sessionId] || {})};
+            for (const seq of seqs) {
+                bucket[seq] = state;
+            }
+            return {...current, [sessionId]: bucket};
+        });
+    };
+
+    // 界面上这批里还没处理过的序号：累计确认与「全部确认」都要按这个回写行状态，
+    // 已经重投过的行不能被后面的批量操作改写成"已确认"。
+    const unresolvedSeqs = (upperBound: number, onlyAckable: boolean) => {
+        const resolved = selected ? resolvedSeqs[selected] : undefined;
+        const seqs: number[] = [];
+        for (const message of messages) {
+            const seq = message.ackSeq;
+            if (seq === undefined || seq > upperBound || (onlyAckable && message.ackable !== true)) {
+                continue;
+            }
+            if (!resolved?.[seq]) {
+                seqs.push(seq);
+            }
+        }
+        return seqs;
+    };
+
+    const ackRows = async (seqs: number[], cumulative: boolean) => {
+        if (!selectedSession) {
+            return;
+        }
+        const sessionId = selectedSession.sessionId;
+        setAckBusy(true);
+        try {
+            const response = await window.electronAPI.consumer.ack({sessionId, seqs, cumulative});
+            const info = response.data;
+            if (response.success && info) {
+                setPending(current => ({...current, [sessionId]: info.pendingAcks}));
+                // 累计确认按 broker 游标把它之前的全部带走，界面里这些行一起翻绿；
+                // 逐条确认只翻选中的那几条。
+                markResolved(sessionId, cumulative ? unresolvedSeqs(Math.max(...seqs), false) : seqs, 'acked');
+            } else {
+                message.error(response.error || '确认失败');
+            }
+        } catch (ackError) {
+            message.error(ackError instanceof Error ? ackError.message : String(ackError));
+        } finally {
+            setAckBusy(false);
+        }
+    };
+
+    const nackRow = async (seq: number) => {
+        if (!selectedSession) {
+            return;
+        }
+        const sessionId = selectedSession.sessionId;
+        setAckBusy(true);
+        try {
+            const response = await window.electronAPI.consumer.nack({sessionId, seqs: [seq]});
+            const info = response.data;
+            if (response.success && info) {
+                setPending(current => ({...current, [sessionId]: info.pendingAcks}));
+                markResolved(sessionId, [seq], 'nacked');
+                // 重投后很快会以新序号回到列表尾部，积压读数也要跟一下
+                void refreshBacklog([selectedSession.subscription]);
+            } else {
+                message.error(response.error || '重投失败');
+            }
+        } catch (nackError) {
+            message.error(nackError instanceof Error ? nackError.message : String(nackError));
+        } finally {
+            setAckBusy(false);
+        }
+    };
+
+    // 空 seqs = 主进程登记表里的全部；界面只把可确认的行标成已确认，
+    // 超窗口那几条 broker 那边确实没被确认，不能跟着翻绿。
+    const ackAll = async () => {
+        if (!selectedSession) {
+            return;
+        }
+        const sessionId = selectedSession.sessionId;
+        setAckBusy(true);
+        try {
+            const response = await window.electronAPI.consumer.ack({sessionId, seqs: [], cumulative: false});
+            const info = response.data;
+            if (response.success && info) {
+                setPending(current => ({...current, [sessionId]: info.pendingAcks}));
+                markResolved(sessionId, unresolvedSeqs(Number.MAX_SAFE_INTEGER, true), 'acked');
+            } else {
+                message.error(response.error || '确认失败');
+            }
+        } catch (ackError) {
+            message.error(ackError instanceof Error ? ackError.message : String(ackError));
+        } finally {
+            setAckBusy(false);
+        }
+    };
 
     const doExport = (format: 'json' | 'csv') => {
         if (messages.length === 0) {
@@ -632,7 +783,9 @@ const ConsumerWorkspace: React.FC<ConsumerWorkspaceProps> = ({
                                     {session.autoAck ? (
                                         <span>自动确认</span>
                                     ) : (
-                                        <span className="danger-text">未确认</span>
+                                        <span className="danger-text">
+                                            未确认 <strong>{pending[session.sessionId] || 0}</strong> 条
+                                        </span>
                                     )}
                                     <strong>{receivedOf(session)}</strong> 条
                                     <strong>{(rates[session.sessionId] ?? 0).toFixed(1)}</strong> msg/s
@@ -712,6 +865,18 @@ const ConsumerWorkspace: React.FC<ConsumerWorkspaceProps> = ({
                             onClick={() => void refreshBacklog(sessionNames)}
                             aria-label="刷新积压"
                         />
+                        {manualAck && (
+                            <Popconfirm
+                                title="确认这个会话的全部未确认消息？"
+                                description="确认后 broker 不再重投这批消息；超出未确认窗口的几条不在其中。"
+                                okText="全部确认"
+                                onConfirm={() => void ackAll()}
+                            >
+                                <Button size="small" loading={ackBusy}>
+                                    全部确认
+                                </Button>
+                            </Popconfirm>
+                        )}
                         <Button size="small" icon={<DownloadOutlined />} onClick={() => doExport('json')}>
                             导出 JSON
                         </Button>
@@ -734,7 +899,17 @@ const ConsumerWorkspace: React.FC<ConsumerWorkspaceProps> = ({
                                 : '会话在跑，broker 还没把消息投过来（订阅已有游标时从游标继续，这里选的位置不起作用）。'}
                         </div>
                     ) : (
-                        <MessageListView messages={messages} truncateLength={truncateLength} onOpenDetail={setDetail} />
+                        <MessageListView
+                            messages={messages}
+                            truncateLength={truncateLength}
+                            onOpenDetail={setDetail}
+                            manualAck={manualAck}
+                            cumulativeAllowed={cumulativeAllowed}
+                            ackBusy={ackBusy}
+                            resolved={selected ? resolvedSeqs[selected] : undefined}
+                            onAck={(seqs, cumulative) => void ackRows(seqs, cumulative)}
+                            onNack={seq => void nackRow(seq)}
+                        />
                     )}
                 </div>
             </div>

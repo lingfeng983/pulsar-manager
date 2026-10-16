@@ -24,6 +24,8 @@ import type {
     Message,
     MessageBatch,
     MessageTemplateBody,
+    PeekParams,
+    PeekResult,
     ProducerFlowParams,
     ProducerMessageOptions,
     ProducerOptions,
@@ -87,7 +89,9 @@ function toClientConfig(config: NativeConnectionConfig): ClientConfig {
     // 关掉校验等于放弃 TLS，所以这一组合明确拒绝而不是静默降级。
     if (config.viaSshTunnel && tlsScheme) {
         throw new Error(
-            '消息收发暂不支持「TLS + SSH 隧道」组合（原生客户端无法指定 SNI 主机名），请改用 pulsar:// 明文地址经隧道，或关闭隧道直连',
+            '「TLS + SSH 隧道」的消息收发不可用：隧道把 Broker 地址换成了 127.0.0.1，证书主机名校验必然失败，' +
+                '而原生客户端没有可指定 SNI 的参数（管理 API、命名空间与监控走 HTTP，不受此限制）。二选一：' +
+                '经隧道访问时把 Broker 地址改为 pulsar://（流量已在隧道内加密），或关闭隧道直连 pulsar+ssl://。',
         );
     }
     const clientConfig: ClientConfig = {
@@ -180,6 +184,9 @@ const RECENT_SCAN_MAX_BYTES = 8 * 1024 * 1024;
 // 连续这么多轮 hasNext() 为假才算追平到尾部：单轮为假可能只是下一块 ledger 还没到，
 // 立刻收尾会把最后那几条漏掉。
 const RECENT_SCAN_IDLE_ROUNDS = 2;
+// 偷看的整体预算：一次 receive 的空轮询是 2 秒，正常路径（有积压）远到不了这里，
+// 到得了的都是 broker 半死——那时必须有个数把临时 consumer 收掉，而不是吊死在 IPC 上。
+const PEEK_DEADLINE_MS = 15000;
 // 停止时要等的是"在途读取落地 + 资源关闭"的整体，而不是只等 close：
 // 预算必须覆盖最长的一次空轮询，否则正常等待也会被误判成卡死并提前返回。
 const SETTLE_TIMEOUT_MS = RECEIVE_TIMEOUT_MS + CLOSE_TIMEOUT_MS;
@@ -257,6 +264,13 @@ interface ProducerHandle {
 
 // 常驻 consumer 的会话侧状态。received 在这里而不是只留在界面：切页签、
 // 重开工作台都要能问出"这条订阅的会话收过多少条"，界面自己那份数在卸载时就没了。
+// 手动确认会话里未确认消息的登记表上限。原生 Message 对象不能在界面与主进程之间
+// 传递（sandbox 只收纯 JSON），确认时只能拿它在主进程的原身，所以按序号登记在这里；
+// 批消息里多条的 messageId 字符串可能相同，不能拿它当键。超出上限的新消息不再登记
+// （界面标成不可确认），由 broker 的 ackTimeout 重投兜底，而不是偷偷淘汰旧的——
+// 淘汰会让"界面显示可确认、主进程说没这条"的谎话出现在最老的几条上。
+const MAX_UNACKED_WINDOW = 2000;
+
 interface ConsumerHandle {
     consumer: Consumer;
     clusterId: string;
@@ -266,6 +280,9 @@ interface ConsumerHandle {
     subscriptionType: ConsumeStartParams['subscriptionType'];
     autoAck: boolean;
     received: number;
+    // seq → 原生 Message；确认/重投成功后从这里摘掉，pendingAcks 就是它的大小
+    unacked: Map<number, NativeMessage>;
+    nextAckSeq: number;
 }
 
 interface Session {
@@ -584,6 +601,7 @@ export class NativeClientManager {
         afterMessage: ((message: NativeMessage) => Promise<void>) | undefined,
         maxMessages: number,
         emit: (batch: MessageBatch) => void,
+        decorate?: (message: NativeMessage, rendered: Message) => void,
     ): Promise<void> {
         let buffer: Message[] = [];
         let delivered = 0;
@@ -609,7 +627,11 @@ export class NativeClientManager {
                 if (afterMessage) {
                     await afterMessage(message);
                 }
-                buffer.push(toRendererMessage(message));
+                const rendered = toRendererMessage(message);
+                if (decorate) {
+                    decorate(message, rendered);
+                }
+                buffer.push(rendered);
                 delivered += 1;
                 if (buffer.length >= BATCH_SIZE || Date.now() - lastFlush >= BATCH_FLUSH_MS) {
                     flush();
@@ -705,6 +727,8 @@ export class NativeClientManager {
             subscriptionType: params.subscriptionType,
             autoAck: params.autoAck,
             received: 0,
+            unacked: new Map(),
+            nextAckSeq: 1,
         };
         if (params.consumerName) {
             handle.consumerName = params.consumerName;
@@ -737,6 +761,22 @@ export class NativeClientManager {
                 },
                 params.maxMessages ?? 0,
                 emit,
+                // 手动确认：每条都在登记表里占一个序号，界面按这个序号发确认/重投。
+                // 登记与序号分配都发生在推送之前，界面拿到批次时登记表必然已经就位。
+                params.autoAck
+                    ? undefined
+                    : (message: NativeMessage, rendered: Message) => {
+                          const seq = handle.nextAckSeq;
+                          handle.nextAckSeq += 1;
+                          rendered.ackSeq = seq;
+                          if (handle.unacked.size < MAX_UNACKED_WINDOW) {
+                              handle.unacked.set(seq, message);
+                              rendered.ackable = true;
+                              rendered.messageIdBytes = message.getMessageId().serialize().toString('base64');
+                          } else {
+                              rendered.ackable = false;
+                          }
+                      },
             ),
             onEnd,
         );
@@ -756,6 +796,9 @@ export class NativeClientManager {
         // 从 earliest 一路回放，且 catch 里已分配的 Reader 不会被关。
         if (params.from === 'timestamp' && !params.timestamp) {
             throw new Error('按时间读取需要指定 timestamp');
+        }
+        if (params.from === 'messageId' && !params.messageId) {
+            throw new Error('按 Message ID 定位需要指定 messageId');
         }
         const seekTimestamp = params.from === 'timestamp' ? params.timestamp : undefined;
         const session = this.reserveSession(
@@ -789,6 +832,20 @@ export class NativeClientManager {
             this.runSession(
                 session,
                 this.scanRecent(session, reader, params.recentCount ?? 20, emit, outcome),
+                onEnd,
+                outcome,
+            );
+            return {sessionId: session.id};
+        }
+
+        // 按 Message ID 定位：原生没有 MessageId.fromString、broker 没有按 id 取消息的
+        // REST 路由（Admin API 的 Examine 只到游标不到内容），唯一的办法是从 earliest
+        // 逐条比对 id 字符串。扫到过的那条就发一批并结束，扫完没到就靠 outcome 说明。
+        if (params.from === 'messageId') {
+            const outcome: {detail?: string} = {};
+            this.runSession(
+                session,
+                this.scanLocate(session, reader, params.messageId as string, emit, outcome),
                 onEnd,
                 outcome,
             );
@@ -886,6 +943,71 @@ export class NativeClientManager {
             : kept.length > 0
               ? `回溯扫描结束：扫过 ${scanned} 条，取最近 ${kept.length} 条`
               : '回溯扫描结束：这个 topic 上没有消息';
+    }
+
+    /**
+     * 从 earliest 逐条比对 Message ID，扫到目标即推一条并结束会话。
+     * 护栏与回溯扫描同一套：撞护栏不是错误，是"这个 id 在这段扫描范围里没出现"，
+     * 结论必须写进 outcome 让界面说得出"扫过多少、为什么停"，否则读起来和"没找到=没有这条"没法区分。
+     */
+    private async scanLocate(
+        session: Session,
+        reader: Reader,
+        targetId: string,
+        emit: (batch: MessageBatch) => void,
+        outcome: {detail?: string},
+    ): Promise<void> {
+        let scanned = 0;
+        let idleRounds = 0;
+        const deadline = Date.now() + RECENT_SCAN_MS;
+        let found: Message | undefined;
+        let stoppedByGuard = '';
+
+        try {
+            while (!session.stopped) {
+                if (reader.hasNext()) {
+                    const message = await reader.readNext();
+                    scanned += 1;
+                    idleRounds = 0;
+                    const rendered = toRendererMessage(message);
+                    if (rendered.messageId === targetId) {
+                        found = rendered;
+                        break;
+                    }
+                    if (scanned >= RECENT_SCAN_MAX_MESSAGES) {
+                        stoppedByGuard = `已扫描 ${scanned} 条到达上限`;
+                        break;
+                    }
+                    if (Date.now() >= deadline) {
+                        stoppedByGuard = `扫描超过 ${Math.round(RECENT_SCAN_MS / 1000)} 秒已停止`;
+                        break;
+                    }
+                    continue;
+                }
+                idleRounds += 1;
+                if (idleRounds >= RECENT_SCAN_IDLE_ROUNDS) {
+                    break;
+                }
+                await sleep(READER_POLL_MS);
+            }
+        } catch (error) {
+            if (!session.stopped) {
+                throw error;
+            }
+            return;
+        }
+
+        if (session.stopped) {
+            return;
+        }
+        if (found) {
+            emit({sessionId: session.id, messages: [found]});
+            outcome.detail = `定位成功：扫过 ${scanned} 条找到该 Message ID`;
+        } else {
+            outcome.detail = stoppedByGuard
+                ? `未找到该 Message ID。${stoppedByGuard}，目标可能在更靠后的位置`
+                : `扫描 ${scanned} 条未找到该 Message ID：它可能已被回溯删除，或不属于这个 topic`;
+        }
     }
 
     /**
@@ -1316,9 +1438,8 @@ export class NativeClientManager {
             subscriptionType: handle.subscriptionType,
             autoAck: handle.autoAck,
             received: handle.received,
-            // 未确认条数要等手动 ack 那一批（逐条确认的登记表在那里）；
-            // 现在报 0 会读成"全都确认过了"，所以界面在这一批不显示这一项。
-            pendingAcks: 0,
+            // 手动确认会话的登记表大小；自动确认会话永远是空的 Map，报 0 是真话。
+            pendingAcks: handle.unacked.size,
         };
         if (handle.consumerName) {
             info.consumerName = handle.consumerName;
@@ -1343,6 +1464,143 @@ export class NativeClientManager {
     consumerSession(sessionId: string): ConsumerSessionInfo {
         const {session, handle} = this.consumerHandle(sessionId);
         return this.consumerInfo(session.id, handle);
+    }
+
+    /**
+     * 按登记表序号确认消息。cumulative 用 seq 最大的那条做累计确认——
+     * broker 侧的累计是按游标位置，把 ≤ 它的已登记条目全部摘掉与之一致。
+     * Shared 订阅上 broker 会拒绝累计确认，那句原生错误原样抛给界面，不粉饰。
+     */
+    async ackMessages(sessionId: string, seqs: number[], cumulative: boolean): Promise<ConsumerSessionInfo> {
+        const {session, handle} = this.consumerHandle(sessionId);
+        if (handle.autoAck) {
+            throw new Error('该会话开启了自动确认，没有待确认的消息');
+        }
+        const targets = seqs.length > 0 ? seqs : [...handle.unacked.keys()];
+        if (cumulative) {
+            let maxSeq = 0;
+            let newest: NativeMessage | undefined;
+            for (const seq of targets) {
+                const message = handle.unacked.get(seq);
+                if (message && seq > maxSeq) {
+                    maxSeq = seq;
+                    newest = message;
+                }
+            }
+            if (!newest) {
+                throw new Error('这些消息已不在未确认窗口内（超出上限或被别的会话确认过）');
+            }
+            await handle.consumer.acknowledgeCumulative(newest);
+            for (const seq of [...handle.unacked.keys()]) {
+                if (seq <= maxSeq) {
+                    handle.unacked.delete(seq);
+                }
+            }
+            return this.consumerInfo(session.id, handle);
+        }
+        let acked = 0;
+        for (const seq of targets) {
+            const message = handle.unacked.get(seq);
+            if (!message) {
+                continue;
+            }
+            await handle.consumer.acknowledge(message);
+            handle.unacked.delete(seq);
+            acked += 1;
+        }
+        if (acked === 0) {
+            throw new Error('这些消息已不在未确认窗口内（超出上限或被别的会话确认过）');
+        }
+        return this.consumerInfo(session.id, handle);
+    }
+
+    // 重投（negativeAck）：原生层把消息交回重投计时器，登记表立刻摘掉这条——
+    // 它马上会以新序号重投回来，继续留着会出现"两条界面行认领同一个原生对象"。
+    // 没有 ackTimeout 的消费者上原生可能直接报错，那句错误同样原样送界面。
+    nackMessages(sessionId: string, seqs: number[]): ConsumerSessionInfo {
+        const {session, handle} = this.consumerHandle(sessionId);
+        if (handle.autoAck) {
+            throw new Error('该会话开启了自动确认，消息已确认，无需重投');
+        }
+        const targets = seqs.length > 0 ? seqs : [...handle.unacked.keys()];
+        let nacked = 0;
+        for (const seq of targets) {
+            const message = handle.unacked.get(seq);
+            if (!message) {
+                continue;
+            }
+            handle.consumer.negativeAcknowledge(message);
+            handle.unacked.delete(seq);
+            nacked += 1;
+        }
+        if (nacked === 0) {
+            throw new Error('这些消息已不在未确认窗口内（超出上限或已被处理）');
+        }
+        return this.consumerInfo(session.id, handle);
+    }
+
+    /**
+     * 偷看：给目标订阅临时挂一条 Shared 消费者，取 N 条就关——一条都不确认，
+     * 关闭时这些消息回到积压（Shared 游标只随确认推进），原订阅读数不变。
+     * 代价是目标订阅类型必须容忍第二消费者：Exclusive 会被 broker 直接拒绝，
+     * Failover 上这条只会被摆成备不投消息——两种情况界面都要能看懂（错误原样抛，
+     * 空结果带 note 说明），不做任何粉饰。
+     */
+    async peekMessages(clusterId: string, config: NativeConnectionConfig, params: PeekParams): Promise<PeekResult> {
+        const topic = topicFullName(params.tenant, params.namespace, params.topic, params.persistent);
+        const wanted = params.maxMessages ?? 20;
+        const client = await this.getClient(clusterId, config);
+        const work = (async (): Promise<PeekResult> => {
+            const consumer = await client.subscribe(
+                buildConsumerConfig(topic, {
+                    subscription: params.subscription,
+                    subscriptionType: 'Shared',
+                    initialPosition: 'Earliest',
+                    // 接收队列只开需要的量：默认 1000 会让 broker 一口气推一大截积压，
+                    // 偷看 20 条却"占用"了 1000 条的投递额度。
+                    receiverQueueSize: wanted,
+                }),
+            );
+            const messages: Message[] = [];
+            let note: string | undefined;
+            const deadline = Date.now() + PEEK_DEADLINE_MS;
+            try {
+                while (messages.length < wanted) {
+                    if (Date.now() >= deadline) {
+                        note = `偷看用时超过 ${Math.round(PEEK_DEADLINE_MS / 1000)} 秒，已取 ${messages.length} 条`;
+                        break;
+                    }
+                    try {
+                        const message = await consumer.receive(RECEIVE_TIMEOUT_MS);
+                        messages.push(toRendererMessage(message));
+                    } catch (error) {
+                        if (isTimeoutError(error)) {
+                            // 一轮空轮询就是"没有再投得动的消息"：积压为空，
+                            // 或目标订阅正被独占/备着，多等也不会有下文
+                            break;
+                        }
+                        throw error;
+                    }
+                }
+                if (messages.length === 0 && !note) {
+                    note = '没有取到消息：积压为空，或该订阅类型（Exclusive/Failover）已有消费者占着投递';
+                }
+            } finally {
+                // 只 close 不 unsubscribe：退订会把这个订阅整个删掉，
+                // 那才是真正把用户的积压清没了
+                await withHardTimeout(consumer.close(), 'peek consumer close timed out').catch((error: unknown) => {
+                    log.warn(
+                        `peek on ${topic}/${params.subscription} close failed`,
+                        error instanceof Error ? error.message : error,
+                    );
+                });
+            }
+            return {messages, note};
+        })();
+        // 登记与 sendOnce 同一口径：临时 consumer 活在缓存 Client 上，
+        // 集群被删/改配置时必须先等它收尾再关原生 Client。
+        this.trackShortLived(clusterId, work);
+        return work;
     }
 
     /**

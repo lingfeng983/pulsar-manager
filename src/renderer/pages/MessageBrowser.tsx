@@ -70,6 +70,10 @@ const PROPERTIES_HINT =
     '任意键值的字符串属性，随消息一起存进 broker，接收列表的 Properties 列就是它。' +
     '值只会是字符串：数字与布尔发出去会转成文本；XML 按叶子摊平成点路径（props.env → test）。';
 
+const PEEK_HINT =
+    '给该订阅临时挂一条 Shared 消费者取几条就撤：一条都不确认，看完这些消息原样回到积压。' +
+    'Exclusive 订阅会被 broker 拒绝，Failover 订阅可能被现役消费者占着看不到。';
+
 // 两种写法各给一份起手的默认模板。XML 的根标签会进键名前缀（<props><env> → props.env），
 // JSON 的嵌套值会被摊成字符串，这两条 PROPERTIES_HINT 里都写了。
 const PROPERTIES_TEMPLATES: Record<'json' | 'xml', string> = {
@@ -164,16 +168,20 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
     const [autoAck, setAutoAck] = useState(true);
     const [consumeMax, setConsumeMax] = useState(0);
 
-    const [readFrom, setReadFrom] = useState<'earliest' | 'latest' | 'timestamp' | 'recent'>('earliest');
+    const [readFrom, setReadFrom] = useState<'earliest' | 'latest' | 'timestamp' | 'recent' | 'messageId'>('earliest');
     const [readTimestamp, setReadTimestamp] = useState<dayjs.Dayjs | null>(null);
     const [readMax, setReadMax] = useState(20);
     const [recentCount, setRecentCount] = useState(20);
+    // 按 ID 定位的目标：Message ID 是从列表里复制来的字符串，不做格式校验——
+    // 格式对不对由 broker 那边的比对说了算，这里拦格式只会拦错。
+    const [readMessageId, setReadMessageId] = useState('');
 
     const [backlog, setBacklog] = useState<{messageCount: number; sizeInBytes: number} | null>(null);
     const [backlogLoading, setBacklogLoading] = useState(false);
     const [expandedMessages, setExpandedMessages] = useState<string[]>([]);
     const [showFullMessage, setShowFullMessage] = useState<Message | null>(null);
     const [exportLoading, setExportLoading] = useState(false);
+    const [peeking, setPeeking] = useState(false);
 
     // 会话 id 同时放 ref：推送回调与卸载清理都要读最新值，
     // 放 state 会让 effect 依赖来回变化，反而漏停或重复停。
@@ -566,6 +574,10 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
             message.warning('请选择起始时间');
             return;
         }
+        if (readFrom === 'messageId' && !readMessageId.trim()) {
+            message.warning('先粘贴要定位的 Message ID');
+            return;
+        }
         return startSession('read', () =>
             window.electronAPI.messages.startRead({
                 clusterId,
@@ -579,8 +591,46 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                 timestamp: readFrom === 'timestamp' ? readTimestamp?.valueOf() : undefined,
                 maxMessages: readMax,
                 recentCount,
+                messageId: readFrom === 'messageId' ? readMessageId.trim() : undefined,
             }),
         );
+    };
+
+    // 偷看：主进程给该订阅临时挂一条 Shared 消费者取几条就撤，一条都不确认，
+    // 消息原样回到积压。限量沿用「消费限量」那一格（0 或超 200 时按 200 收），
+    // 单次 IPC 整份返回，条数必须有个和流式路径不同的上限。
+    const handlePeek = async () => {
+        if (sessionId || !subscription) {
+            return;
+        }
+        setPeeking(true);
+        setError(null);
+        try {
+            const response = await window.electronAPI.messages.peek({
+                clusterId,
+                tenant,
+                namespace,
+                topic,
+                persistent,
+                subscription,
+                maxMessages: consumeMax > 0 ? Math.min(consumeMax, 200) : 20,
+            });
+            if (response.success && response.data) {
+                setMessages(trimMessageList(response.data.messages, MAX_DISPLAY_COUNT, STREAM_MAX_BYTES));
+                if (response.data.note) {
+                    message.info(response.data.note);
+                } else {
+                    message.success(`偷看到 ${response.data.messages.length} 条（未确认，积压不动）`);
+                }
+                void refreshBacklog();
+            } else {
+                setError(response.error || '偷看失败');
+            }
+        } catch (peekError) {
+            setError(peekError instanceof Error ? peekError.message : String(peekError));
+        } finally {
+            setPeeking(false);
+        }
     };
 
     const handleToggleSession = () => {
@@ -615,6 +665,22 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
     // 之前放在列渲染里做，任何一次重渲染（例如展开一条消息）都会对全部 500 条重跑。
     // 按原始 data 缓存（同一条消息重复出现也只需算一次）。
     const decodedData = useMemo(() => decodeMessageBatch(messages.map(msg => msg.data)), [messages]);
+
+    // 重投 = 把这条消息的正文与属性原样装回「发送测试」面板，由用户自己点发送：
+    // 不代点是因为发出去的就是"另一条新消息"，topic 是否还该收它、属性要不要改，
+    // 都是只有用户能拍板的事；面板里改完 Ctrl+Z 也还能撤。
+    const loadIntoSendPanel = (record: Message) => {
+        const payload = decodedData.get(record.data);
+        setSendText(payload?.formatted ?? '');
+        setSendKind(payload?.kind ?? 'text');
+        const keys = Object.keys(record.properties || {});
+        if (keys.length > 0) {
+            setSendPropertiesKind('json');
+            setSendProperties(JSON.stringify(record.properties, null, 2));
+        }
+        setMode('send');
+        message.success(`已把 ${record.messageId} 装回发送测试面板，确认后点发送即为重投`);
+    };
 
     const handleExportMessages = async (format: 'json' | 'csv') => {
         if (messages.length === 0) {
@@ -730,6 +796,15 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                             style={{marginTop: 4, marginLeft: 8}}
                         >
                             全屏查看
+                        </Button>
+                        <Button
+                            type="text"
+                            size="small"
+                            icon={<SendOutlined />}
+                            onClick={() => loadIntoSendPanel(record)}
+                            style={{marginTop: 4, marginLeft: 8}}
+                        >
+                            重投（装回发送）
                         </Button>
                     </div>
                 );
@@ -1016,6 +1091,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                             {value: 'latest', label: '最新之后'},
                             {value: 'timestamp', label: '指定时间'},
                             {value: 'recent', label: '最近 N 条'},
+                            {value: 'messageId', label: '按 ID 定位'},
                         ]}
                     />
                 </div>
@@ -1045,7 +1121,19 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                         </Tooltip>
                     </div>
                 )}
-                {readFrom !== 'recent' && (
+                {readFrom === 'messageId' && (
+                    <Tooltip title="没有按 ID 直取的协议路由，主进程从最早逐条比对到这个 ID 为止（护栏同回溯扫描：最多 2 万条或 15 秒），找到就显这一条">
+                        <Input
+                            aria-label="目标 Message ID"
+                            value={readMessageId}
+                            onChange={event => setReadMessageId(event.target.value)}
+                            placeholder="如 52196:16:0"
+                            style={{width: 190}}
+                            disabled={!!sessionId}
+                        />
+                    </Tooltip>
+                )}
+                {readFrom !== 'recent' && readFrom !== 'messageId' && (
                     <Tooltip title="Reader 只读不确认，不影响任何订阅的游标">
                         <div>
                             <label style={fieldLabel}>限量:</label>
@@ -1095,6 +1183,19 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                             >
                                 {isRunning ? '停止' : '开始'}
                             </Button>
+                            {mode === 'consume' && (
+                                <Tooltip title={PEEK_HINT}>
+                                    <Button
+                                        size="small"
+                                        icon={<ZoomInOutlined />}
+                                        loading={peeking}
+                                        disabled={isRunning || !subscription}
+                                        onClick={() => void handlePeek()}
+                                    >
+                                        偷看
+                                    </Button>
+                                </Tooltip>
+                            )}
                             {mode === 'consume' && (
                                 <Button
                                     size="small"

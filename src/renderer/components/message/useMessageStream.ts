@@ -16,6 +16,9 @@ export interface MessageStreamOptions {
     owns: (sessionId: string) => boolean;
     limit?: number;
     onSessionEnd?: (event: SessionEndEvent) => void;
+    // 每一批到达都会回调，包括暂停渲染时的那几批：手动确认的"未确认 N 条"要跟着
+    // 主进程登记表走，暂停只是界面不渲染，消息仍被登记，计数不能少算。
+    onBatch?: (batch: MessageBatch) => void;
 }
 
 export interface MessageStream {
@@ -37,6 +40,7 @@ export function useMessageStream({
     owns,
     limit = DEFAULT_STREAM_LIMIT,
     onSessionEnd,
+    onBatch,
 }: MessageStreamOptions): MessageStream {
     const [buckets, setBuckets] = useState<Record<string, Message[]>>({});
     const [counts, setCounts] = useState<Record<string, number>>({});
@@ -53,11 +57,14 @@ export function useMessageStream({
     pausedRef.current = paused;
     const endedRef = useRef(onSessionEnd);
     endedRef.current = onSessionEnd;
+    const batchedRef = useRef(onBatch);
+    batchedRef.current = onBatch;
 
     const append = useCallback((batch: MessageBatch) => {
         if (batch.messages.length === 0) {
             return;
         }
+        batchedRef.current?.(batch);
         setCounts(current => ({
             ...current,
             [batch.sessionId]: (current[batch.sessionId] || 0) + batch.messages.length,

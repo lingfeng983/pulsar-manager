@@ -1,6 +1,7 @@
 import type {ProducerMessage} from 'pulsar-client';
 import type {MessageTemplateBody, ProducerMessageOptions, ProducerOptions} from '../../shared/types';
 import {resolveTemplate} from '../../shared/template-engine';
+import {formatSchemaIssues, parseSchemaJson, validateJsonSchema} from '../../shared/json-schema-lite';
 
 // 报文模板 → 待发条目的解析发生在主进程，与真正的 producer.send 同一个地方：
 // 预览走的是同一份 shared/template-engine，但路由键与事件时间要从**解析后**的
@@ -112,6 +113,42 @@ export function messageOptions(
     };
 }
 
+// 内联 schema 校验在每条报文解析之后、参数回落之前：校验的对象必须是"最终要发出去的
+// 正文"，而 applyOptions 只读它不改它，顺序反过来也只是白费一次解析。
+// 返回 null 表示模板没有配校验；'broker' 模式没有可执行的入口，直接抛错而不是静默放行——
+// 用户以为有校验在拦、实际一条都没拦，比明确失败坏得多。
+function buildSchemaGate(template: MessageTemplateBody): ((text: string) => string | null) | null {
+    if (template.schemaMode === 'broker') {
+        throw new Error(
+            '「Broker Schema」校验暂未接通：原生客户端与 Admin REST 都没有"给一条报文做 schema 校验"的入口，' +
+                '请把模板改为「内联 JSON Schema」校验，或关闭校验',
+        );
+    }
+    if (template.schemaMode !== 'inline') {
+        return null;
+    }
+    const raw = (template.schemaJson || '').trim();
+    if (!raw) {
+        throw new Error('模板勾选了「内联 Schema」校验，但没有保存任何 schema 内容');
+    }
+    const parsed = parseSchemaJson(raw);
+    // 主工程没开 strictNullChecks，布尔可辨识联合不做收窄，显式转一次
+    if (!parsed.ok) {
+        throw new Error(`模板 schema 不合法：${(parsed as {error: string}).error}`);
+    }
+    const schema = parsed.schema;
+    return (text: string): string | null => {
+        let payload: unknown;
+        try {
+            payload = JSON.parse(text) as unknown;
+        } catch {
+            return 'schema 校验不通过：解析后的正文不是合法 JSON，无法对照 schema';
+        }
+        const issues = validateJsonSchema(payload, schema);
+        return issues.length > 0 ? formatSchemaIssues(issues) : null;
+    };
+}
+
 /**
  * 解析报文，一次最多一批（见上面的预算）。每一条重新走一遍占位符（随机值因此
  * 条与条不同），seq() 靠 messageIndex 递进，同一 seed 下整批内容与顺序都可复现。
@@ -128,6 +165,7 @@ export function resolveBatch(
     options: ProducerMessageOptions = DEFAULT_MESSAGE_OPTIONS,
     startIndex = 0,
 ): ResolvedBatch {
+    const schemaGate = buildSchemaGate(template);
     const items: OutboundMessage[] = [];
     const failures: {index: number; error: string}[] = [];
     let consumed = 0;
@@ -147,6 +185,14 @@ export function resolveBatch(
             failures.push({index, error: (resolved as {error?: string}).error ?? '模板解析失败'});
             consumed += 1;
             continue;
+        }
+        if (schemaGate) {
+            const error = schemaGate(resolved.text);
+            if (error) {
+                failures.push({index, error});
+                consumed += 1;
+                continue;
+            }
         }
         const item: OutboundMessage = {
             sourceIndex: index,

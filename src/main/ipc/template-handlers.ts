@@ -4,6 +4,7 @@ import {
     ConsumerConfigUpsertSchema,
     MessageTemplateBodySchema,
     ProducerOptionsSchema,
+    SendHistoryGetSchema,
     SendHistoryListSchema,
     TemplateCopySchema,
     TemplateIdSchema,
@@ -19,6 +20,7 @@ import {
     getClusterById,
     getConsumerSessionConfigById,
     getMessageTemplateById,
+    getSendHistoryById,
     insertConsumerSessionConfig,
     insertMessageTemplate,
     listConsumerSessionConfigs,
@@ -31,6 +33,7 @@ import {
     type SendHistoryRecord,
 } from '../database/sqlite';
 import {createLogger} from '../utils/logger';
+import {parseSchemaJson} from '../../shared/json-schema-lite';
 import type {
     ConsumerConfigDraft,
     ConsumerConfigUpsertParams,
@@ -104,6 +107,7 @@ function toTemplate(record: MessageTemplateRecord): MessageTemplate {
         properties: parseJsonObject(record.properties_json) as MessageTemplate['properties'],
         producerOptions: parseProducerOptions(record.producer_options_json),
         schemaMode: normalizeSchemaMode(record.schema_mode),
+        schemaJson: record.schema_json ?? undefined,
         useCount: record.use_count,
         lastUsedAt: record.last_used_at ?? null,
         createdAt: record.created_at,
@@ -139,6 +143,8 @@ function toSendHistory(record: SendHistoryRecord): SendHistoryEntry {
         templateId: record.template_id ?? null,
         templateName: record.template_name,
         bodyPreview: record.body_preview,
+        // 列表行不带全文（DAO 的列表查询刻意没选这一列），只有 sendHistory:get 会填
+        bodyFull: record.body_full ?? null,
         bodyBytes: record.body_bytes,
         messageCount: record.message_count,
         messageId: record.message_id ?? null,
@@ -172,7 +178,7 @@ function requireCluster(clusterId: string): void {
 // 免得每个字段前都挂一个「?? 默认值」——那等于把默认值写了第二遍，两处迟早对不上。
 function parseTemplateInput(params: unknown): MessageTemplateUpsertParams {
     const parsed = MessageTemplateBodySchema.parse(params);
-    return {
+    const input = {
         id: parsed.id,
         clusterId: parsed.clusterId,
         topicUri: parsed.topicUri,
@@ -182,7 +188,23 @@ function parseTemplateInput(params: unknown): MessageTemplateUpsertParams {
         properties: parsed.properties,
         producerOptions: parsed.producerOptions as ProducerOptions | undefined,
         schemaMode: parsed.schemaMode ?? 'none',
-    };
+        schemaJson: parsed.schemaJson,
+    } as MessageTemplateUpsertParams;
+    // 保存时就把 schema 本身判一遍：坏 schema 存进去，每条发送都会撞
+    // resolveBatch 那道 fail-fast，用户在发送列表里看到的是逐条红字，
+    // 而病根其实是三分钟前保存的那份 schema。
+    if (input.schemaMode === 'inline') {
+        const raw = (input.schemaJson || '').trim();
+        if (!raw) {
+            throw new Error('选了「内联 Schema」校验，需要同时保存 schema 内容');
+        }
+        const schema = parseSchemaJson(raw);
+        // 主工程没开 strictNullChecks，布尔可辨识联合在这里不做收窄，得显式转一次
+        if (!schema.ok) {
+            throw new Error(`schema 不合法：${(schema as {error: string}).error}`);
+        }
+    }
+    return input;
 }
 
 function parseConsumerInput(params: unknown): ConsumerConfigUpsertParams {
@@ -240,6 +262,9 @@ export function registerTemplateHandlers() {
                 properties_json: JSON.stringify(input.properties ?? {}),
                 producer_options_json: JSON.stringify(input.producerOptions ?? {}),
                 schema_mode: input.schemaMode,
+                // 非 inline 一律存 NULL：切回「不校验」后还留着旧 schema，
+                // 下次再选 inline 时会拿一份没人看过的旧内容去校验
+                schema_json: input.schemaMode === 'inline' ? (input.schemaJson ?? null) : null,
             });
         } catch (error) {
             throw new Error(conflictMessage(error, '模板') ?? formatError(error));
@@ -268,6 +293,7 @@ export function registerTemplateHandlers() {
                 properties_json: JSON.stringify(input.properties ?? {}),
                 producer_options_json: JSON.stringify(input.producerOptions ?? {}),
                 schema_mode: input.schemaMode,
+                schema_json: input.schemaMode === 'inline' ? (input.schemaJson ?? null) : null,
             });
         } catch (error) {
             throw new Error(conflictMessage(error, '模板') ?? formatError(error));
@@ -307,6 +333,7 @@ export function registerTemplateHandlers() {
                 properties_json: source.properties_json,
                 producer_options_json: source.producer_options_json,
                 schema_mode: source.schema_mode,
+                schema_json: source.schema_json ?? null,
             });
         } catch (error) {
             throw new Error(conflictMessage(error, '模板') ?? formatError(error));
@@ -412,6 +439,13 @@ export function registerTemplateHandlers() {
     registerHandler('sendHistory:list', async (params: unknown) => {
         const {clusterId, topicUri, limit} = SendHistoryListSchema.parse(params);
         return listSendHistory(clusterId, topicUri, limit).map(toSendHistory);
+    });
+
+    // 单取一行的全文：列表为了 IPC 体积不带 body_full，「重发」点这里把整篇正文取回去
+    registerHandler('sendHistory:get', async (params: unknown) => {
+        const {id} = SendHistoryGetSchema.parse(params);
+        const record = getSendHistoryById(id);
+        return record ? toSendHistory(record) : null;
     });
 }
 

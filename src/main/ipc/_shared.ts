@@ -339,6 +339,9 @@ export const MessagePropertiesSchema = z
 
 // 模板正文限 1MB；解析后的单条消息另有 5MB 上限，在服务层拦——
 // $each 配大 count 能把 1MB 的模板撑到几十 MB。
+// schemaMode/schemaJson 放在这一份而不是 MessageTemplateBodySchema：发送参数
+// （producer:send / startFlow / sendOnce）带的也是这一份模板，校验发生在解析处，
+// 参数里没有 schema 就等于"临时改正文绕开了自己的 schema"，那是留了个洞。
 export const TemplateBodySchema = z.object({
     body: z
         .string()
@@ -346,6 +349,11 @@ export const TemplateBodySchema = z.object({
         .max(1024 * 1024),
     variables: TemplateVariablesSchema.default([]),
     properties: MessagePropertiesSchema.optional(),
+    schemaMode: z.enum(['none', 'inline', 'broker']).optional(),
+    schemaJson: z
+        .string()
+        .max(64 * 1024)
+        .optional(),
 });
 
 // 报文级参数：原生 producer 建好之后配置改不了（绑定没有修改入口），一次发送
@@ -452,24 +460,47 @@ export const ConsumerStartSchema = ConsumeStartSchema.extend({
 });
 
 export const ReadStartSchema = TopicPathSchema.extend({
-    from: z.enum(['earliest', 'latest', 'timestamp', 'recent']).default('earliest'),
+    from: z.enum(['earliest', 'latest', 'timestamp', 'recent', 'messageId']).default('earliest'),
     timestamp: z.number().int().positive().optional(),
     maxMessages: z.number().int().min(0).max(10000).default(500),
     // 「最近 N 条」的 N：上限对齐界面保留条数（500），否则主进程认真扫完 1000 条
     // 推过来，渲染层按保留上限只留 500 条，用户看到"扫过 X 条，取最近 1000 条"
     // 而列表只有一半，等于静默丢数。
     recentCount: z.number().int().min(1).max(500).default(20),
+    // 「按 Message ID 定位」的目标 id：原生没有 fromString，broker 也没有按 id 取的
+    // REST 路由，主进程只能从 earliest 逐条比对字符串，量级护栏与回溯扫描同一套。
+    messageId: z.string().min(1).max(200).optional(),
 })
-    // 起点与时间戳必须二选一：两个都给的话服务层会拿 timestamp 去 seek，
-    // 用户选"最新位置"却看到从旧时间开始回放，而且界面报成功。
     .refine(params => (params.from === 'timestamp' ? !!params.timestamp : !params.timestamp), {
         message: '按时间读取需要 timestamp，其他起点不能带 timestamp',
+    })
+    .refine(params => (params.from === 'messageId' ? !!params.messageId : !params.messageId), {
+        message: '按 Message ID 定位需要 messageId，其他起点不能带 messageId',
     });
 
 export const SessionIdSchema = z.object({
     // 会话 id 由主进程用 uuid 生成；限成 uuid 可以避免拿着上一个进程的 id
     // 去停这一进程里恰好同名的会话
     sessionId: z.string().uuid(),
+});
+
+// 偷看：一次性取若干条，不建会话、不确认。上限给 200 是因为这条路径没有
+// 流式的裁剪与护栏，全部条目都要整份进 IPC 载荷。
+export const PeekSchema = TopicPathSchema.extend({
+    subscription: z.string().min(1).max(255),
+    maxMessages: z.number().int().min(1).max(200).default(20),
+});
+
+// 手动确认：按主进程登记表里的序号选条。seqs 允许为空 —— 空数组 + all 语义是
+// "把当前未确认的全部处理掉"，主进程里用登记表键集回退实现，界面不用凑齐所有序号。
+// 单次上限 1000 条：再多就该用「全部确认」而不是勾选。
+export const ConsumerAckSchema = SessionIdSchema.extend({
+    seqs: z.array(z.number().int().positive()).max(1000).default([]),
+    cumulative: z.boolean().default(false),
+});
+
+export const ConsumerNackSchema = SessionIdSchema.extend({
+    seqs: z.array(z.number().int().positive()).max(1000).default([]),
 });
 
 // 快速压测：全部字段都有默认值，渲染层只提交用户改动过的项。
@@ -630,6 +661,11 @@ export const SendHistoryListSchema = z.object({
     clusterId: ClusterIdSchema,
     topicUri: TopicUriSchema,
     limit: z.number().int().min(1).max(1000).default(200),
+});
+
+// 按行 id 单取全文：列表不带 body_full（省 IPC 体积），重发时取这一条的整篇正文
+export const SendHistoryGetSchema = z.object({
+    id: z.number().int().positive(),
 });
 
 export const ProducerStartSchema = TopicPathSchema.extend({

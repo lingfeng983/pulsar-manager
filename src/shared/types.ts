@@ -323,14 +323,37 @@ export interface ConsumeStartParams extends SubscriptionPathParams {
     deadLetter?: DeadLetterConfig;
 }
 
+// 手动确认的按序号选条。seqs 为空 = 处理登记表里的全部（界面上的「全部确认」按钮）；
+// cumulative 只对流式可累计的类型有意义，broker 拒绝时那句原生错误原样回给界面。
+export interface ConsumerAckParams {
+    sessionId: string;
+    seqs: number[];
+    cumulative?: boolean;
+}
+
 export interface ReadStartParams extends TopicPathParams {
     // recent = 回溯尾部：原生 Reader 没有"从末尾倒数 N 条"的锚点，broker 也没有
     // lastMessageId 的 REST 路由，主进程只能从 earliest 扫过去留最后 N 条，
     // 所以它带的是一次性扫描的量（recentCount），不是持续读取的上限（maxMessages）。
-    from: 'earliest' | 'latest' | 'timestamp' | 'recent';
+    // messageId = 按 ID 定位：同样是"没有锚点只能扫"，扫到那条就停（护栏同 recent）。
+    from: 'earliest' | 'latest' | 'timestamp' | 'recent' | 'messageId';
     timestamp?: number;
     maxMessages?: number;
     recentCount?: number;
+    messageId?: string;
+}
+
+// 偷看：一次性、不确认、不建会话。主进程给目标订阅临时挂一条 Shared 消费者
+// 取几条就撤，关闭时未确认的消息全部回到积压，原订阅游标不动。
+export interface PeekParams extends TopicPathParams {
+    subscription: string;
+    maxMessages?: number;
+}
+
+export interface PeekResult {
+    messages: Message[];
+    // 没偷到 / 撞超时 / 临时订阅没删干净——这句必须送到界面，静默空列表读起来像"topic 没消息"
+    note?: string;
 }
 
 export interface MessageBatch {
@@ -361,6 +384,12 @@ export interface MessageTemplateBody {
     body: string;
     variables: TemplateVariable[];
     properties?: Record<string, string>;
+    // 发送时的结构校验：'inline' 用 schemaJson（JSON Schema 子集，见
+    // shared/json-schema-lite.ts）逐条校验解析后的正文；'broker' 想走 broker 注册的
+    // schema，但原生客户端与 Admin REST 都没有"给一条报文做 schema 校验"的入口，
+    // 发送路径遇到它会明确拒绝而不是假装校验过。缺省 'none' 不校验。
+    schemaMode?: TemplateSchemaMode;
+    schemaJson?: string;
 }
 
 // 落库后的模板行（渲染层看到的形状，字段名已从 snake_case 转过）。
@@ -599,6 +628,9 @@ export interface SendHistoryEntry {
     templateId?: string | null;
     templateName: string;
     bodyPreview: string;
+    // 全文留存（配置中心开关）开启时落库的完整正文；没开、超过上限或老行为 null。
+    // 只有它才能"原样重发"——正文前缀是截断过的，拿去重发只会发出一条半截报文。
+    bodyFull?: string | null;
     bodyBytes: number;
     messageCount: number;
     messageId?: string | null;
@@ -762,6 +794,8 @@ export interface AppSettings {
     refreshIntervalSeconds: number;
     fontSize: FontSizeLevel;
     statusRefreshSeconds: number;
+    // 发送历史是否连带正文全文落库（单行上限 512KB），关掉就只留 400 字符前缀。
+    sendHistoryFullBody: boolean;
 }
 
 export interface ExportedSshConfig {

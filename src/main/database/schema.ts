@@ -78,6 +78,8 @@ CREATE TABLE IF NOT EXISTS message_templates (
     properties_json TEXT NOT NULL DEFAULT '{}',
     producer_options_json TEXT NOT NULL DEFAULT '{}',
     schema_mode TEXT NOT NULL DEFAULT 'none',
+    -- 「内联 Schema」校验用的 JSON Schema 原文；schema_mode 不是 inline 时为 NULL
+    schema_json TEXT,
     use_count INTEGER NOT NULL DEFAULT 0,
     last_used_at TEXT,
     created_at TEXT NOT NULL,
@@ -103,7 +105,9 @@ CREATE TABLE IF NOT EXISTS consumer_session_configs (
     FOREIGN KEY (cluster_id) REFERENCES clusters(id) ON DELETE CASCADE
 );
 
--- 发送历史：只记正文前缀与字节数，不存解析后的载荷（单条上限 5MB，落库就是几十 GB）。
+-- 发送历史：默认只记正文前缀与字节数；配置中心开「全文留存」后 body_full 另存
+-- 整篇模板正文（单行上限见 producer-handlers 的 HISTORY_FULL_MAX_CHARS）。
+-- 整篇载荷仍不落库——逐条解析结果是原生层分批释放的，这里存的是这次投的模板长什么样。
 -- template_name 冗余存一份，删模板不丢历史；cluster_id 与 template_id 学 operation_logs
 -- 走 SET NULL，因为「消息发过」这件事不该随集群消失而被抹掉。
 CREATE TABLE IF NOT EXISTS send_history (
@@ -113,6 +117,7 @@ CREATE TABLE IF NOT EXISTS send_history (
     template_id TEXT,
     template_name TEXT NOT NULL,
     body_preview TEXT NOT NULL,
+    body_full TEXT,
     body_bytes INTEGER NOT NULL,
     message_count INTEGER NOT NULL DEFAULT 1,
     message_id TEXT,

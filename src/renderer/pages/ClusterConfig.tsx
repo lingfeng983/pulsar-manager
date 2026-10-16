@@ -326,6 +326,36 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
                     <Switch />
                 </Form.Item>
 
+                {/* 拒绝发生在原生消息路径建 Client 的那一刻，等用户点发送才撞上就太晚了，
+                    这里按同一条件（隧道开 + Broker 地址是 TLS scheme）提前显出来说明 */}
+                <Form.Item
+                    noStyle
+                    shouldUpdate={(prev, curr) =>
+                        prev.useSshTunnel !== curr.useSshTunnel || prev.serviceUrl !== curr.serviceUrl
+                    }
+                >
+                    {({getFieldValue}) =>
+                        getFieldValue('useSshTunnel') &&
+                        /^(pulsar\+ssl|ssl):\/\//.test(String(getFieldValue('serviceUrl') || '')) ? (
+                            <Alert
+                                type="warning"
+                                showIcon
+                                message="「TLS + SSH 隧道」下消息收发不可用"
+                                description={
+                                    <>
+                                        隧道会把 Broker 地址换成 127.0.0.1，TLS
+                                        证书的主机名校验必然失败，原生客户端又没有 SNI 覆盖参数可绕。管理
+                                        API、命名空间与监控走 HTTP，<strong>不受影响</strong>
+                                        ；只有生产/消费/读取会被拒。二选一：经隧道访问时把 Broker 地址改成
+                                        pulsar://（流量已在隧道内加密），或关闭隧道直连 pulsar+ssl://。
+                                    </>
+                                }
+                                style={{marginBottom: 12}}
+                            />
+                        ) : null
+                    }
+                </Form.Item>
+
                 <Form.Item
                     noStyle
                     shouldUpdate={(prev, curr) =>

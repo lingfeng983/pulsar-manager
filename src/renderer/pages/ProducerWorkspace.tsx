@@ -26,6 +26,7 @@ import JsonEditor, {type JsonEditorHandle} from '../components/editor/JsonEditor
 import TemplateLibrary, {type TemplateDraft} from '../components/producer/TemplateLibrary';
 import VariableTable from '../components/producer/VariableTable';
 import ProducerOptionsForm from '../components/producer/ProducerOptionsForm';
+import SchemaPanel from '../components/producer/SchemaPanel';
 import PreviewPanel from '../components/producer/PreviewPanel';
 import FlowPanel, {type FlowSettings} from '../components/producer/FlowPanel';
 import {useCommand} from '../hooks/useKeybindings';
@@ -65,10 +66,11 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
         name: '',
         body: EMPTY_BODY,
         variables: [] as TemplateVariable[],
+        schemaMode: 'none',
     });
     const [currentId, setCurrentId] = useState<string | undefined>(undefined);
     const [options, setOptions] = useState<ProducerOptions>(() => defaultProducerOptions());
-    const [panel, setPanel] = useState<'variables' | 'options' | 'preview'>('variables');
+    const [panel, setPanel] = useState<'variables' | 'options' | 'preview' | 'schema'>('variables');
     const [sessions, setSessions] = useState<ProducerSessionInfo[]>([]);
     const [tallies, setTallies] = useState<Record<string, SessionTally>>({});
     const [counts, setCounts] = useState<Record<string, number>>({});
@@ -84,6 +86,7 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
     const [historyOpen, setHistoryOpen] = useState(false);
     const [historyRows, setHistoryRows] = useState<SendHistoryEntry[]>([]);
     const [historyLoading, setHistoryLoading] = useState(false);
+    const [resendingId, setResendingId] = useState<number | null>(null);
 
     const editorRef = useRef<JsonEditorHandle>(null);
     // 会话结束事件与停止操作都要读当前会话集合，放 state 会让订阅 effect 反复重订阅，
@@ -92,8 +95,16 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
     sessionsRef.current = sessions;
 
     const templateBody = useMemo(
-        () => ({body: draft.body, variables: draft.variables, properties: draft.properties}),
-        [draft.body, draft.variables, draft.properties],
+        () => ({
+            body: draft.body,
+            variables: draft.variables,
+            properties: draft.properties,
+            // 三条发送路径（send/startFlow/sendOnce）都拿这份，schema 校验在主进程
+            // resolveBatch 里按它逐条把关，所以这里必须把 schema 字段带上。
+            schemaMode: draft.schemaMode,
+            schemaJson: draft.schemaMode === 'inline' ? draft.schemaJson : undefined,
+        }),
+        [draft.body, draft.variables, draft.properties, draft.schemaMode, draft.schemaJson],
     );
 
     // 发送历史按 集群 + topic 取，不按会话取：会话是临时对象，而"这个 topic 上
@@ -116,6 +127,50 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
             setHistoryLoading(false);
         }
     }, [clusterId, topicUri]);
+
+    // 重发按"这一条模板正文再投一次"来做：sendOnce 会重新解析 ${} 占位符，
+    // 所以重发的报文带新的 id/时间戳——复现上一批而不是复印同一份字节，
+    // 这通常才是点重发的人想要的。历史本来就按当前页的 topic 过滤，
+    // 路径参数直接沿用页面上的，不需要再拆 topic_uri。
+    const resendFromHistory = useCallback(
+        async (row: SendHistoryEntry) => {
+            setResendingId(row.id);
+            try {
+                const detail = await window.electronAPI.sendHistory.get(row.id);
+                const body = detail.success ? detail.data?.bodyFull : null;
+                if (!body) {
+                    setError('这一行没有全文留存：到「配置中心」开启发送历史全文留存后，新发送的记录才能原样重发');
+                    return;
+                }
+                const response = await window.electronAPI.producer.sendOnce({
+                    clusterId,
+                    tenant,
+                    namespace,
+                    topic,
+                    persistent,
+                    template: {body, variables: []},
+                    count: 1,
+                    options,
+                    templateName: `${row.templateName}（重发）`,
+                });
+                if (response.success && response.data) {
+                    if (response.data.failures.length > 0) {
+                        setError(`重发的报文解析失败：${response.data.failures[0].error}`);
+                    }
+                    if (response.data.messageIds.length > 0) {
+                        message.success(`已重发 1 条：${response.data.messageIds[0]}`);
+                        void openHistory();
+                    }
+                } else {
+                    setError(response.error || '重发失败');
+                }
+            } finally {
+                setResendingId(null);
+            }
+        },
+        // options 也要进来：重发用的是页面上当前的发送参数，用户调过批大小就该按新的发
+        [clusterId, tenant, namespace, topic, persistent, options, openHistory],
+    );
 
     const historyColumns: TableColumnsType<SendHistoryEntry> = useMemo(
         () => [
@@ -147,8 +202,24 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
                     ),
             },
             {title: 'Message ID', dataIndex: 'messageId', ellipsis: true},
+            {
+                title: '操作',
+                width: 72,
+                render: (_, row) => (
+                    <Tooltip title="按当时那份模板正文再投一条（重发时会重新解析占位符）">
+                        <Button
+                            size="small"
+                            type="link"
+                            loading={resendingId === row.id}
+                            onClick={() => void resendFromHistory(row)}
+                        >
+                            重发
+                        </Button>
+                    </Tooltip>
+                ),
+            },
         ],
-        [],
+        [resendFromHistory, resendingId],
     );
 
     const applyTemplate = useCallback((template: MessageTemplate) => {
@@ -158,6 +229,8 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
             body: template.body,
             variables: template.variables || [],
             properties: template.properties,
+            schemaMode: template.schemaMode || 'none',
+            schemaJson: template.schemaJson,
         });
         // 模板里存过参数就一并带回来：不然用户换了模板，参数还是上一个的，
         // 发出去的批大小跟模板说明对不上。没存则保持当前设置不动。
@@ -487,7 +560,7 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
 
     const resetDraft = () => {
         setCurrentId(undefined);
-        setDraft({name: '', body: EMPTY_BODY, variables: []});
+        setDraft({name: '', body: EMPTY_BODY, variables: [], schemaMode: 'none', schemaJson: undefined});
     };
 
     return (
@@ -501,7 +574,7 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
                     <Button size="small" icon={<ClearOutlined />} onClick={resetDraft}>
                         新建报文
                     </Button>
-                    <Tooltip title="这个 topic 上投过的报文（只留正文前缀，最多 200 条）">
+                    <Tooltip title="这个 topic 上投过的报文（默认只留正文前缀，最多 200 条）">
                         <Button size="small" icon={<HistoryOutlined />} onClick={() => void openHistory()}>
                             发送历史
                         </Button>
@@ -569,6 +642,7 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
                         onChange={value => setPanel(value as typeof panel)}
                         options={[
                             {value: 'variables', label: `变量 ${draft.variables.length}`},
+                            {value: 'schema', label: 'Schema 校验'},
                             {value: 'options', label: '发送参数'},
                             {value: 'preview', label: '预览'},
                         ]}
@@ -578,6 +652,14 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
                             value={draft.variables}
                             onChange={variables => setDraft(current => ({...current, variables}))}
                             body={draft.body}
+                        />
+                    )}
+                    {panel === 'schema' && (
+                        <SchemaPanel
+                            schemaMode={draft.schemaMode}
+                            schemaJson={draft.schemaJson}
+                            onModeChange={schemaMode => setDraft(current => ({...current, schemaMode}))}
+                            onSchemaChange={schemaJson => setDraft(current => ({...current, schemaJson}))}
                         />
                     )}
                     {panel === 'options' && <ProducerOptionsForm value={options} onChange={setOptions} />}
@@ -682,7 +764,10 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
                 footer={null}
                 width={860}
             >
-                <div className="hint-text">展开某行看正文前缀（库里只留前 400 字符，整篇载荷不落库）。</div>
+                <div className="hint-text">
+                    展开某行看正文前缀（默认只留前 400
+                    字符）；在「配置中心」开启发送历史全文留存后，新记录才会存整篇正文并可原样重发。
+                </div>
                 <Table
                     size="small"
                     rowKey="id"
