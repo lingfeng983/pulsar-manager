@@ -1,6 +1,16 @@
 import {AxiosInstance} from 'axios';
-import {Semaphore, withRetry, withSemaphore, orNotFound, seg, mapWithConcurrency} from './http-client';
+import {
+    Semaphore,
+    withRetry,
+    withSemaphore,
+    orNotFound,
+    seg,
+    mapWithConcurrency,
+    NotFoundError,
+    isHttpMethodRejected,
+} from './http-client';
 import {API_ENDPOINTS, REQUEST_CONFIG} from '../config/constants';
+import type {BrokerSchemaInfo} from '../../shared/types';
 import type {
     ClusterInfo,
     Tenant,
@@ -643,6 +653,220 @@ export class ResourceAPI {
             }, null);
             const partitions = meta ? parsePartitionsMeta(meta, tenant, namespace, topicName, persistent) : null;
             await this.http.delete(partitions && partitions.partitions.length > 0 ? `${base}/partitions` : base);
+        });
+    }
+
+    // ========== Schema 注册表 ==========
+    //
+    // /schemas/{tenant}/{ns}/{topic名} 的路径不带 persistent/non-persistent 前缀（与 topic/订阅
+    // 的资源路径不同）；分区 topic 的 schema 挂在 {基名}-partition-0 上，基名路径是 404——
+    // 先探一次 /partitions 元数据决定用哪个名字，而不是两条路径盲试两遍。
+
+    private async schemaPath(tenant: string, namespace: string, topic: string, persistent: boolean): Promise<string> {
+        const name = shortTopicName(topic);
+        const meta = (await orNotFound(
+            async () => (await this.http.get(`${topicPath(tenant, namespace, name, persistent)}/partitions`)).data,
+            null,
+        )) as {partitions?: unknown[] | number} | null;
+        const count = Array.isArray(meta?.partitions) ? meta!.partitions.length : Number(meta?.partitions ?? 0) || 0;
+        const schemaName = count > 0 ? `${name}-partition-0` : name;
+        return `/admin/v2/schemas/${seg(tenant)}/${seg(namespace)}/${seg(schemaName)}`;
+    }
+
+    // topic 的最新 schema；未注册（404）返回 null——那是常态，不是错误。
+    async getSchemaInfo(
+        tenant: string,
+        namespace: string,
+        topic: string,
+        persistent: boolean = true,
+    ): Promise<BrokerSchemaInfo | null> {
+        return this.enqueue(async () => {
+            const base = await this.schemaPath(tenant, namespace, topic, persistent);
+            return orNotFound(async () => {
+                const response = await withRetry(() => this.http.get(base));
+                return response.data as BrokerSchemaInfo;
+            }, null);
+        });
+    }
+
+    // 注册新的 schema 版本。broker 会按当前兼容性策略校验新 schema，拒绝时 422 带原因，
+    // 原样抛给界面，不在这里猜。
+    async createSchemaVersion(
+        tenant: string,
+        namespace: string,
+        topic: string,
+        info: {type: string; schema: string},
+        persistent: boolean = true,
+    ): Promise<BrokerSchemaInfo> {
+        return this.enqueue(async () => {
+            const base = await this.schemaPath(tenant, namespace, topic, persistent);
+            const response = await this.http.post(`${base}/versions`, info);
+            return response.data as BrokerSchemaInfo;
+        });
+    }
+
+    // 删除 topic 的全部 schema 版本。
+    async deleteSchema(tenant: string, namespace: string, topic: string, persistent: boolean = true): Promise<void> {
+        return this.enqueue(async () => {
+            const base = await this.schemaPath(tenant, namespace, topic, persistent);
+            await this.http.delete(base);
+        });
+    }
+
+    // 策略端点挂在 topic 资源路径下（与 schema 正文的 /schemas 路径不同），
+    // 且不区分分区——分区 topic 的策略由基名承载。
+    private schemaStrategyPath(tenant: string, namespace: string, topic: string, persistent: boolean): string {
+        return `${topicPath(tenant, namespace, shortTopicName(topic), persistent)}/schemaCompatibilityStrategy`;
+    }
+
+    // topic 级兼容性策略。老 broker（3.0 之前）没有 topic 级端点，UNDEFINED 表示"沿用命名空间"：
+    // 这两种情况都退到读命名空间级，并把生效范围如实标出来，界面不说"这是 topic 级设置"的假话。
+    async getSchemaCompatibilityStrategy(
+        tenant: string,
+        namespace: string,
+        topic: string,
+        persistent: boolean = true,
+    ): Promise<{strategy: string | null; scope: 'topic' | 'namespace'}> {
+        return this.enqueue(async () => {
+            const topicLevel = this.schemaStrategyPath(tenant, namespace, topic, persistent);
+            const raw = await orNotFound(async () => (await withRetry(() => this.http.get(topicLevel))).data, null);
+            if (typeof raw === 'string' && raw.trim() && raw !== 'UNDEFINED') {
+                return {strategy: raw, scope: 'topic' as const};
+            }
+            const nsLevel = `/admin/v2/namespaces/${seg(tenant)}/${seg(namespace)}/schemaCompatibilityStrategy`;
+            const fromNs = await orNotFound(() => this.http.get(nsLevel), null);
+            const value = (fromNs as {data?: unknown} | null)?.data;
+            return {
+                strategy: typeof value === 'string' && value.trim() ? value : null,
+                scope: 'namespace' as const,
+            };
+        });
+    }
+
+    async setSchemaCompatibilityStrategy(
+        tenant: string,
+        namespace: string,
+        topic: string,
+        strategy: string,
+        persistent: boolean = true,
+    ): Promise<void> {
+        return this.enqueue(async () => {
+            const path = this.schemaStrategyPath(tenant, namespace, topic, persistent);
+            try {
+                // 实测策略走 query 参数、无请求体（TopicsBaseResource 的 @QueryParam("strategy")）
+                await this.http.put(path, null, {params: {strategy}});
+            } catch (error) {
+                if (error instanceof NotFoundError) {
+                    throw new Error('该 broker 不支持 topic 级 schema 兼容性策略（需要 Pulsar 3.0 及以上）');
+                }
+                throw error;
+            }
+        });
+    }
+
+    // ========== 权限（ACL）==========
+    //
+    // 授权端点在 broker 版本间换过 HTTP 方法：老口径是 PUT {role} 收 ["produce","consume"]，
+    // 新版（3.x/4.x 文档）改成 POST {role} 收 AuthPolicies 对象。两种都写成"先按当前文档的
+    // POST，方法不被支持再退回 PUT"，否则换一套集群就整片读得到却改不动。
+
+    private async grantOnPath(permissionsBase: string, role: string, actions: string[]): Promise<void> {
+        const path = `${permissionsBase}/permissions/${seg(role)}`;
+        try {
+            await this.http.post(path, {role, authPolicies: actions.map(action => ({action}))});
+        } catch (error) {
+            if (!isHttpMethodRejected(error)) {
+                throw error;
+            }
+            await this.http.put(path, actions);
+        }
+    }
+
+    private async revokeOnPath(permissionsBase: string, role: string): Promise<void> {
+        await this.http.delete(`${permissionsBase}/permissions/${seg(role)}`);
+    }
+
+    private async readPermissions(permissionsBase: string): Promise<Record<string, string[]>> {
+        return orNotFound(async () => {
+            const response = await withRetry(() => this.http.get(permissionsBase));
+            const data = response.data as Record<string, unknown> | null;
+            if (!data || typeof data !== 'object') {
+                return {};
+            }
+            // broker 返回 Map<role, Set<AuthAction>>，但也可能是 {role: {action: ...}} 形态的
+            // AuthPolicies（新版序列化），统一压成动作数组，认不出的值原样转字符串。
+            return Object.entries(data).reduce<Record<string, string[]>>((acc, [role, value]) => {
+                if (Array.isArray(value)) {
+                    acc[role] = value.map(String);
+                } else if (
+                    value &&
+                    typeof value === 'object' &&
+                    Array.isArray((value as {authPolicies?: unknown}).authPolicies)
+                ) {
+                    acc[role] = ((value as {authPolicies: unknown[]}).authPolicies as Array<{action?: string}>)
+                        .map(policy => policy?.action ?? '')
+                        .filter(Boolean);
+                } else {
+                    acc[role] = [];
+                }
+                return acc;
+            }, {});
+        }, {});
+    }
+
+    async getNamespacePermissions(tenant: string, namespace: string): Promise<Record<string, string[]>> {
+        return this.enqueue(() =>
+            this.readPermissions(`/admin/v2/namespaces/${seg(tenant)}/${seg(namespace)}/permissions`),
+        );
+    }
+
+    async grantNamespacePermission(tenant: string, namespace: string, role: string, actions: string[]): Promise<void> {
+        return this.enqueue(async () => {
+            await this.grantOnPath(`/admin/v2/namespaces/${seg(tenant)}/${seg(namespace)}`, role, actions);
+        });
+    }
+
+    async revokeNamespacePermission(tenant: string, namespace: string, role: string): Promise<void> {
+        return this.enqueue(async () => {
+            await this.revokeOnPath(`/admin/v2/namespaces/${seg(tenant)}/${seg(namespace)}`, role);
+        });
+    }
+
+    async getTopicPermissions(
+        tenant: string,
+        namespace: string,
+        topic: string,
+        persistent: boolean = true,
+    ): Promise<Record<string, string[]>> {
+        return this.enqueue(() =>
+            this.readPermissions(`${topicPath(tenant, namespace, shortTopicName(topic), persistent)}/permissions`),
+        );
+    }
+
+    async grantTopicPermission(
+        tenant: string,
+        namespace: string,
+        topic: string,
+        role: string,
+        actions: string[],
+        persistent: boolean = true,
+    ): Promise<void> {
+        return this.enqueue(async () => {
+            const base = topicPath(tenant, namespace, shortTopicName(topic), persistent);
+            await this.grantOnPath(base, role, actions);
+        });
+    }
+
+    async revokeTopicPermission(
+        tenant: string,
+        namespace: string,
+        topic: string,
+        role: string,
+        persistent: boolean = true,
+    ): Promise<void> {
+        return this.enqueue(async () => {
+            const base = topicPath(tenant, namespace, shortTopicName(topic), persistent);
+            await this.revokeOnPath(base, role);
         });
     }
 

@@ -30,6 +30,8 @@ export const APP_CONFIG_DEFAULTS: AppSettings = {
     fontSize: 'large',
     statusRefreshSeconds: 60,
     sendHistoryFullBody: false,
+    metricsSnapshotEnabled: false,
+    metricsRetentionDays: 7,
 };
 
 export const AppSettingsSchema = z.object({
@@ -45,6 +47,11 @@ export const AppSettingsSchema = z.object({
     statusRefreshSeconds: z.number().int().min(0).max(3600),
     // 发送历史连带正文全文落库（写入方在 producer-handlers 的 recordSendHistory）
     sendHistoryFullBody: z.boolean(),
+    // 监控曲线落库（写入方在 metrics-handlers 的 recordSnapshot）：默认关，
+    // 开着它才会按刷新节奏往 SQLite 写点
+    metricsSnapshotEnabled: z.boolean(),
+    // 快照保留天数，写入与读取两侧都按它清
+    metricsRetentionDays: z.number().int().min(1).max(90),
 });
 
 type AppSettingsField = keyof AppSettings;
@@ -145,11 +152,14 @@ export const ConfigImportSchema = z.object({
     format: z.literal(EXPORT_FORMAT),
     version: z.literal(EXPORT_VERSION),
     // fontSize 是后加的一档：之前导出的文件里没有这个键，缺省时保持当前档位而不是整包报错
-    // statusRefreshSeconds / sendHistoryFullBody 同理——老导出文件里没有它们，缺省用当前值而不是拒收整包
+    // statusRefreshSeconds / sendHistoryFullBody / metricsSnapshot* 同理——老导出文件里没有它们，
+    // 缺省用当前值而不是拒收整包
     settings: AppSettingsSchema.extend({
         fontSize: AppSettingsSchema.shape.fontSize.optional(),
         statusRefreshSeconds: AppSettingsSchema.shape.statusRefreshSeconds.optional(),
         sendHistoryFullBody: AppSettingsSchema.shape.sendHistoryFullBody.optional(),
+        metricsSnapshotEnabled: AppSettingsSchema.shape.metricsSnapshotEnabled.optional(),
+        metricsRetentionDays: AppSettingsSchema.shape.metricsRetentionDays.optional(),
     }),
     clusters: z.array(ExportedClusterSchema).max(200),
     shortcuts: ExportedShortcutsSchema.nullable().optional(),

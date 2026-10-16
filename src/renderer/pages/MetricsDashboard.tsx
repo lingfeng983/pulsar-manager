@@ -14,7 +14,7 @@ import PageShell from '../components/common/PageShell';
 import StateBlock from '../components/common/StateBlock';
 import ErrorBanner from '../components/common/ErrorBanner';
 import ChartCard from '../components/metrics/ChartCard';
-import type {ClusterTopology} from '../types';
+import type {ClusterTopology, MetricsSnapshot} from '../types';
 
 const {RangePicker} = DatePicker;
 
@@ -51,6 +51,37 @@ const EMPTY_HISTORY: MultiMetricsHistory = {
     throughputOut: [],
     backlog: [],
 };
+
+// 内存曲线窗口。以前是 60 个点（一次会话的量），留存上线后种子历史会远多于它，
+// 所以窗口放宽：按默认 30s 刷新算约 16 小时，再早的点交给日期区间过滤器。
+const HISTORY_WINDOW = 2000;
+
+// 库里的快照行摊回五条序列：形状与内存点完全一致，图上分不出来源。
+const toHistory = (rows: MetricsSnapshot[]): MultiMetricsHistory => ({
+    msgRateIn: rows.map(row => ({timestamp: row.capturedAt, value: row.msgRateIn})),
+    msgRateOut: rows.map(row => ({timestamp: row.capturedAt, value: row.msgRateOut})),
+    throughputIn: rows.map(row => ({timestamp: row.capturedAt, value: row.throughputIn})),
+    throughputOut: rows.map(row => ({timestamp: row.capturedAt, value: row.throughputOut})),
+    backlog: rows.map(row => ({timestamp: row.capturedAt, value: row.backlog})),
+});
+
+// 按时间戳去重合并：同一毫秒只留后写入的那个值，再升序排回来直接当 x 轴用。
+const mergeSeries = (seeded: MetricsData[], live: MetricsData[]): MetricsData[] => {
+    const byTimestamp = new Map<number, number>();
+    [...seeded, ...live].forEach(point => byTimestamp.set(point.timestamp, point.value));
+    return [...byTimestamp.entries()]
+        .sort((a, b) => a[0] - b[0])
+        .slice(-HISTORY_WINDOW)
+        .map(([timestamp, value]) => ({timestamp, value}));
+};
+
+const mergeHistory = (seeded: MultiMetricsHistory, live: MultiMetricsHistory): MultiMetricsHistory => ({
+    msgRateIn: mergeSeries(seeded.msgRateIn, live.msgRateIn),
+    msgRateOut: mergeSeries(seeded.msgRateOut, live.msgRateOut),
+    throughputIn: mergeSeries(seeded.throughputIn, live.throughputIn),
+    throughputOut: mergeSeries(seeded.throughputOut, live.throughputOut),
+    backlog: mergeSeries(seeded.backlog, live.backlog),
+});
 
 // 三套主题共用的 ECharts 基色：文字/坐标轴/分割线/tooltip 全部从 CSS 变量读，
 // 否则暗色主题下轴标签是默认深灰，整张图糊成一片。
@@ -102,6 +133,16 @@ const zoomControls = (p: TopologyPalette) => ({
     },
 });
 
+// 留存上线后一条曲线可能横跨几天，只写时分的话周一 10:00 和周二 10:00
+// 会是同一个标签；跨度超过一天就带上日期。
+const spanAwareTimeFormat = (timestamps: number[]): string => {
+    if (timestamps.length < 2) {
+        return 'HH:mm:ss';
+    }
+    const span = Math.max(...timestamps) - Math.min(...timestamps);
+    return span > 24 * 3600 * 1000 ? 'MM-DD HH:mm' : 'HH:mm:ss';
+};
+
 // 时序折线图配置
 const createTimeSeriesOption = (
     title: string,
@@ -112,6 +153,7 @@ const createTimeSeriesOption = (
     scale: number,
 ): EChartsOption => {
     const axes = seriesAxes(palette, scale);
+    const labelFormat = spanAwareTimeFormat(data.map(d => d.timestamp));
     return {
         title: seriesTitle(palette, title, scale),
         ...zoomControls(palette),
@@ -120,7 +162,7 @@ const createTimeSeriesOption = (
             ...seriesTooltip(palette, scale),
             formatter: (params: any) => {
                 const point = params[0];
-                return `${dayjs(point.value[0]).format('HH:mm:ss')}<br/>${point.value[1].toFixed(2)} ${unit}`;
+                return `${dayjs(point.value[0]).format(labelFormat)}<br/>${point.value[1].toFixed(2)} ${unit}`;
             },
         },
         grid: {left: '3%', right: '4%', bottom: '3%', top: '40px', containLabel: true},
@@ -129,7 +171,7 @@ const createTimeSeriesOption = (
             ...axes,
             axisLabel: {
                 ...axes.axisLabel,
-                formatter: (value: number) => dayjs(value).format('HH:mm:ss'),
+                formatter: (value: number) => dayjs(value).format(labelFormat),
             },
         },
         yAxis: {
@@ -236,6 +278,13 @@ const topicKey = (t: TopologyTopic) =>
 // 的入参校验只收短名（正则不含斜杠），所以取最后一段。
 const shortTopicName = (fullName: string) => fullName.split('/').pop() ?? fullName;
 
+// 采样口径的落库键：集群总体用空串，单个 topic 用完整 URI。
+// URI 取 `persistent://tenant/ns/短名`，与发送历史、页签 id 用的是同一写法。
+const scopeUriOf = (topic?: TopologyTopic): string =>
+    topic
+        ? `${topic.persistent ? 'persistent' : 'non-persistent'}://${topic.tenant}/${topic.namespace}/${shortTopicName(topic.name)}`
+        : '';
+
 const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
     const palette = useTopologyPalette();
     const fontScale = useFontFactor();
@@ -254,6 +303,8 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
     // 关掉自动刷新等价于选择"手动"，两处状态不会各说各话。
     const autoRefresh = useSettingsStore(state => state.settings.autoRefresh);
     const refreshIntervalSeconds = useSettingsStore(state => state.settings.refreshIntervalSeconds);
+    const metricsSnapshotEnabled = useSettingsStore(state => state.settings.metricsSnapshotEnabled);
+    const metricsRetentionDays = useSettingsStore(state => state.settings.metricsRetentionDays);
     const updateSettings = useSettingsStore(state => state.update);
     const refreshInterval = autoRefresh ? refreshIntervalSeconds : 0;
     const [dateRange, setDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null);
@@ -308,19 +359,40 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
     );
 
     // 一次采样写入五条序列：集群维度与 topic 维度只是数值来源不同，历史窗口
-    // （60 个点）和单位都一样，所以两边共用这一份写入逻辑。
-    const pushSample = useCallback((sample: AggregatedStats) => {
-        const now = Date.now();
-        const maxPoints = 60;
-        const point = (value: number) => ({timestamp: now, value});
-        setMetricsHistory(prev => ({
-            msgRateIn: [...prev.msgRateIn, point(sample.totalMsgRateIn)].slice(-maxPoints),
-            msgRateOut: [...prev.msgRateOut, point(sample.totalMsgRateOut)].slice(-maxPoints),
-            throughputIn: [...prev.throughputIn, point(sample.totalThroughputIn)].slice(-maxPoints),
-            throughputOut: [...prev.throughputOut, point(sample.totalThroughputOut)].slice(-maxPoints),
-            backlog: [...prev.backlog, point(sample.totalBacklog)].slice(-maxPoints),
-        }));
-    }, []);
+    // 和单位都一样，所以两边共用这一份写入逻辑。
+    // 留存开关打开时同一个点再落一份到 SQLite——曲线窗口因此不再等于"本次会话"，
+    // 切页签、重启进程都还接得上历史（以前重启即归零）。
+    const pushSample = useCallback(
+        (sample: AggregatedStats, scopeUri: string) => {
+            const now = Date.now();
+            const point = (value: number) => ({timestamp: now, value});
+            setMetricsHistory(prev => ({
+                msgRateIn: [...prev.msgRateIn, point(sample.totalMsgRateIn)].slice(-HISTORY_WINDOW),
+                msgRateOut: [...prev.msgRateOut, point(sample.totalMsgRateOut)].slice(-HISTORY_WINDOW),
+                throughputIn: [...prev.throughputIn, point(sample.totalThroughputIn)].slice(-HISTORY_WINDOW),
+                throughputOut: [...prev.throughputOut, point(sample.totalThroughputOut)].slice(-HISTORY_WINDOW),
+                backlog: [...prev.backlog, point(sample.totalBacklog)].slice(-HISTORY_WINDOW),
+            }));
+            if (!metricsSnapshotEnabled || !selectedCluster) {
+                return;
+            }
+            // 落库不阻塞曲线：写失败（库被占、集群行已删）只是这一轮少个点，
+            void window.electronAPI.metrics
+                .recordSnapshot({
+                    clusterId: selectedCluster,
+                    topicUri: scopeUri,
+                    msgRateIn: sample.totalMsgRateIn,
+                    msgRateOut: sample.totalMsgRateOut,
+                    throughputIn: sample.totalThroughputIn,
+                    throughputOut: sample.totalThroughputOut,
+                    backlog: sample.totalBacklog,
+                    producers: sample.totalProducers,
+                    consumers: sample.totalConsumers,
+                })
+                .catch(() => undefined);
+        },
+        [metricsSnapshotEnabled, selectedCluster],
+    );
 
     // topic 维度候选：一次拓扑请求就够，拓扑结果里每个 topic 都带着
     // tenant/namespace/持久性，正好是取该 topic 统计所需的三元组，不必再逐层展开资源树。
@@ -395,7 +467,7 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                         totalBacklog: s.backlogSize,
                     };
                     setStats(sample);
-                    pushSample(sample);
+                    pushSample(sample, scopeUriOf(topic));
                     // 归属拿得到就报归属；归属不可用时退回集群活跃列表并照实标注，
                     // 否则界面上一个"归属 Broker 0"会被读成这个 topic 没有 broker。
                     if (s.ownerBrokers?.length) {
@@ -422,7 +494,7 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
             }
             if (statsResponse.success && statsResponse.data) {
                 setStats(statsResponse.data);
-                pushSample(statsResponse.data);
+                pushSample(statsResponse.data, '');
             } else {
                 setError(statsResponse.error || '获取统计数据失败');
             }
@@ -463,6 +535,38 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
         setError(null);
         setLoading(false);
     }, [selectedCluster, selectedTopic]);
+
+    // 切换维度后把库里留过的点铺回曲线（清空在上一个 effect 里同步做完，这里异步落地）。
+    // 种子与本轮新采的点可能撞在同一毫秒——切完维度立刻刷了一次——所以合并去重而不是整份覆盖。
+    useEffect(() => {
+        if (!selectedCluster || !metricsSnapshotEnabled) {
+            return;
+        }
+        const topic = selectedTopic ? topics.find(t => topicKey(t) === selectedTopic) : undefined;
+        if (selectedTopic && !topic) {
+            // topic 候选还没回来的那一帧：这一轮跳过，否则会把集群口径的历史画到 topic 上
+            return;
+        }
+        let cancelled = false;
+        window.electronAPI.metrics
+            .listSnapshots({
+                clusterId: selectedCluster,
+                topicUri: scopeUriOf(topic),
+                hours: metricsRetentionDays * 24,
+                limit: HISTORY_WINDOW,
+            })
+            .then(response => {
+                if (cancelled || !response.success || !response.data?.length) {
+                    return;
+                }
+                const seeded = toHistory(response.data);
+                setMetricsHistory(prev => mergeHistory(seeded, prev));
+            })
+            .catch(() => undefined);
+        return () => {
+            cancelled = true;
+        };
+    }, [selectedCluster, selectedTopic, topics, metricsSnapshotEnabled, metricsRetentionDays]);
 
     useCommand('refreshMetrics', () => {
         void loadAggregatedStats();
@@ -512,12 +616,14 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
 
         if (filteredIn.length === 0) return [];
 
+        const labelFormat = spanAwareTimeFormat(filteredIn.map(d => d.timestamp));
+
         // 按时间戳配对，而不是按下标：两条序列各由过滤得到，一旦点位不齐
         // 下标对齐就会把某个时刻的入向配到另一时刻的出向，柱子高矮全错。
         const outByTimestamp = new Map(filteredOut.map(d => [d.timestamp, d.value]));
 
         return filteredIn.map(d => ({
-            time: dayjs(d.timestamp).format('HH:mm'),
+            time: dayjs(d.timestamp).format(labelFormat),
             // 源数据单位是字节/秒，图表轴标注的是 KB/s，这里必须换算
             in: toKilobytesPerSecond(d.value),
             out: toKilobytesPerSecond(outByTimestamp.get(d.timestamp) ?? 0),

@@ -138,6 +138,73 @@ export class PulsarAdminClient {
         return this.resourceAPI.deleteTopic(tenant, namespace, topic, persistent);
     }
 
+    // ========== Schema 注册表操作 ==========
+
+    async getSchemaInfo(tenant: string, namespace: string, topic: string, persistent: boolean = true) {
+        return this.resourceAPI.getSchemaInfo(tenant, namespace, topic, persistent);
+    }
+
+    async createSchemaVersion(
+        tenant: string,
+        namespace: string,
+        topic: string,
+        info: {type: string; schema: string},
+        persistent: boolean = true,
+    ) {
+        return this.resourceAPI.createSchemaVersion(tenant, namespace, topic, info, persistent);
+    }
+
+    async deleteSchema(tenant: string, namespace: string, topic: string, persistent: boolean = true) {
+        return this.resourceAPI.deleteSchema(tenant, namespace, topic, persistent);
+    }
+
+    async getSchemaCompatibilityStrategy(tenant: string, namespace: string, topic: string, persistent: boolean = true) {
+        return this.resourceAPI.getSchemaCompatibilityStrategy(tenant, namespace, topic, persistent);
+    }
+
+    async setSchemaCompatibilityStrategy(
+        tenant: string,
+        namespace: string,
+        topic: string,
+        strategy: string,
+        persistent: boolean = true,
+    ) {
+        return this.resourceAPI.setSchemaCompatibilityStrategy(tenant, namespace, topic, strategy, persistent);
+    }
+
+    // ========== 权限（ACL）==========
+
+    async getNamespacePermissions(tenant: string, namespace: string) {
+        return this.resourceAPI.getNamespacePermissions(tenant, namespace);
+    }
+
+    async grantNamespacePermission(tenant: string, namespace: string, role: string, actions: string[]) {
+        return this.resourceAPI.grantNamespacePermission(tenant, namespace, role, actions);
+    }
+
+    async revokeNamespacePermission(tenant: string, namespace: string, role: string) {
+        return this.resourceAPI.revokeNamespacePermission(tenant, namespace, role);
+    }
+
+    async getTopicPermissions(tenant: string, namespace: string, topic: string, persistent: boolean = true) {
+        return this.resourceAPI.getTopicPermissions(tenant, namespace, topic, persistent);
+    }
+
+    async grantTopicPermission(
+        tenant: string,
+        namespace: string,
+        topic: string,
+        role: string,
+        actions: string[],
+        persistent: boolean = true,
+    ) {
+        return this.resourceAPI.grantTopicPermission(tenant, namespace, topic, role, actions, persistent);
+    }
+
+    async revokeTopicPermission(tenant: string, namespace: string, topic: string, role: string, persistent = true) {
+        return this.resourceAPI.revokeTopicPermission(tenant, namespace, topic, role, persistent);
+    }
+
     // ========== 订阅操作 ==========
 
     async getSubscriptions(tenant: string, namespace: string, topic: string, persistent: boolean = true) {

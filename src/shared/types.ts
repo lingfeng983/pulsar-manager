@@ -619,6 +619,44 @@ export interface ConsumerSessionInfo {
     pendingAcks: number;
 }
 
+// ========== Topic 的 broker Schema 注册表 ==========
+//
+// Admin REST /schemas 端点返回的 SchemaInfo。这是 broker 侧的「主题 schema」，
+// 与模板发送时的内联 JSON Schema 校验（见 json-schema-lite）是两回事：
+// 前者约束 broker 如何序列化/校验落到存储的报文，后者只是客户端发送前的自检。
+
+// broker 认识的 schema 类型；NONE 或读不到视为该 topic 未注册 schema。
+export type BrokerSchemaType = 'NONE' | 'STRING' | 'JSON' | 'AVRO' | 'PARQUET' | 'BSON';
+
+export interface BrokerSchemaInfo {
+    type: string;
+    // 定义体：AVRO/JSON 是 schema 文本，STRING 通常为空，PARQUET/BSON 可能是内联描述
+    schema?: string;
+    properties?: Record<string, string>;
+    // broker 侧的版本号（自增）与创建时间（毫秒时间戳）
+    version?: number;
+    timestamp?: number;
+}
+
+// schema 兼容性策略：新增/演化 schema 时 broker 用什么规则放行。
+export type SchemaCompatibilityPolicy =
+    | 'ALWAYS'
+    | 'BACKWARD'
+    | 'BACKWARD_TRANSITIVE'
+    | 'FORWARD'
+    | 'FORWARD_TRANSITIVE'
+    | 'FULL'
+    | 'FULL_TRANSITIVE'
+    | 'NEVER';
+
+// ========== 权限（ACL）==========
+
+// broker 的 AuthAction 只有这两个值，字面量全小写。
+export type PulsarAuthAction = 'produce' | 'consume';
+
+// role -> 动作列表；broker 返回的就是这张 Map，未授权的角色不会出现在里面。
+export type PermissionMap = Record<string, string[]>;
+
 // ========== 发送历史 ==========
 
 export interface SendHistoryEntry {
@@ -796,6 +834,38 @@ export interface AppSettings {
     statusRefreshSeconds: number;
     // 发送历史是否连带正文全文落库（单行上限 512KB），关掉就只留 400 字符前缀。
     sendHistoryFullBody: boolean;
+    // 监控曲线是否落库；关掉后趋势图只剩本次会话的内存点。
+    metricsSnapshotEnabled: boolean;
+    // 快照保留天数，写入侧顺带按它清理旧行。
+    metricsRetentionDays: number;
+}
+
+// ========== 监控时序快照 ==========
+
+// 一次轮询采到的一组同刻数值。topicUri 为空串表示「集群总体」口径。
+export interface MetricsSnapshot {
+    clusterId: string;
+    topicUri: string;
+    msgRateIn: number;
+    msgRateOut: number;
+    throughputIn: number;
+    throughputOut: number;
+    backlog: number;
+    producers: number;
+    consumers: number;
+    // epoch 毫秒
+    capturedAt: number;
+}
+
+// 渲染层上报的采样点：不带 capturedAt，写入侧统一用主进程时钟。
+export type MetricsSnapshotInput = Omit<MetricsSnapshot, 'capturedAt'>;
+
+export interface MetricsSnapshotQuery {
+    clusterId: string;
+    // 空串 = 集群总体口径
+    topicUri?: string;
+    hours?: number;
+    limit?: number;
 }
 
 export interface ExportedSshConfig {

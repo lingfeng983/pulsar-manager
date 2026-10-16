@@ -51,6 +51,14 @@ import type {
     TopicConfig,
     TopicConfigPatch,
     TopicStats,
+    BrokerSchemaInfo,
+    BrokerSchemaType,
+    SchemaCompatibilityPolicy,
+    PulsarAuthAction,
+    PermissionMap,
+    MetricsSnapshot,
+    MetricsSnapshotInput,
+    MetricsSnapshotQuery,
     TopologyLimits,
 } from './shared/types';
 
@@ -181,6 +189,109 @@ contextBridge.exposeInMainWorld('electronAPI', {
         deleteTopic: (clusterId: string, tenant: string, namespace: string, topic: string, persistent?: boolean) =>
             ipcRenderer.invoke('resources:deleteTopic', clusterId, tenant, namespace, topic, persistent),
 
+        getSchema: (clusterId: string, tenant: string, namespace: string, topic: string, persistent?: boolean) =>
+            ipcRenderer.invoke('resources:getSchema', clusterId, tenant, namespace, topic, persistent),
+        getSchemaStrategy: (
+            clusterId: string,
+            tenant: string,
+            namespace: string,
+            topic: string,
+            persistent?: boolean,
+        ) => ipcRenderer.invoke('resources:getSchemaStrategy', clusterId, tenant, namespace, topic, persistent),
+        setSchemaStrategy: (
+            clusterId: string,
+            tenant: string,
+            namespace: string,
+            topic: string,
+            strategy: SchemaCompatibilityPolicy,
+            persistent?: boolean,
+        ) =>
+            ipcRenderer.invoke(
+                'resources:setSchemaStrategy',
+                clusterId,
+                tenant,
+                namespace,
+                topic,
+                strategy,
+                persistent,
+            ),
+        createSchemaVersion: (
+            clusterId: string,
+            tenant: string,
+            namespace: string,
+            topic: string,
+            type: BrokerSchemaType,
+            definition: string,
+            persistent?: boolean,
+        ) =>
+            ipcRenderer.invoke(
+                'resources:createSchemaVersion',
+                clusterId,
+                tenant,
+                namespace,
+                topic,
+                type,
+                definition,
+                persistent,
+            ),
+        deleteSchema: (clusterId: string, tenant: string, namespace: string, topic: string, persistent?: boolean) =>
+            ipcRenderer.invoke('resources:deleteSchema', clusterId, tenant, namespace, topic, persistent),
+
+        getNamespacePermissions: (clusterId: string, tenant: string, namespace: string) =>
+            ipcRenderer.invoke('resources:getNamespacePermissions', clusterId, tenant, namespace),
+        grantNamespacePermission: (
+            clusterId: string,
+            tenant: string,
+            namespace: string,
+            role: string,
+            actions: PulsarAuthAction[],
+        ) => ipcRenderer.invoke('resources:grantNamespacePermission', clusterId, tenant, namespace, role, actions),
+        revokeNamespacePermission: (clusterId: string, tenant: string, namespace: string, role: string) =>
+            ipcRenderer.invoke('resources:revokeNamespacePermission', clusterId, tenant, namespace, role),
+        getTopicPermissions: (
+            clusterId: string,
+            tenant: string,
+            namespace: string,
+            topic: string,
+            persistent?: boolean,
+        ) => ipcRenderer.invoke('resources:getTopicPermissions', clusterId, tenant, namespace, topic, persistent),
+        grantTopicPermission: (
+            clusterId: string,
+            tenant: string,
+            namespace: string,
+            topic: string,
+            role: string,
+            actions: PulsarAuthAction[],
+            persistent?: boolean,
+        ) =>
+            ipcRenderer.invoke(
+                'resources:grantTopicPermission',
+                clusterId,
+                tenant,
+                namespace,
+                topic,
+                role,
+                actions,
+                persistent,
+            ),
+        revokeTopicPermission: (
+            clusterId: string,
+            tenant: string,
+            namespace: string,
+            topic: string,
+            role: string,
+            persistent?: boolean,
+        ) =>
+            ipcRenderer.invoke(
+                'resources:revokeTopicPermission',
+                clusterId,
+                tenant,
+                namespace,
+                topic,
+                role,
+                persistent,
+            ),
+
         // Pulsar 侧集群名称列表，创建租户时 allowedClusters 用这里的值
         getPulsarClusters: (clusterId: string) => ipcRenderer.invoke('resources:getPulsarClusters', clusterId),
         createTenant: (clusterId: string, name: string, adminRoles: string[], allowedClusters: string[]) =>
@@ -281,6 +392,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     metrics: {
         getAggregatedStats: (clusterId: string) => ipcRenderer.invoke('metrics:getAggregatedStats', clusterId),
         getBrokers: (clusterId: string) => ipcRenderer.invoke('metrics:getBrokers', clusterId),
+        recordSnapshot: (snapshot: MetricsSnapshotInput) => ipcRenderer.invoke('metrics:recordSnapshot', snapshot),
+        listSnapshots: (query: MetricsSnapshotQuery) => ipcRenderer.invoke('metrics:listSnapshots', query),
     },
 
     // 拓扑
@@ -453,6 +566,86 @@ declare global {
                     topic: string,
                     persistent?: boolean,
                 ) => Promise<APIResponse<void>>;
+                getSchema: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                    topic: string,
+                    persistent?: boolean,
+                ) => Promise<APIResponse<BrokerSchemaInfo | null>>;
+                getSchemaStrategy: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                    topic: string,
+                    persistent?: boolean,
+                ) => Promise<APIResponse<{strategy: string | null; scope: 'topic' | 'namespace'}>>;
+                setSchemaStrategy: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                    topic: string,
+                    strategy: SchemaCompatibilityPolicy,
+                    persistent?: boolean,
+                ) => Promise<APIResponse<void>>;
+                createSchemaVersion: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                    topic: string,
+                    type: BrokerSchemaType,
+                    definition: string,
+                    persistent?: boolean,
+                ) => Promise<APIResponse<BrokerSchemaInfo>>;
+                deleteSchema: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                    topic: string,
+                    persistent?: boolean,
+                ) => Promise<APIResponse<void>>;
+                getNamespacePermissions: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                ) => Promise<APIResponse<PermissionMap>>;
+                grantNamespacePermission: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                    role: string,
+                    actions: PulsarAuthAction[],
+                ) => Promise<APIResponse<void>>;
+                revokeNamespacePermission: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                    role: string,
+                ) => Promise<APIResponse<void>>;
+                getTopicPermissions: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                    topic: string,
+                    persistent?: boolean,
+                ) => Promise<APIResponse<PermissionMap>>;
+                grantTopicPermission: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                    topic: string,
+                    role: string,
+                    actions: PulsarAuthAction[],
+                    persistent?: boolean,
+                ) => Promise<APIResponse<void>>;
+                revokeTopicPermission: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                    topic: string,
+                    role: string,
+                    persistent?: boolean,
+                ) => Promise<APIResponse<void>>;
                 getPulsarClusters: (clusterId: string) => Promise<APIResponse<string[]>>;
                 createTenant: (
                     clusterId: string,
@@ -537,6 +730,8 @@ declare global {
             metrics: {
                 getAggregatedStats: (clusterId: string) => Promise<APIResponse<AggregatedStats>>;
                 getBrokers: (clusterId: string) => Promise<APIResponse<BrokerInfo>>;
+                recordSnapshot: (snapshot: MetricsSnapshotInput) => Promise<APIResponse<null>>;
+                listSnapshots: (query: MetricsSnapshotQuery) => Promise<APIResponse<MetricsSnapshot[]>>;
             };
             topology: {
                 getClusterTopology: (

@@ -205,6 +205,33 @@ export const SubscriptionPathSchema = TopicPathSchema.extend({
     subscription: SubscriptionSchema,
 });
 
+// broker 侧 schema 兼容性策略的八个枚举值，与 SchemasImpl/SchemaCompatibilityCheck 一致。
+// topic 级读写需要 Pulsar 3.0+，旧 broker 返回 404，由服务层转成人话。
+export const SCHEMA_COMPATIBILITY_STRATEGIES = [
+    'ALWAYS',
+    'BACKWARD',
+    'BACKWARD_TRANSITIVE',
+    'FORWARD',
+    'FORWARD_TRANSITIVE',
+    'FULL',
+    'FULL_TRANSITIVE',
+    'NEVER',
+] as const;
+
+export const SchemaStrategySchema = TopicPathSchema.extend({
+    strategy: z.enum(SCHEMA_COMPATIBILITY_STRATEGIES),
+});
+
+// 创建只放开义本定义可用的类型：PROTOBUF/PARQUET 需要二进制 descriptor，
+// 文本框里贴不进去，放行只会让 broker 回一句看不懂的解析错误。
+export const CreateSchemaVersionSchema = TopicPathSchema.extend({
+    type: z.enum(['STRING', 'JSON', 'AVRO', 'BSON']),
+    definition: z
+        .string()
+        .min(1)
+        .max(256 * 1024),
+});
+
 export const SkipMessagesSchema = SubscriptionPathSchema.extend({
     count: z.number().int().positive().max(100000),
 });
@@ -292,6 +319,29 @@ export const CreateNamespaceSchema = z.object({
     clusterId: ClusterIdSchema,
     tenant: TenantSchema,
     name: NamespaceSchema,
+});
+
+// ACL 动作只有这两个，字面量按 broker 的枚举（全小写）；角色名与 broker 侧一样
+// 允许冒号（proxy 转发时的 original_principal 形态就是 "proxy-svc:role"）。
+export const AUTH_ACTIONS = ['produce', 'consume'] as const;
+export const AuthRoleSchema = z.string().trim().min(1).max(255);
+
+export const GrantPermissionSchema = NamespacePathSchema.extend({
+    role: AuthRoleSchema,
+    actions: z.array(z.enum(AUTH_ACTIONS)).min(1).max(2),
+});
+
+export const RevokePermissionSchema = NamespacePathSchema.extend({
+    role: AuthRoleSchema,
+});
+
+export const GrantTopicPermissionSchema = TopicPathSchema.extend({
+    role: AuthRoleSchema,
+    actions: z.array(z.enum(AUTH_ACTIONS)).min(1).max(2),
+});
+
+export const RevokeTopicPermissionSchema = TopicPathSchema.extend({
+    role: AuthRoleSchema,
 });
 
 // partitions = 0 表示非分区 topic：这两条路径在 Admin API 里是不同的端点，

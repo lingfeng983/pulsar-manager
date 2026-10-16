@@ -10,7 +10,7 @@ let db: Database.Database | null = null;
 // schema 版本以 user_version 跟踪。改基线 DDL 时：升 SCHEMA_VERSION，
 // 并把该版本的增量 DDL 写进 migrate()——CREATE TABLE IF NOT EXISTS 对已存在的
 // 旧库什么都不做，没有这套机制，加列只会对新装用户生效，旧库静默落后。
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 
 function migrate(database: Database.Database, from: number): void {
     // v2：refreshInterval 那行出厂值是 30000，而监控页的刷新间隔单位是秒，
@@ -47,6 +47,9 @@ function migrate(database: Database.Database, from: number): void {
             database.prepare('ALTER TABLE send_history ADD COLUMN body_full TEXT').run();
         }
     }
+    // v8：监控时序快照表 metrics_snapshots。只加新表、没有旧列要补，
+    // 启动时执行的那遍基线 DDL 已经把表建好（CREATE TABLE IF NOT EXISTS 对老库同样生效），
+    // 这段留着只为说明 v8 确实做过事，与 v5 同一个理由。
 }
 
 // 每次启动都执行基线再补迁移：基线全是幂等语句，因此旧库缺的表和出厂设置行
@@ -640,6 +643,80 @@ export function cleanupSendHistory(maxRows: number = 2000): void {
             .run(deleteCount);
         console.log(`[Database] Cleaned up ${deleteCount} old send history rows`);
     }
+}
+
+// 监控时序快照（metrics_snapshots）。一次轮询采到的是一组同刻数值，所以整行存、
+// 不按 metric 拆行——趋势图取的是一个维度的一段区间，行式一次就能拿齐五条序列。
+export interface MetricsSnapshotRecord {
+    cluster_id: string;
+    // 空串 = 集群总体口径；与 message_templates 用空串表示通用作用域同一个约定
+    topic_uri: string;
+    msg_rate_in: number;
+    msg_rate_out: number;
+    throughput_in: number;
+    throughput_out: number;
+    backlog: number;
+    producers: number;
+    consumers: number;
+    // epoch 毫秒：趋势查询按数值比较时间范围
+    captured_at: number;
+}
+
+// 同一刻重复采到同一口径（手动刷新撞上定时刷新）走 REPLACE，而不是攒两行相同点，
+// 否则柱状图会在同一时间轴上并排出两根一模一样的柱子。
+export function insertMetricsSnapshot(entry: MetricsSnapshotRecord): void {
+    const database = getDatabase();
+    database
+        .prepare(
+            `INSERT OR REPLACE INTO metrics_snapshots (
+               cluster_id, topic_uri, msg_rate_in, msg_rate_out, throughput_in, throughput_out,
+               backlog, producers, consumers, captured_at
+             ) VALUES (
+               @cluster_id, @topic_uri, @msg_rate_in, @msg_rate_out, @throughput_in, @throughput_out,
+               @backlog, @producers, @consumers, @captured_at
+             )`,
+        )
+        .run(entry);
+}
+
+// 取最近 limit 条按倒序截断、再翻回升序返回，渲染层直接当时间轴用。
+export function listMetricsSnapshots(
+    clusterId: string,
+    topicUri: string,
+    sinceMs: number,
+    limit: number,
+): MetricsSnapshotRecord[] {
+    const database = getDatabase();
+    return (
+        database
+            .prepare(
+                `SELECT cluster_id, topic_uri, msg_rate_in, msg_rate_out, throughput_in, throughput_out,
+                        backlog, producers, consumers, captured_at
+                 FROM metrics_snapshots
+                 WHERE cluster_id = ? AND topic_uri = ? AND captured_at >= ?
+                 ORDER BY captured_at DESC LIMIT ?`,
+            )
+            .all(clusterId, topicUri, sinceMs, limit) as MetricsSnapshotRecord[]
+    ).reverse();
+}
+
+// 保留策略：先按天数清，再按总行数兜底。采样间隔跟着监控页的刷新节奏走（最快几秒一点），
+// 只按天数清的话极端设置下一周能攒几十万行；行数上限是最后一道闸。
+export function cleanupMetricsSnapshots(retentionDays: number, maxRows: number = 200_000): number {
+    const database = getDatabase();
+    const cutoff = Date.now() - retentionDays * 24 * 3600 * 1000;
+    const byAge = database.prepare('DELETE FROM metrics_snapshots WHERE captured_at < ?').run(cutoff);
+    const count = database.prepare('SELECT COUNT(*) as count FROM metrics_snapshots').get() as {count: number};
+    let byRows = 0;
+    if (count.count > maxRows) {
+        byRows = database
+            .prepare(
+                `DELETE FROM metrics_snapshots
+                 WHERE id IN (SELECT id FROM metrics_snapshots ORDER BY captured_at ASC LIMIT ?)`,
+            )
+            .run(count.count - maxRows).changes;
+    }
+    return byAge.changes + byRows;
 }
 
 // 用户设置相关操作

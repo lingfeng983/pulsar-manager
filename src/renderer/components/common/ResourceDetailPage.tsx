@@ -39,6 +39,8 @@ interface ResourceDetailPageProps<T extends object> {
     columns: TableColumnsType<T>;
     dataSource: T[];
     rowKey: TableProps<T>['rowKey'];
+    /** 列表之后的附加页签（权限这类成块的操作区放这里，不塞进概览卡片） */
+    extraTabs?: {key: string; label: ReactNode; children: ReactNode}[];
 }
 
 // 租户详情与命名空间详情同构：概览（统计卡 + 信息区）+ 下级资源列表。
@@ -62,6 +64,7 @@ function ResourceDetailPage<T extends object>({
     columns,
     dataSource,
     rowKey,
+    extraTabs,
 }: ResourceDetailPageProps<T>) {
     const overview = (
         <>
@@ -120,6 +123,7 @@ function ResourceDetailPage<T extends object>({
                     items={[
                         {key: 'overview', label: overviewLabel, children: overview},
                         {key: 'list', label: listLabel, children: list},
+                        ...(extraTabs ?? []),
                     ]}
                 />
             </StateBlock>

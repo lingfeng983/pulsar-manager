@@ -21,6 +21,7 @@ import dayjs from 'dayjs';
 import {
     DatabaseOutlined,
     DownloadOutlined,
+    LockOutlined,
     MessageOutlined,
     UserOutlined,
     SettingOutlined,
@@ -40,6 +41,8 @@ import {useCommand, PaneActiveContext} from '../hooks/useKeybindings';
 import PageShell from '../components/common/PageShell';
 import StateBlock from '../components/common/StateBlock';
 import {useConfirmDanger} from '../components/common/dangerConfirm';
+import TopicSchemaTab from '../components/topic/TopicSchemaTab';
+import PermissionsPanel from '../components/common/PermissionsPanel';
 
 interface TopicDetailProps {
     clusterId: string;
@@ -873,6 +876,38 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                                 // 内层页签是 display:none 而非卸载，会话得靠这个标记停掉，
                                 // 否则切到概览后消息浏览器还在后台收消息。
                                 active={activeTab === 'messages'}
+                            />
+                        ),
+                    },
+                    {
+                        key: 'schema',
+                        label: 'Schema',
+                        icon: <DatabaseOutlined />,
+                        children: (
+                            <TopicSchemaTab
+                                clusterId={clusterId}
+                                tenant={tenant}
+                                namespace={namespace}
+                                topic={topic}
+                                persistent={persistent}
+                                active={activeTab === 'schema'}
+                            />
+                        ),
+                    },
+                    {
+                        key: 'permissions',
+                        label: '权限',
+                        icon: <LockOutlined />,
+                        children: (
+                            <PermissionsPanel
+                                scope="topic"
+                                clusterId={clusterId}
+                                tenant={tenant}
+                                namespace={namespace}
+                                topic={topic}
+                                persistent={persistent}
+                                // antd 页签只隐藏不卸载，首次激活再拉，避免打开详情页就多一轮 IPC
+                                active={activeTab === 'permissions'}
                             />
                         ),
                     },

@@ -47,6 +47,16 @@ const STATUS_REFRESH_OPTIONS = [
     {label: '仅启动时', value: 0},
 ];
 
+// 快照保留天数用预设而不是数字框：每敲一个字符就写一次设置没有意义，
+// 而"留多久"本来就只有几档常用值。
+const METRICS_RETENTION_OPTIONS = [
+    {label: '1 天', value: 1},
+    {label: '3 天', value: 3},
+    {label: '7 天', value: 7},
+    {label: '30 天', value: 30},
+    {label: '90 天', value: 90},
+];
+
 // 导入前的本地体检：文件选错（比如拿了日志导出）时给出人话提示，
 // 而不是把整包丢给主进程再回一句 zod 校验失败。
 function looksLikeConfigBundle(raw: unknown): raw is ConfigBundle {
@@ -279,6 +289,41 @@ const ConfigCenter: React.FC = () => {
                                         开启后发送历史连带整篇模板正文落库（单行上限 512
                                         KB），工作台的历史里才能原样重发； 关掉只留 400
                                         字符前缀。默认关：全文会让库持续变大。
+                                    </Text>
+                                </div>
+                            </div>
+                            <div>
+                                <Space size={4}>
+                                    <Text>监控曲线留存</Text>
+                                    <Switch
+                                        aria-label="监控曲线留存"
+                                        checked={settings.metricsSnapshotEnabled}
+                                        onChange={checked => void patch({metricsSnapshotEnabled: checked})}
+                                        size="small"
+                                    />
+                                </Space>
+                                <div style={{marginTop: 4}}>
+                                    <Text className="hint-text">
+                                        开启后监控页每次刷新都会把速率、吞吐与积压落库，切页签或重启应用后
+                                        趋势图仍有历史；关掉则曲线只活在本次会话的内存里。
+                                    </Text>
+                                </div>
+                            </div>
+                            <div>
+                                <Space size={4}>
+                                    <Text>快照保留</Text>
+                                    <Select
+                                        aria-label="快照保留天数"
+                                        size="small"
+                                        value={settings.metricsRetentionDays}
+                                        options={METRICS_RETENTION_OPTIONS}
+                                        style={{width: 120}}
+                                        onChange={value => void patch({metricsRetentionDays: value})}
+                                    />
+                                </Space>
+                                <div style={{marginTop: 4}}>
+                                    <Text className="hint-text">
+                                        超期的快照点在写入与读取时顺带清理，不额外跑定时器。
                                     </Text>
                                 </div>
                             </div>

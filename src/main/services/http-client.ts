@@ -292,6 +292,18 @@ export function normalizeError(error: AxiosError): Error {
     return new Error(condenseErrorText(error.message) || error.message);
 }
 
+// 授权端点要按 broker 版本换 HTTP 方法（POST 收 AuthPolicies / PUT 收动作数组），
+// 换方法的时机只能靠错误判定。但错误到这里已经被 normalizeError 压成一句话，状态码
+// 只剩结尾的「(405)」，所以只能按这句话认——同时把 404（NotFoundError）也算作
+// 「这条方法不存在」，有些部署对不认识的方法直接回 404。
+export function isHttpMethodRejected(error: unknown): boolean {
+    if (error instanceof NotFoundError) {
+        return true;
+    }
+    const message = String((error as Error)?.message ?? error ?? '');
+    return /\((405|501)\)$/.test(message) || /method not allowed/i.test(message);
+}
+
 // ========== Concurrency Control ==========
 
 // Semaphore 实现用于并发控制

@@ -127,6 +127,26 @@ CREATE TABLE IF NOT EXISTS send_history (
     FOREIGN KEY (cluster_id) REFERENCES clusters(id) ON DELETE SET NULL
 );
 
+-- 监控时序快照：以前监控页的曲线只活在组件 state 里，切页签、重启进程即归零。
+-- 这张表把每次轮询采到的点落库，topic_uri 用空串表示「集群总体」（与通用模板的
+-- 约定一致，也是唯一索引需要的非 NULL 值）；captured_at 存 epoch 毫秒而不是 ISO 串，
+-- 因为趋势查询按时间范围与时间轴排序，数值比较比字符串比较快也好写。
+CREATE TABLE IF NOT EXISTS metrics_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cluster_id TEXT NOT NULL,
+    topic_uri TEXT NOT NULL DEFAULT '',
+    msg_rate_in REAL NOT NULL DEFAULT 0,
+    msg_rate_out REAL NOT NULL DEFAULT 0,
+    throughput_in REAL NOT NULL DEFAULT 0,
+    throughput_out REAL NOT NULL DEFAULT 0,
+    backlog INTEGER NOT NULL DEFAULT 0,
+    producers INTEGER NOT NULL DEFAULT 0,
+    consumers INTEGER NOT NULL DEFAULT 0,
+    captured_at INTEGER NOT NULL,
+    UNIQUE (cluster_id, topic_uri, captured_at),
+    FOREIGN KEY (cluster_id) REFERENCES clusters(id) ON DELETE CASCADE
+);
+
 -- 创建索引
 CREATE INDEX IF NOT EXISTS idx_clusters_status ON clusters(status);
 CREATE INDEX IF NOT EXISTS idx_operation_logs_cluster_id ON operation_logs(cluster_id);
@@ -136,6 +156,7 @@ CREATE INDEX IF NOT EXISTS idx_message_templates_scope ON message_templates(clus
 CREATE INDEX IF NOT EXISTS idx_consumer_configs_scope ON consumer_session_configs(cluster_id, topic_uri);
 CREATE INDEX IF NOT EXISTS idx_send_history_scope ON send_history(cluster_id, topic_uri);
 CREATE INDEX IF NOT EXISTS idx_send_history_created_at ON send_history(created_at);
+CREATE INDEX IF NOT EXISTS idx_metrics_snapshots_scope ON metrics_snapshots(cluster_id, topic_uri, captured_at);
 
 -- 出厂默认设置（INSERT OR IGNORE：用户改过的值不会被启动流程覆盖回去）
 INSERT OR IGNORE INTO user_settings (key, value, updated_at) VALUES

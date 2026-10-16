@@ -7,6 +7,7 @@ import {shortName} from '../utils/format';
 import {matchesFilter} from '../utils/textFilter';
 import {topicTab} from '../utils/tabIds';
 import ResourceDetailPage, {type ResourceStat} from '../components/common/ResourceDetailPage';
+import PermissionsPanel from '../components/common/PermissionsPanel';
 
 interface NamespaceDetailProps {
     clusterId: string;
@@ -164,6 +165,20 @@ const NamespaceDetail: React.FC<NamespaceDetailProps> = ({clusterId, tenant, nam
             columns={topicColumns}
             dataSource={visibleTopics}
             rowKey={record => `${record.persistent ? 'persistent' : 'non-persistent'}://${record.name}`}
+            extraTabs={[
+                {
+                    key: 'permissions',
+                    label: '权限',
+                    children: (
+                        <PermissionsPanel
+                            scope="namespace"
+                            clusterId={clusterId}
+                            tenant={tenant}
+                            namespace={namespace}
+                        />
+                    ),
+                },
+            ]}
         />
     );
 };
