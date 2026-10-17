@@ -53,6 +53,8 @@ const listText = (values: string[]): string => (values.length > 0 ? values.join(
 // 限速按「条/秒 与 字节/秒」读：broker 存的其实是「每周期」，
 // 周期本身也在值里（ratePeriodInSecond），这里换算成每秒，
 // 否则同一份配置换个周期显示出来的数字差几十倍。
+// 换算之后必须把周期本身也写出来：否则「1000 条/秒、周期 1s」与
+// 「30000 条/秒、周期 30s」显示成同一句话，对比页面就会「看着一样却判不同」。
 function rateText(rate: NamespacePolicyView['dispatchRate']): string {
     if (!rate) {
         return NOT_SET;
@@ -61,6 +63,9 @@ function rateText(rate: NamespacePolicyView['dispatchRate']): string {
     const parts: string[] = [];
     parts.push(rate.msgPerPeriod < 0 ? '条数不限' : `${round(rate.msgPerPeriod / period)} 条/秒`);
     parts.push(rate.bytePerPeriod < 0 ? '大小不限' : `${round(rate.bytePerPeriod / period / 1024)} KB/秒`);
+    if (period !== 1) {
+        parts.push(`周期 ${period}s`);
+    }
     return parts.join('，');
 }
 

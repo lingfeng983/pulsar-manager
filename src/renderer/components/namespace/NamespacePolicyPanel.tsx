@@ -4,8 +4,14 @@ import {DeleteOutlined, EditOutlined, ReloadOutlined} from '@ant-design/icons';
 import StateBlock from '../common/StateBlock';
 import {useConfirmDanger} from '../common/dangerConfirm';
 import IconButton from '../common/IconButton';
-import type {NamespaceBacklogQuota, NamespacePolicyField, NamespacePolicyView} from '../../types';
+import type {
+    NamespaceBacklogQuota,
+    NamespacePolicyField,
+    NamespacePolicySyncScope,
+    NamespacePolicyView,
+} from '../../types';
 import {NOT_SET, POLICY_GROUPS, PolicyRow, isClearable} from './policyMeta';
+import PolicyDiffModal from './PolicyDiffModal';
 import PolicyEditModal from './PolicyEditModal';
 import PolicySyncModal from './PolicySyncModal';
 
@@ -68,6 +74,12 @@ const NamespacePolicyPanel: React.FC<NamespacePolicyPanelProps> = ({clusterId, t
     const [editing, setEditing] = useState<PolicyRow | null>(null);
     const [rawOpen, setRawOpen] = useState(false);
     const [syncOpen, setSyncOpen] = useState(false);
+    const [diffOpen, setDiffOpen] = useState(false);
+    // 从对比弹窗带进来的预选目标与字段；直接点「同步到其他命名空间」时为空
+    const [syncInit, setSyncInit] = useState<{
+        targets: NamespacePolicySyncScope[];
+        fields: NamespacePolicyField[];
+    } | null>(null);
     const [busy, setBusy] = useState<string | null>(null);
     const loadedRef = useRef(false);
     const requestIdRef = useRef(0);
@@ -157,6 +169,9 @@ const NamespacePolicyPanel: React.FC<NamespacePolicyPanelProps> = ({clusterId, t
                     <Space size={4}>
                         <Button size="small" onClick={() => setRawOpen(true)} disabled={!view}>
                             原始 JSON
+                        </Button>
+                        <Button size="small" disabled={!view} onClick={() => setDiffOpen(true)}>
+                            与另一个命名空间对比
                         </Button>
                         <Button size="small" disabled={!view} onClick={() => setSyncOpen(true)}>
                             同步到其他命名空间
@@ -266,11 +281,29 @@ const NamespacePolicyPanel: React.FC<NamespacePolicyPanelProps> = ({clusterId, t
                 />
             ) : null}
 
+            {diffOpen && view ? (
+                <PolicyDiffModal
+                    clusterId={clusterId}
+                    base={{tenant, namespace}}
+                    onClose={() => setDiffOpen(false)}
+                    onSync={payload => {
+                        setDiffOpen(false);
+                        setSyncInit(payload);
+                        setSyncOpen(true);
+                    }}
+                />
+            ) : null}
+
             {syncOpen && view ? (
                 <PolicySyncModal
                     clusterId={clusterId}
                     source={{tenant, namespace}}
-                    onClose={() => setSyncOpen(false)}
+                    initialTargets={syncInit?.targets}
+                    initialFields={syncInit?.fields}
+                    onClose={() => {
+                        setSyncOpen(false);
+                        setSyncInit(null);
+                    }}
                     onApplied={() => void load()}
                 />
             ) : null}

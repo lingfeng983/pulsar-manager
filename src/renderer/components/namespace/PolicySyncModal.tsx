@@ -8,6 +8,7 @@ import type {
     NamespacePolicySyncDelta,
     NamespacePolicySyncItemResult,
     NamespacePolicySyncPlanResult,
+    NamespacePolicySyncScope,
     NamespacePolicySyncTargetPlan,
     NamespacePolicySyncTargetResult,
     NamespacePolicyView,
@@ -17,6 +18,10 @@ import {POLICY_GROUPS, POLICY_ROW_BY_FIELD, PolicyRow, policyFieldLabel} from '.
 interface PolicySyncModalProps {
     clusterId: string;
     source: {tenant: string; namespace: string};
+    // 从对比弹窗带过来的预选：目标就是那个对端命名空间，字段就是界面判出的差异项。
+    // 这里的界面按「单租户 + 多命名空间」选目标，所以预置目标跨租户时只取第一个租户那一档。
+    initialTargets?: NamespacePolicySyncScope[];
+    initialFields?: NamespacePolicyField[];
     onClose: () => void;
     onApplied: () => void;
 }
@@ -160,12 +165,22 @@ const TargetResultBlock: React.FC<{target: NamespacePolicySyncTargetResult}> = (
     </Card>
 );
 
-const PolicySyncModal: React.FC<PolicySyncModalProps> = ({clusterId, source, onClose, onApplied}) => {
+const PolicySyncModal: React.FC<PolicySyncModalProps> = ({
+    clusterId,
+    source,
+    initialTargets,
+    initialFields,
+    onClose,
+    onApplied,
+}) => {
     const [tenants, setTenants] = useState<string[]>([]);
-    const [tenant, setTenant] = useState(source.tenant);
+    const initialTenant = initialTargets?.[0]?.tenant ?? source.tenant;
+    const [tenant, setTenant] = useState(initialTenant);
     const [namespaces, setNamespaces] = useState<string[]>([]);
-    const [targets, setTargets] = useState<string[]>([]);
-    const [fields, setFields] = useState<NamespacePolicyField[]>([]);
+    const [targets, setTargets] = useState<string[]>(() =>
+        (initialTargets ?? []).filter(item => item.tenant === initialTenant).map(item => item.namespace),
+    );
+    const [fields, setFields] = useState<NamespacePolicyField[]>(initialFields ?? []);
     const [plan, setPlan] = useState<NamespacePolicySyncPlanResult | null>(null);
     const [planning, setPlanning] = useState(false);
     const [planError, setPlanError] = useState<string | null>(null);

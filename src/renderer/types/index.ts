@@ -119,6 +119,7 @@ export type {
     NamespacePolicySyncItemResult,
     NamespacePolicySyncParams,
     NamespacePolicySyncPlanResult,
+    NamespacePolicySyncScope,
     NamespacePolicySyncTargetPlan,
     NamespacePolicySyncTargetResult,
     NamespacePolicyView,
