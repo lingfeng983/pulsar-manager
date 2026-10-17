@@ -1691,6 +1691,47 @@ export interface InspectionReport {
     scope: InspectionScope;
     checks: InspectionCheck[];
     totals: InspectionTotals;
+    // 这份报告实际用的口径。存进报告而不是只留在配置表里：阈值后来被人改过，
+    // 老报告的级别就再也解释不出来了，环比也无从判断「变差」里有多少是判定变严了。
+    // 可选只对历史行成立：v2.8 存的报告没有这一格，读出来是 undefined，
+    // 含义是「口径未知」，不能拿默认值替它补一个看着有据的结论。
+    thresholds?: InspectionThresholds;
+}
+
+/** 判定的六个数。字段齐整而不是可选：报告与环比都要能拿到一份完整口径。 */
+export interface InspectionThresholds {
+    backlogWarn: number;
+    backlogCrit: number;
+    unackedWarn: number;
+    rateRatio: number;
+    rateMinIn: number;
+    detailTopN: number;
+}
+
+/** 界面上报的口径：全字段可选，缺省落回默认值。 */
+export type InspectionThresholdsDraft = Partial<InspectionThresholds>;
+
+export interface InspectionProfile {
+    clusterId: string;
+    thresholds: InspectionThresholds;
+    maxNamespaces: number;
+    maxTopics: number;
+    updatedAt: string;
+}
+
+export interface InspectionProfileDraft {
+    clusterId: string;
+    thresholds?: InspectionThresholdsDraft;
+    maxNamespaces?: number;
+    maxTopics?: number;
+}
+
+/** 一次口径改动落在界面上的样子：只有真的与上一份不同才列出来。 */
+export interface InspectionThresholdChange {
+    field: keyof InspectionThresholds;
+    label: string;
+    previous: number;
+    current: number;
 }
 
 export interface InspectionRunParams {
@@ -1735,4 +1776,7 @@ export interface InspectionDiff {
     items: InspectionDiffItem[];
     // 只在级别真的移动时有话要说：一份「全是 unchanged」的报告读起来比不读还累
     changedCount: number;
+    // 两次报告的口径差别。改过阈值之后再环比，级别移动里就混着「判定变严了」这一部分，
+    // 不写出来的话环比会把应用自己的改动说成集群的变化。
+    thresholdChanges: InspectionThresholdChange[];
 }

@@ -234,7 +234,23 @@ CREATE TABLE IF NOT EXISTS inspections (
     skip INTEGER NOT NULL DEFAULT 0,
     scope_json TEXT NOT NULL,
     checks_json TEXT NOT NULL,
+    -- 当次生效的判定口径。可空：v2.8 存的那些报告根本没有这个概念，
+    -- 空就是「口径未知」，环比时不据此下「判定线没动」的结论。
+    thresholds_json TEXT,
     markdown TEXT NOT NULL,
+    FOREIGN KEY (cluster_id) REFERENCES clusters(id) ON DELETE CASCADE
+);
+
+-- 巡检口径：一台集群一行。阈值与采样上限存整份 JSON 而不是每字段一列——
+-- 判定要一次拿全六个数，读一行拿半个口径反而更容易写出「改了积压线却忘了 rateRatio」这种状态。
+-- 用 cluster_id 当主键而不是再生成一个 id：这张表按定义就是「这台集群的当前口径」，
+-- 没有第二份并存，也没有历史（历史口径已经抄在每份报告的 thresholds 里了）。
+CREATE TABLE IF NOT EXISTS inspection_profiles (
+    cluster_id TEXT PRIMARY KEY,
+    thresholds_json TEXT NOT NULL,
+    max_namespaces INTEGER NOT NULL,
+    max_topics INTEGER NOT NULL,
+    updated_at TEXT NOT NULL,
     FOREIGN KEY (cluster_id) REFERENCES clusters(id) ON DELETE CASCADE
 );
 

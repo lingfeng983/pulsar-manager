@@ -1,12 +1,22 @@
 import React, {useCallback, useEffect, useMemo, useState} from 'react';
-import {Alert, Button, InputNumber, Select, Space, Table, Tag, Typography} from 'antd';
+import {Alert, Button, InputNumber, Modal, Select, Space, Table, Tag, Typography, message} from 'antd';
 import type {ColumnsType} from 'antd/es/table';
-import {DeleteOutlined, DownloadOutlined, SafetyCertificateOutlined} from '@ant-design/icons';
+import {DeleteOutlined, DownloadOutlined, SafetyCertificateOutlined, SlidersOutlined} from '@ant-design/icons';
 import PageShell from '../components/common/PageShell';
 import StateBlock from '../components/common/StateBlock';
 import {downloadBlob} from '../utils/download';
 import {useClusterStore} from '../store/cluster';
 import {themedModal} from '../components/common/dangerConfirm';
+import {
+    INSPECTION_DEFAULTS,
+    INSPECTION_THRESHOLDS,
+    THRESHOLD_FIELDS,
+    THRESHOLD_LABELS,
+    THRESHOLD_LIMITS,
+    SAMPLING_LIMITS,
+    thresholdDisplay,
+    type ThresholdField,
+} from '../../shared/inspection-caliber';
 import type {
     InspectionChangeKind,
     InspectionCheck,
@@ -14,12 +24,51 @@ import type {
     InspectionDiffItem,
     InspectionHistoryRow,
     InspectionLevel,
+    InspectionProfile,
     InspectionReport,
     InspectionScope,
+    InspectionThresholdChange,
+    InspectionThresholds,
 } from '../types';
 
 interface Props {
     clusterId?: string;
+}
+
+/** 口径弹窗里的可编辑表单：六个判定线加两个采样上限，全是数字。 */
+type CaliberDraft = Record<ThresholdField, number> & {maxNamespaces: number; maxTopics: number};
+
+function draftFrom(profile: InspectionProfile | null): CaliberDraft {
+    const thresholds = profile?.thresholds ?? INSPECTION_THRESHOLDS;
+    return {
+        ...thresholds,
+        maxNamespaces: profile?.maxNamespaces ?? INSPECTION_DEFAULTS.maxNamespaces,
+        maxTopics: profile?.maxTopics ?? INSPECTION_DEFAULTS.maxTopics,
+    };
+}
+
+/** 环比里那句「积压严重线 1000000 条 → 500000 条」的清单。 */
+function thresholdChangesText(changes: InspectionThresholdChange[]): string {
+    const parts = changes.map(item => {
+        const from = thresholdDisplay(item.field, item.previous);
+        const to = thresholdDisplay(item.field, item.current);
+        return `${item.label} ${from} → ${to}`;
+    });
+    return parts.join('；');
+}
+
+/** 报告里那行口径说明。三份话三种意思，不能混成一句「按配置判定」。 */
+function caliberNote(thresholds?: InspectionThresholds): string {
+    if (!thresholds) {
+        return '这一份存于口径可配置之前，当时用的是哪条判定线没有记下来';
+    }
+    const overridden = THRESHOLD_FIELDS.filter(field => thresholds[field] !== INSPECTION_THRESHOLDS[field]);
+    if (!overridden.length) {
+        return '本次判定口径：默认阈值';
+    }
+    return `本次判定口径（已按本集群调整）：${overridden
+        .map(field => `${THRESHOLD_LABELS[field]} ${thresholdDisplay(field, thresholds[field])}`)
+        .join('，')}`;
 }
 
 const LEVEL_META: Record<InspectionLevel, {color: string; text: string}> = {
@@ -82,7 +131,12 @@ const ClusterInspection: React.FC<Props> = ({clusterId: propClusterId}) => {
     const loadClusters = useClusterStore(state => state.fetchClusters);
 
     const [clusterId, setClusterId] = useState(propClusterId || '');
-    const [maxTopics, setMaxTopics] = useState(60);
+    const [maxNamespaces, setMaxNamespaces] = useState(INSPECTION_DEFAULTS.maxNamespaces);
+    const [maxTopics, setMaxTopics] = useState(INSPECTION_DEFAULTS.maxTopics);
+    const [profile, setProfile] = useState<InspectionProfile | null>(null);
+    const [caliberOpen, setCaliberOpen] = useState(false);
+    const [draft, setDraft] = useState<CaliberDraft>(draftFrom(null));
+    const [savingCaliber, setSavingCaliber] = useState(false);
     const [report, setReport] = useState<InspectionReport | null>(null);
     const [markdown, setMarkdown] = useState('');
     const [diff, setDiff] = useState<InspectionDiff | null>(null);
@@ -118,13 +172,27 @@ const ClusterInspection: React.FC<Props> = ({clusterId: propClusterId}) => {
         setHistory(response.success && response.data ? response.data : []);
     }, []);
 
-    // 换集群就把历史重新拉一遍，同时清掉上一台集群的报告与环比：
+    // 换集群就把历史与口径重新拉一遍，同时清掉上一台集群的报告与环比：
     // 报告是"某个集群某一时刻"的快照，挂着别的集群的结果比空着更危险。
+    // 采样上限跟着这台集群存过的口径走，否则表单上显示的是默认值、实际用的却是另一套。
     useEffect(() => {
         void loadHistory(clusterId);
         setReport(null);
         setMarkdown('');
         setDiff(null);
+        setCaliberOpen(false);
+        if (!clusterId) {
+            setProfile(null);
+            return;
+        }
+        void window.electronAPI.inspection.profile.get({clusterId}).then(response => {
+            const next = response.success ? (response.data ?? null) : null;
+            setProfile(next);
+            if (next) {
+                setMaxNamespaces(next.maxNamespaces);
+                setMaxTopics(next.maxTopics);
+            }
+        });
     }, [clusterId, loadHistory]);
 
     const clusterOptions = useMemo(() => clusters.map(item => ({value: item.id, label: item.name})), [clusters]);
@@ -136,7 +204,7 @@ const ClusterInspection: React.FC<Props> = ({clusterId: propClusterId}) => {
         setLoading(true);
         setError(null);
         try {
-            const response = await window.electronAPI.inspection.run({clusterId, maxTopics});
+            const response = await window.electronAPI.inspection.run({clusterId, maxNamespaces, maxTopics});
             if (response.success && response.data) {
                 setReport(response.data.report);
                 setMarkdown(response.data.markdown);
@@ -157,7 +225,51 @@ const ClusterInspection: React.FC<Props> = ({clusterId: propClusterId}) => {
         } finally {
             setLoading(false);
         }
-    }, [clusterId, maxTopics, loadHistory]);
+    }, [clusterId, maxNamespaces, maxTopics, loadHistory]);
+
+    // 打开弹窗时按「这台集群当前生效的口径」填表，而不是留着上次编辑到一半的数字：
+    // 改一半没保存再开一次，屏幕上显示的就是没落库的那份，用户会以为已经生效了
+    const handleOpenCaliber = useCallback(() => {
+        setDraft(draftFrom(profile));
+        setCaliberOpen(true);
+    }, [profile]);
+
+    const handleSaveCaliber = useCallback(async () => {
+        if (!clusterId) {
+            return;
+        }
+        setSavingCaliber(true);
+        try {
+            const response = await window.electronAPI.inspection.profile.save({
+                clusterId,
+                thresholds: {
+                    backlogWarn: draft.backlogWarn,
+                    backlogCrit: draft.backlogCrit,
+                    unackedWarn: draft.unackedWarn,
+                    rateRatio: draft.rateRatio,
+                    rateMinIn: draft.rateMinIn,
+                    detailTopN: draft.detailTopN,
+                },
+                maxNamespaces: draft.maxNamespaces,
+                maxTopics: draft.maxTopics,
+            });
+            if (!response.success || !response.data) {
+                // 主进程那句校验原样显示：它说的是「严重线不能低于关注线」这种
+                // 只有判定规则才知道的矛盾，表单自己看不出问题
+                message.error(response.error || '口径保存失败');
+                return;
+            }
+            setProfile(response.data);
+            setMaxNamespaces(response.data.maxNamespaces);
+            setMaxTopics(response.data.maxTopics);
+            setCaliberOpen(false);
+            message.success('判定口径已保存，下一次巡检开始生效');
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : '口径保存失败');
+        } finally {
+            setSavingCaliber(false);
+        }
+    }, [clusterId, draft]);
 
     const handleExport = useCallback(() => {
         if (!report || !markdown) {
@@ -272,13 +384,25 @@ const ClusterInspection: React.FC<Props> = ({clusterId: propClusterId}) => {
                     />
                     <InputNumber
                         min={1}
+                        max={200}
+                        step={5}
+                        value={maxNamespaces}
+                        onChange={value => setMaxNamespaces(value || INSPECTION_DEFAULTS.maxNamespaces)}
+                        addonBefore="命名空间上限"
+                        style={{width: 190}}
+                    />
+                    <InputNumber
+                        min={1}
                         max={1000}
                         step={10}
                         value={maxTopics}
-                        onChange={value => setMaxTopics(value || 60)}
+                        onChange={value => setMaxTopics(value || INSPECTION_DEFAULTS.maxTopics)}
                         addonBefore="topic 上限"
                         style={{width: 170}}
                     />
+                    <Button icon={<SlidersOutlined />} disabled={!clusterId} onClick={handleOpenCaliber}>
+                        巡检口径
+                    </Button>
                     <Button type="primary" icon={<SafetyCertificateOutlined />} loading={loading} onClick={handleRun}>
                         开始巡检
                     </Button>
@@ -316,6 +440,18 @@ const ClusterInspection: React.FC<Props> = ({clusterId: propClusterId}) => {
                                     showIcon
                                     message={`${report.totals.crit} 项严重、${report.totals.warn} 项需要关注`}
                                     description="下表按级别排序，先看红字那几行。"
+                                />
+                            ) : null}
+                            <Typography.Text type="secondary">{caliberNote(report.thresholds)}</Typography.Text>
+                            {diff?.thresholdChanges.length ? (
+                                <Alert
+                                    type="warning"
+                                    showIcon
+                                    message="本次与上次的判定口径不同"
+                                    description={
+                                        `${thresholdChangesText(diff.thresholdChanges)}。` +
+                                        '下面这些级别移动里有一部分是判定线动了，不是集群变了。'
+                                    }
                                 />
                             ) : null}
                             {diff && changedItems.length ? (
@@ -396,6 +532,70 @@ const ClusterInspection: React.FC<Props> = ({clusterId: propClusterId}) => {
                     ) : null}
                 </Space>
             </StateBlock>
+            <Modal
+                title="巡检口径（只影响这台集群）"
+                open={caliberOpen}
+                onCancel={() => setCaliberOpen(false)}
+                onOk={handleSaveCaliber}
+                okText="保存"
+                confirmLoading={savingCaliber}
+                width={560}
+            >
+                <Typography.Paragraph type="secondary">
+                    判定线存在本机、按集群各一套；改完从下一次巡检开始生效，当次生效的口径会抄进报告与导出的文件里。
+                </Typography.Paragraph>
+                <Space direction="vertical" size={10} style={{width: '100%'}}>
+                    {THRESHOLD_FIELDS.map(field => {
+                        const limit = THRESHOLD_LIMITS[field];
+                        return (
+                            <Space key={field} style={{width: '100%', justifyContent: 'space-between'}}>
+                                <Typography.Text>
+                                    {THRESHOLD_LABELS[field]}
+                                    <Typography.Text type="secondary" style={{marginLeft: 6}}>
+                                        默认 {thresholdDisplay(field, INSPECTION_THRESHOLDS[field])}
+                                    </Typography.Text>
+                                </Typography.Text>
+                                <InputNumber
+                                    min={limit.min}
+                                    max={limit.max}
+                                    step={limit.integer ? 1 : 0.1}
+                                    value={draft[field]}
+                                    onChange={value =>
+                                        setDraft(prev => ({...prev, [field]: value ?? INSPECTION_THRESHOLDS[field]}))
+                                    }
+                                    style={{width: 170}}
+                                />
+                            </Space>
+                        );
+                    })}
+                    {(
+                        [
+                            {key: 'maxNamespaces', label: '命名空间采样上限', value: INSPECTION_DEFAULTS.maxNamespaces},
+                            {key: 'maxTopics', label: 'topic 采样上限', value: INSPECTION_DEFAULTS.maxTopics},
+                        ] as const
+                    ).map(item => (
+                        <Space key={item.key} style={{width: '100%', justifyContent: 'space-between'}}>
+                            <Typography.Text>
+                                {item.label}
+                                <Typography.Text type="secondary" style={{marginLeft: 6}}>
+                                    默认 {item.value}
+                                </Typography.Text>
+                            </Typography.Text>
+                            <InputNumber
+                                min={SAMPLING_LIMITS[item.key].min}
+                                max={SAMPLING_LIMITS[item.key].max}
+                                step={5}
+                                value={draft[item.key]}
+                                onChange={value => setDraft(prev => ({...prev, [item.key]: value ?? item.value}))}
+                                style={{width: 170}}
+                            />
+                        </Space>
+                    ))}
+                </Space>
+                <Typography.Paragraph type="secondary" style={{marginTop: 12, marginBottom: 0}}>
+                    积压严重线不能低于关注线，否则积压只会报到「关注」就停住——这条在保存时校验。
+                </Typography.Paragraph>
+            </Modal>
         </PageShell>
     );
 };

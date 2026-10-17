@@ -3,27 +3,28 @@ import {z, registerClientHandler, registerHandler, ClusterIdSchema, getClusterBy
 import {
     deleteInspections,
     getInspectionById,
+    getInspectionProfile,
     getPreviousInspection,
     insertInspection,
     listAlertEvents,
     listInspections,
     pruneInspections,
+    upsertInspectionProfile,
     type InspectionListRow,
+    type InspectionProfileRecord,
     type InspectionRecord,
 } from '../database/sqlite';
-import {
-    runInspection,
-    renderInspectionMarkdown,
-    INSPECTION_DEFAULTS,
-    type InspectionAlertRow,
-} from '../services/cluster-inspection';
+import {runInspection, renderInspectionMarkdown, type InspectionAlertRow} from '../services/cluster-inspection';
+import {resolveSampling, resolveThresholds} from '../services/inspection-profile';
 import {buildInspectionDiff} from '../services/inspection-diff';
 import type {
     InspectionCheck,
     InspectionHistoryRow,
+    InspectionProfile,
     InspectionReport,
     InspectionRunResult,
     InspectionScope,
+    InspectionThresholds,
 } from '../../shared/types';
 import {createLogger} from '../utils/logger';
 
@@ -43,6 +44,30 @@ const HistorySchema = z.object({
 });
 
 const DetailSchema = z.object({id: z.string().uuid()});
+
+// 六个阈值在这里只认「是不是这几个名字、是不是数字」，区间与互相矛盾的组合
+// 交给 resolveThresholds 判：那套规则要在自测里跑，也要在这条通道上用，
+// 分成两处写迟早一处放宽一处收紧。未知字段用 strict 挡掉——静默丢一个拼错的键，
+// 用户会以为自己已经把严重线改小了。
+const ThresholdDraftSchema = z
+    .object({
+        backlogWarn: z.number().nullable().optional(),
+        backlogCrit: z.number().nullable().optional(),
+        unackedWarn: z.number().nullable().optional(),
+        rateRatio: z.number().nullable().optional(),
+        rateMinIn: z.number().nullable().optional(),
+        detailTopN: z.number().nullable().optional(),
+    })
+    .strict();
+
+const ProfileSchema = z
+    .object({
+        clusterId: ClusterIdSchema,
+        thresholds: ThresholdDraftSchema.optional(),
+        maxNamespaces: z.number().optional(),
+        maxTopics: z.number().optional(),
+    })
+    .strict();
 
 // 每簇保留的报告份数。历史的价值在「最近几次怎么变的」，不在归档：
 // 一次报告几十 KB 不算大，但没人会读第 200 次巡检，留着只是让列表翻不到有用的那几条。
@@ -68,6 +93,9 @@ function toReport(record: InspectionRecord): InspectionReport {
         scope: JSON.parse(record.scope_json) as InspectionScope,
         checks: JSON.parse(record.checks_json) as InspectionCheck[],
         totals: {ok: record.ok, warn: record.warn, crit: record.crit, skip: record.skip},
+        // null 就是没有：v2.8 的报告按当时的代码只可能是默认口径，但这句话是推出来的不是记下来的，
+        // 所以宁可留空，让环比放弃「口径没变」这个结论
+        thresholds: record.thresholds_json ? (JSON.parse(record.thresholds_json) as InspectionThresholds) : undefined,
     };
 }
 
@@ -83,6 +111,16 @@ function toHistoryRow(row: InspectionListRow): InspectionHistoryRow {
     };
 }
 
+function toProfile(record: InspectionProfileRecord): InspectionProfile {
+    return {
+        clusterId: record.cluster_id,
+        thresholds: JSON.parse(record.thresholds_json) as InspectionThresholds,
+        maxNamespaces: record.max_namespaces,
+        maxTopics: record.max_topics,
+        updatedAt: record.updated_at,
+    };
+}
+
 /** 这份报告相对它前一份的环比；库里没有前一份时返回 null（第一次跑没有可比对象）。 */
 function diffAgainstPrevious(record: InspectionRecord, current: InspectionReport) {
     const previous = getPreviousInspection(record.cluster_id, record.generated_at, record.id);
@@ -90,7 +128,10 @@ function diffAgainstPrevious(record: InspectionRecord, current: InspectionReport
         return null;
     }
     const previousReport = toReport(previous);
-    return buildInspectionDiff(previous.id, previousReport.generatedAt, previousReport.checks, current.checks);
+    return buildInspectionDiff(previous.id, previousReport.generatedAt, previousReport.checks, current.checks, {
+        previous: previousReport.thresholds ?? null,
+        current: current.thresholds ?? null,
+    });
 }
 
 export function registerInspectionHandlers() {
@@ -103,16 +144,22 @@ export function registerInspectionHandlers() {
             if (!cluster) {
                 throw new Error('Cluster not found');
             }
+            // 口径按集群取，没配过就是默认。采样上限允许这一次单独覆盖：
+            // 「这次只想扫前 10 个命名空间」是临时意图，不该写进这台集群的长期配置。
+            const stored = getInspectionProfile(params.clusterId);
+            const profile = stored ? toProfile(stored) : null;
+            const sampling = resolveSampling({
+                maxNamespaces: params.maxNamespaces ?? profile?.maxNamespaces,
+                maxTopics: params.maxTopics ?? profile?.maxTopics,
+            });
             // runInspection 内部逐段捕获：读不到的端点变成一条 skip 检查，
             // 而不是让整份报告以一个 404 收场。
             const report = await runInspection(client, {
                 clusterId: params.clusterId,
                 clusterName: cluster.name,
                 alerts: collectOpenAlerts(params.clusterId),
-                options: {
-                    maxNamespaces: params.maxNamespaces ?? INSPECTION_DEFAULTS.maxNamespaces,
-                    maxTopics: params.maxTopics ?? INSPECTION_DEFAULTS.maxTopics,
-                },
+                options: sampling,
+                thresholds: profile?.thresholds,
             });
             const record: InspectionRecord = {
                 id: randomUUID(),
@@ -127,6 +174,7 @@ export function registerInspectionHandlers() {
                 skip: report.totals.skip,
                 scope_json: JSON.stringify(report.scope),
                 checks_json: JSON.stringify(report.checks),
+                thresholds_json: JSON.stringify(report.thresholds),
                 markdown: '',
             };
             const diff = diffAgainstPrevious(record, report);
@@ -170,5 +218,35 @@ export function registerInspectionHandlers() {
     registerHandler('inspection:clear', async (params: unknown) => {
         const input = HistorySchema.parse(params);
         return deleteInspections(input.clusterId);
+    });
+
+    // 没配过就返回 null 而不是替它造一份默认口径：界面上「这台集群没改过判定线」
+    // 与「这台集群的判定线恰好等于默认值」是两句话，后者会让人以为有人配过
+    registerHandler('inspection:profile:get', async (params: unknown) => {
+        const input = ProfileSchema.parse(params);
+        const record = getInspectionProfile(input.clusterId);
+        return record ? toProfile(record) : null;
+    });
+
+    registerHandler('inspection:profile:save', async (params: unknown) => {
+        const input = ProfileSchema.parse(params);
+        // 校验顺序是「先判口径合不合法，再落库」：resolveThresholds 会拒掉
+        // 严重线低于关注线这类每个字段都合规、合起来让分级反过来的组合
+        const thresholds = resolveThresholds(input.thresholds);
+        const existing = getInspectionProfile(input.clusterId);
+        const sampling = resolveSampling({
+            maxNamespaces: input.maxNamespaces ?? (existing ? toProfile(existing).maxNamespaces : undefined),
+            maxTopics: input.maxTopics ?? (existing ? toProfile(existing).maxTopics : undefined),
+        });
+        const record: InspectionProfileRecord = {
+            cluster_id: input.clusterId,
+            thresholds_json: JSON.stringify(thresholds),
+            max_namespaces: sampling.maxNamespaces,
+            max_topics: sampling.maxTopics,
+            updated_at: new Date().toISOString(),
+        };
+        upsertInspectionProfile(record);
+        log.info(`inspection profile ${input.clusterId}: thresholds 已保存`);
+        return toProfile(record);
     });
 }

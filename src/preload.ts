@@ -90,6 +90,8 @@ import type {
     PickedArchiveFile,
     InspectionRunParams,
     InspectionHistoryRow,
+    InspectionProfile,
+    InspectionProfileDraft,
     InspectionRunResult,
     TopologyLimits,
 } from './shared/types';
@@ -523,6 +525,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
         history: (params: {clusterId: string; limit?: number}) => ipcRenderer.invoke('inspection:history', params),
         detail: (params: {id: string}) => ipcRenderer.invoke('inspection:detail', params),
         clear: (params: {clusterId: string}) => ipcRenderer.invoke('inspection:clear', params),
+        profile: {
+            get: (params: {clusterId: string}) => ipcRenderer.invoke('inspection:profile:get', params),
+            save: (params: InspectionProfileDraft) => ipcRenderer.invoke('inspection:profile:save', params),
+        },
     },
 
     // 拓扑
@@ -969,6 +975,10 @@ declare global {
                 history: (params: {clusterId: string; limit?: number}) => Promise<APIResponse<InspectionHistoryRow[]>>;
                 detail: (params: {id: string}) => Promise<APIResponse<InspectionRunResult>>;
                 clear: (params: {clusterId: string}) => Promise<APIResponse<number>>;
+                profile: {
+                    get: (params: {clusterId: string}) => Promise<APIResponse<InspectionProfile | null>>;
+                    save: (params: InspectionProfileDraft) => Promise<APIResponse<InspectionProfile>>;
+                };
             };
             topology: {
                 getClusterTopology: (

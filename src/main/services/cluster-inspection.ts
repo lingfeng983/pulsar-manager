@@ -10,11 +10,15 @@
  */
 import {mapWithConcurrency} from './http-client';
 import {renderDiffMarkdown} from './inspection-diff';
+import {resolveSampling, resolveThresholds, thresholdOverrides} from './inspection-profile';
+import {INSPECTION_THRESHOLDS, THRESHOLD_LABELS, thresholdDisplay} from '../../shared/inspection-caliber';
 import type {
     InspectionCheck,
     InspectionDiff,
     InspectionLevel,
     InspectionReport,
+    InspectionThresholds,
+    InspectionThresholdsDraft,
     InspectionTotals,
     TopicStats,
 } from '../../shared/types';
@@ -36,11 +40,6 @@ export interface InspectionAlertRow {
     ruleName: string;
     scopeLabel: string;
     message: string;
-}
-
-export interface InspectionOptions {
-    maxNamespaces?: number;
-    maxTopics?: number;
 }
 
 /**
@@ -65,21 +64,6 @@ export interface InspectionTopicRow {
     maxUnackedName: string;
     blockedSubscriptions: string[];
 }
-
-export const INSPECTION_DEFAULTS = {maxNamespaces: 20, maxTopics: 60};
-
-// 阈值写在这里而不是散进各判定函数：调一次口径要能在一张表里看全，
-// 也方便自测按边界值断言（正好等于阈值时不该升级）。
-export const INSPECTION_THRESHOLDS = {
-    backlogWarn: 10_000,
-    backlogCrit: 1_000_000,
-    unackedWarn: 5_000,
-    // 入向速率是出向的多少倍算「消费跟不上」。比例之下还有绝对量下限，
-    // 否则一个每秒 0.01 条的 topic 会因为除不尽而被报成故障。
-    rateRatio: 3,
-    rateMinIn: 10,
-    detailTopN: 8,
-};
 
 export function toInspectionTopicRow(name: string, persistent: boolean, stats: TopicStats): InspectionTopicRow {
     const entries = Object.values(stats?.subscriptions || {});
@@ -161,7 +145,10 @@ export function buildBrokerCheck(brokers: {activeBrokers: string[]; allBrokers: 
 }
 
 /** 消费端是否还在读：有积压却没有连接的消费者，是「生产者还在打、没人消费」的典型形态。 */
-export function buildConsumerCheck(rows: InspectionTopicRow[]): InspectionCheck {
+export function buildConsumerCheck(
+    rows: InspectionTopicRow[],
+    th: InspectionThresholds = INSPECTION_THRESHOLDS,
+): InspectionCheck {
     const stalled = rows.filter(row => row.backlog > 0 && row.consumerCount === 0);
     if (!rows.length) {
         return check('consumers', '消费端在读', 'skip', '没有采样到 topic，无法判断');
@@ -178,7 +165,7 @@ export function buildConsumerCheck(rows: InspectionTopicRow[]): InspectionCheck 
         {
             detail: stalled
                 .sort((a, b) => b.backlog - a.backlog)
-                .slice(0, INSPECTION_THRESHOLDS.detailTopN)
+                .slice(0, th.detailTopN)
                 .map(row => `${row.name}：积压 ${row.backlog} 条，订阅 ${row.subscriptionCount} 个`),
             suggestion: '这些 topic 的积压只会随生产继续增长：确认消费者是否崩溃、订阅是否被删，或先把生产端停掉',
         },
@@ -186,13 +173,16 @@ export function buildConsumerCheck(rows: InspectionTopicRow[]): InspectionCheck 
 }
 
 /** 总积压分级。按单 topic 最大值报而不是总量：一个 100 万条的 topic 比十个 1 万条的紧急得多。 */
-export function buildBacklogCheck(rows: InspectionTopicRow[]): InspectionCheck {
+export function buildBacklogCheck(
+    rows: InspectionTopicRow[],
+    th: InspectionThresholds = INSPECTION_THRESHOLDS,
+): InspectionCheck {
     if (!rows.length) {
         return check('backlog', '消息积压', 'skip', '没有采样到 topic，无法判断积压');
     }
     const total = rows.reduce((sum, row) => sum + row.backlog, 0);
     const worst = rows.reduce((max, row) => (row.backlog > max.backlog ? row : max), rows[0]);
-    const {backlogWarn, backlogCrit, detailTopN} = INSPECTION_THRESHOLDS;
+    const {backlogWarn, backlogCrit, detailTopN} = th;
     const level: InspectionLevel = worst.backlog >= backlogCrit ? 'crit' : worst.backlog >= backlogWarn ? 'warn' : 'ok';
     const detail = [...rows]
         .sort((a, b) => b.backlog - a.backlog)
@@ -212,7 +202,10 @@ function describeTopSubscription(row: InspectionTopicRow): string {
 }
 
 /** 未 ack 与阻塞：broker 侧的消费能力被客户端占住，光看速率看不出来。 */
-export function buildUnackedCheck(rows: InspectionTopicRow[]): InspectionCheck {
+export function buildUnackedCheck(
+    rows: InspectionTopicRow[],
+    th: InspectionThresholds = INSPECTION_THRESHOLDS,
+): InspectionCheck {
     if (!rows.length) {
         return check('unacked', '未 ack / 阻塞订阅', 'skip', '没有采样到 topic，无法判断未 ack');
     }
@@ -226,24 +219,23 @@ export function buildUnackedCheck(rows: InspectionTopicRow[]): InspectionCheck {
             `${blocked.length} 个 topic 上有被阻塞的订阅（未 ack 上限已满）`,
             {
                 detail: blocked
-                    .slice(0, INSPECTION_THRESHOLDS.detailTopN)
+                    .slice(0, th.detailTopN)
                     .map(row => `${row.name}：${row.blockedSubscriptions.join('、')}`),
                 suggestion:
                     '被阻塞的订阅不会收新消息：检查消费者是否只拉不 ack，或把 maxUnackedMessagesPerConsumer 调大',
             },
         );
     }
-    const level: InspectionLevel = unackedTotal >= INSPECTION_THRESHOLDS.unackedWarn ? 'warn' : 'ok';
+    const level: InspectionLevel = unackedTotal >= th.unackedWarn ? 'warn' : 'ok';
     return check('unacked', '未 ack / 阻塞订阅', level, `没有阻塞订阅，未 ack 合计 ${unackedTotal} 条`);
 }
 
 /** 生产明显快过消费：持续下去积压只增不减，是「还没爆但一定会爆」的那一类。 */
-export function buildThroughputCheck(rows: InspectionTopicRow[]): InspectionCheck {
-    const lagging = rows.filter(
-        row =>
-            row.msgRateIn >= INSPECTION_THRESHOLDS.rateMinIn &&
-            row.msgRateIn >= row.msgRateOut * INSPECTION_THRESHOLDS.rateRatio,
-    );
+export function buildThroughputCheck(
+    rows: InspectionTopicRow[],
+    th: InspectionThresholds = INSPECTION_THRESHOLDS,
+): InspectionCheck {
+    const lagging = rows.filter(row => row.msgRateIn >= th.rateMinIn && row.msgRateIn >= row.msgRateOut * th.rateRatio);
     if (!rows.length) {
         return check('throughput', '生产与消费速率', 'skip', '没有采样到 topic，无法判断速率');
     }
@@ -253,7 +245,7 @@ export function buildThroughputCheck(rows: InspectionTopicRow[]): InspectionChec
     return check('throughput', '生产与消费速率', 'warn', `${lagging.length} 个 topic 的入向速率明显高于出向`, {
         detail: lagging
             .sort((a, b) => b.msgRateIn - a.msgRateIn)
-            .slice(0, INSPECTION_THRESHOLDS.detailTopN)
+            .slice(0, th.detailTopN)
             .map(row => `${row.name}：入 ${row.msgRateIn.toFixed(1)}/s，出 ${row.msgRateOut.toFixed(1)}/s`),
         suggestion: '要么加消费者，要么在生产端限流；这个比例维持下去积压会一直增长',
     });
@@ -282,14 +274,15 @@ export function buildWorkerCheck(
     return check('workers', '函数 / 连接器 worker', 'ok', `worker 在线节点 ${state.nodes.length} 个`);
 }
 
-export function buildAlertCheck(alerts: InspectionAlertRow[]): InspectionCheck {
+export function buildAlertCheck(
+    alerts: InspectionAlertRow[],
+    th: InspectionThresholds = INSPECTION_THRESHOLDS,
+): InspectionCheck {
     if (!alerts.length) {
         return check('alerts', '未恢复的本地告警', 'ok', '没有未恢复的告警事件');
     }
     return check('alerts', '未恢复的本地告警', 'warn', `${alerts.length} 条告警仍未恢复`, {
-        detail: alerts
-            .slice(0, INSPECTION_THRESHOLDS.detailTopN)
-            .map(item => `${item.ruleName}｜${item.scopeLabel}｜${item.message}`),
+        detail: alerts.slice(0, th.detailTopN).map(item => `${item.ruleName}｜${item.scopeLabel}｜${item.message}`),
         suggestion: '这些是应用内告警规则判出来的，处置完在告警中心确认或恢复，别让它们一直挂着',
     });
 }
@@ -305,10 +298,18 @@ export function sumTotals(checks: InspectionCheck[]): InspectionTotals {
 /** 逐段采集：任何一段失败都变成一条 skip/warn 检查，而不是让整份报告消失。 */
 export async function runInspection(
     client: InspectionClient,
-    input: {clusterId: string; clusterName: string; alerts: InspectionAlertRow[]; options?: InspectionOptions},
+    input: {
+        clusterId: string;
+        clusterName: string;
+        alerts: InspectionAlertRow[];
+        options?: {maxNamespaces?: number; maxTopics?: number};
+        thresholds?: InspectionThresholdsDraft;
+    },
 ): Promise<InspectionReport> {
-    const maxNamespaces = input.options?.maxNamespaces ?? INSPECTION_DEFAULTS.maxNamespaces;
-    const maxTopics = input.options?.maxTopics ?? INSPECTION_DEFAULTS.maxTopics;
+    // 口径在这里一次算定并抄进报告：判定过程中不再回头读配置表，
+    // 否则一份采集了半分钟的报告，中途改一次阈值就会让它一半按旧线、一半按新线
+    const th = resolveThresholds(input.thresholds);
+    const {maxNamespaces, maxTopics} = resolveSampling(input.options ?? {});
     const checks: InspectionCheck[] = [];
     const errors: string[] = [];
 
@@ -406,22 +407,22 @@ export async function runInspection(
         }
     }
 
-    checks.push(buildBacklogCheck(rows));
-    checks.push(buildConsumerCheck(rows));
-    checks.push(buildUnackedCheck(rows));
-    checks.push(buildThroughputCheck(rows));
+    checks.push(buildBacklogCheck(rows, th));
+    checks.push(buildConsumerCheck(rows, th));
+    checks.push(buildUnackedCheck(rows, th));
+    checks.push(buildThroughputCheck(rows, th));
 
     try {
         checks.push(buildWorkerCheck(await client.getWorkerState()));
     } catch (error) {
         checks.push(buildWorkerCheck(null, error instanceof Error ? error.message : String(error)));
     }
-    checks.push(buildAlertCheck(input.alerts));
+    checks.push(buildAlertCheck(input.alerts, th));
 
     if (errors.length) {
         checks.push(
             check('collect', '采集过程中的局部失败', 'warn', `${errors.length} 次请求没有拿到数据`, {
-                detail: errors.slice(0, INSPECTION_THRESHOLDS.detailTopN),
+                detail: errors.slice(0, th.detailTopN),
                 suggestion: '局部失败不影响其余判定，但报告覆盖范围比看上去小：老 broker 缺少端点时会集中出现',
             }),
         );
@@ -443,11 +444,22 @@ export async function runInspection(
         },
         checks,
         totals: sumTotals(checks),
+        thresholds: th,
     };
 }
 
 const LEVEL_MARKS: Record<InspectionLevel, string> = {crit: '🔴', warn: '🟠', ok: '🟢', skip: '⚪'};
 const LEVEL_NAMES: Record<InspectionLevel, string> = {crit: '严重', warn: '关注', ok: '正常', skip: '未覆盖'};
+
+/** 本次生效的口径。改过判定线时必须写在文件里，否则读到的人会以为红字是按默认线判的。 */
+function describeThresholds(thresholds: InspectionThresholds): string {
+    const overrides = thresholdOverrides(thresholds);
+    if (!overrides.length) {
+        return '判定口径：默认阈值';
+    }
+    const parts = overrides.map(field => `${THRESHOLD_LABELS[field]} ${thresholdDisplay(field, thresholds[field])}`);
+    return `判定口径（已按本集群调整）：${parts.join('，')}`;
+}
 
 /**
  * 报告要能脱离应用被读懂（贴进工单、发到群里），所以 Markdown 里把采样范围与
@@ -469,6 +481,11 @@ export function renderInspectionMarkdown(report: InspectionReport, diff?: Inspec
         `- 结论：${LEVEL_NAMES.crit} ${report.totals.crit} 项、${LEVEL_NAMES.warn} ${report.totals.warn} 项、` +
             `${LEVEL_NAMES.ok} ${report.totals.ok} 项、${LEVEL_NAMES.skip} ${report.totals.skip} 项`,
     );
+    // v2.8 存进库的报告里没有 thresholds 这一格，缺省就不写这行：
+    // 拿默认值替它编一句「默认阈值」是把没记下来的事情说成记下来了
+    if (report.thresholds) {
+        lines.push(`- ${describeThresholds(report.thresholds)}`);
+    }
     if (report.scope.truncated) {
         lines.push('- 注意：采样在命名空间或 topic 上限处被截断，未采样的部分不在本报告结论之内');
     }

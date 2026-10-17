@@ -10,7 +10,7 @@ let db: Database.Database | null = null;
 // schema 版本以 user_version 跟踪。改基线 DDL 时：升 SCHEMA_VERSION，
 // 并把该版本的增量 DDL 写进 migrate()——CREATE TABLE IF NOT EXISTS 对已存在的
 // 旧库什么都不做，没有这套机制，加列只会对新装用户生效，旧库静默落后。
-const SCHEMA_VERSION = 11;
+const SCHEMA_VERSION = 12;
 
 function migrate(database: Database.Database, from: number): void {
     // v2：refreshInterval 那行出厂值是 30000，而监控页的刷新间隔单位是秒，
@@ -69,6 +69,16 @@ function migrate(database: Database.Database, from: number): void {
     // v11：巡检历史表 inspections。只加新表、不动任何旧列，启动时那遍基线 DDL
     // 已经把表建好（CREATE TABLE IF NOT EXISTS 对老库同样生效），这里没有数据要修补——
     // 留这段只为说明 v11 确实做过事，与 v5/v8/v9 同一个理由。
+    // v12：巡检口径表 inspection_profiles，以及 inspections 上的 thresholds_json 一列。
+    // 新表靠基线补齐就行，老列不行——基线的 CREATE TABLE IF NOT EXISTS 对已存在的
+    // inspections 什么都不做，不 ALTER 的话写入会 no such column；而新库基线已经带这一列，
+    // 不查表结构直接 ALTER 又是 duplicate column，会把整个启动期事务顶掉（与 v10 同一个坑）。
+    if (from < 12) {
+        const columns = database.prepare('PRAGMA table_info(inspections)').all() as {name: string}[];
+        if (!columns.some(column => column.name === 'thresholds_json')) {
+            database.prepare('ALTER TABLE inspections ADD COLUMN thresholds_json TEXT').run();
+        }
+    }
 }
 
 // 每次启动都执行基线再补迁移：基线全是幂等语句，因此旧库缺的表和出厂设置行
@@ -1076,11 +1086,13 @@ export interface InspectionRecord {
     skip: number;
     scope_json: string;
     checks_json: string;
+    /** 当次生效的判定口径；v2.8 之前存的行为 null，含义是「口径未知」而不是「用的默认值」。 */
+    thresholds_json: string | null;
     markdown: string;
 }
 
 /** 历史列表用的行：不带 checks_json / markdown，一屏几十行不去解析整份报告。 */
-export type InspectionListRow = Omit<InspectionRecord, 'checks_json' | 'markdown'>;
+export type InspectionListRow = Omit<InspectionRecord, 'checks_json' | 'markdown' | 'thresholds_json'>;
 
 const INSPECTION_LIST_COLUMNS = 'id, cluster_id, cluster_name, version, generated_at, crit, warn, ok, skip, scope_json';
 
@@ -1090,13 +1102,13 @@ export function insertInspection(record: InspectionRecord): void {
         .prepare(
             `INSERT INTO inspections (
                id, cluster_id, cluster_name, version, generated_at, crit, warn, ok, skip,
-               scope_json, checks_json, markdown
+               scope_json, checks_json, thresholds_json, markdown
              ) VALUES (
                @id, @cluster_id, @cluster_name, @version, @generated_at, @crit, @warn, @ok, @skip,
-               @scope_json, @checks_json, @markdown
+               @scope_json, @checks_json, @thresholds_json, @markdown
              )`,
         )
-        .run({...record, version: record.version ?? null});
+        .run({...record, version: record.version ?? null, thresholds_json: record.thresholds_json ?? null});
 }
 
 export function listInspections(clusterId: string, limit: number): InspectionListRow[] {
@@ -1148,6 +1160,44 @@ export function pruneInspections(clusterId: string, keep: number): number {
 export function deleteInspections(clusterId: string): number {
     const database = getDatabase();
     return database.prepare('DELETE FROM inspections WHERE cluster_id = ?').run(clusterId).changes;
+}
+
+// ========== 巡检口径 ==========
+
+export interface InspectionProfileRecord {
+    cluster_id: string;
+    thresholds_json: string;
+    max_namespaces: number;
+    max_topics: number;
+    updated_at: string;
+}
+
+/**
+ * 一簇一行，所以是 upsert 而不是 insert：主键就是 cluster_id。
+ * 集群不存在时外键直接抛错，界面上因此不可能把口径配到一台不存在的集群上。
+ */
+export function upsertInspectionProfile(record: InspectionProfileRecord): void {
+    const database = getDatabase();
+    database
+        .prepare(
+            `INSERT INTO inspection_profiles (
+               cluster_id, thresholds_json, max_namespaces, max_topics, updated_at
+             ) VALUES (
+               @cluster_id, @thresholds_json, @max_namespaces, @max_topics, @updated_at
+             )
+             ON CONFLICT(cluster_id) DO UPDATE SET
+               thresholds_json = excluded.thresholds_json,
+               max_namespaces = excluded.max_namespaces,
+               max_topics = excluded.max_topics,
+               updated_at = excluded.updated_at`,
+        )
+        .run(record);
+}
+
+export function getInspectionProfile(clusterId: string): InspectionProfileRecord | undefined {
+    const database = getDatabase();
+    return database.prepare('SELECT * FROM inspection_profiles WHERE cluster_id = ?').get(clusterId) as
+        InspectionProfileRecord | undefined;
 }
 
 // 用户设置相关操作

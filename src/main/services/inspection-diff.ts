@@ -5,12 +5,16 @@
  * 这一层是纯函数（输入两份检查项数组，不碰 broker、不碰库），所以判定口径
  * 可以在没有集群的机器上被 scripts/inspection-selftest.cjs 覆盖。
  */
+import {diffThresholds} from './inspection-profile';
+import {thresholdDisplay} from '../../shared/inspection-caliber';
 import type {
     InspectionChangeKind,
     InspectionCheck,
     InspectionDiff,
     InspectionDiffItem,
     InspectionLevel,
+    InspectionThresholdChange,
+    InspectionThresholds,
 } from '../../shared/types';
 
 // skip 排在 ok 之上而不是之下：一项检查从「读到了、没问题」变成「读不到了」不是好消息，
@@ -90,18 +94,36 @@ export function diffInspectionChecks(
     });
 }
 
+/** 一行「积压严重线 1000000 条 → 500000 条」：口径变动要能读出是哪个字段、从多少到多少。 */
+function thresholdShiftText(item: InspectionThresholdChange): string {
+    const from = thresholdDisplay(item.field, item.previous);
+    const to = thresholdDisplay(item.field, item.current);
+    return `${item.label} ${from} → ${to}`;
+}
+
+/**
+ * `thresholds` 缺省表示其中一份报告的口径未知（v2.8 之前存的报告还没有这一格）。
+ * 口径未知时宁可不下「判定没变」的结论，也不替它编一份默认口径——
+ * 那份报告的红字到底是按哪条线判的，只有当时的代码知道。
+ */
 export function buildInspectionDiff(
     previousId: string,
     previousGeneratedAt: string,
     previousChecks: InspectionCheck[],
     currentChecks: InspectionCheck[],
+    thresholds?: {previous: InspectionThresholds | null; current: InspectionThresholds | null},
 ): InspectionDiff {
     const items = diffInspectionChecks(previousChecks, currentChecks);
+    const caliber =
+        thresholds && thresholds.previous && thresholds.current
+            ? diffThresholds(thresholds.previous, thresholds.current)
+            : [];
     return {
         previousId,
         previousGeneratedAt,
         items,
         changedCount: items.filter(item => item.kind !== 'unchanged').length,
+        thresholdChanges: caliber,
     };
 }
 
@@ -114,8 +136,17 @@ export function renderDiffMarkdown(diff: InspectionDiff): string[] {
     const lines: string[] = [];
     lines.push(`## 与上次巡检的差别（上次：${diff.previousGeneratedAt}）`);
     lines.push('');
+    if (diff.thresholdChanges.length) {
+        lines.push(`- 判定口径与上次不同：${diff.thresholdChanges.map(thresholdShiftText).join('；')}`);
+        lines.push('  所以下面的级别移动里有一部分是判定线动了，不是集群变了。');
+        lines.push('');
+    }
     if (!diff.changedCount) {
-        lines.push('与上一次结论一致，没有项目的级别发生变化。');
+        lines.push(
+            diff.thresholdChanges.length
+                ? '按新口径重判，级别与上次完全一致。'
+                : '与上一次结论一致，没有项目的级别发生变化。',
+        );
         lines.push('');
         return lines;
     }

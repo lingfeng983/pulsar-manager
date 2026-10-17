@@ -5,6 +5,8 @@
 const assert = require('node:assert');
 const S = require('../dist/src/main/services/cluster-inspection.js');
 const D = require('../dist/src/main/services/inspection-diff.js');
+const P = require('../dist/src/main/services/inspection-profile.js');
+const C = require('../dist/src/shared/inspection-caliber.js');
 
 let passed = 0;
 const failures = [];
@@ -51,7 +53,7 @@ function row(overrides) {
     };
 }
 
-const T = S.INSPECTION_THRESHOLDS;
+const T = C.INSPECTION_THRESHOLDS;
 
 // ---------------------------------------------------------------- 采样行的折叠口径
 
@@ -261,6 +263,95 @@ function fakeClient(overrides) {
 
 const BASE_INPUT = {clusterId: 'c1', clusterName: '生产簇', alerts: []};
 
+// ---------------------------------------------------------------- 巡检口径（可配置的判定线）
+
+check('口径缺省时逐字段等于默认表', () => {
+    eq(JSON.stringify(P.resolveThresholds(undefined)), JSON.stringify(C.INSPECTION_THRESHOLDS), '默认口径');
+});
+
+check('只改一项时其余项仍按默认', () => {
+    const th = P.resolveThresholds({backlogWarn: 500});
+    eq(th.backlogWarn, 500, '改过的那项');
+    eq(th.backlogCrit, T.backlogCrit, '没改的不动');
+});
+
+check('严重线低于关注线被拒（否则红字永远出不来）', () => {
+    assert.throws(() => P.resolveThresholds({backlogWarn: 2000, backlogCrit: 1000}), /严重线/);
+});
+
+check('越界报错而不是静默钳到上限', () => {
+    assert.throws(() => P.resolveThresholds({backlogWarn: 500000000}), /只能在/);
+});
+
+check('整数字段拒绝小数', () => {
+    assert.throws(() => P.resolveThresholds({detailTopN: 2.5}), /整数/);
+});
+
+check('NaN 与字符串被拒', () => {
+    assert.throws(() => P.resolveThresholds({rateRatio: NaN}), /有限的数字/);
+    assert.throws(() => P.resolveThresholds({rateRatio: '3'}), /有限的数字/);
+});
+
+check('比例线低于 1 倍被拒（那样任何 topic 都算消费跟不上）', () => {
+    assert.throws(() => P.resolveThresholds({rateRatio: 0.5}), /倍数/);
+});
+
+check('浮点输入抹掉噪声，避免导出文件里出现 1.1000000000000001', () => {
+    eq(P.resolveThresholds({rateMinIn: 0.125}).rateMinIn, 0.13, '按两位收');
+    eq(P.resolveThresholds({rateRatio: 1.5}).rateRatio, 1.5, '本来就是两位的不动');
+});
+
+check('overrides 只列出与默认不同的字段', () => {
+    eq(P.thresholdOverrides(T).length, 0, '默认口径没有改动');
+    eq(P.thresholdOverrides({...T, unackedWarn: 1, detailTopN: 3}).join(','), 'unackedWarn,detailTopN', '按字段表顺序');
+});
+
+check('两次口径的逐字段差别', () => {
+    const changes = P.diffThresholds(T, {...T, backlogCrit: 500000});
+    eq(changes.length, 1, '只有一条');
+    eq(changes[0].label, '积压严重线', '带中文名');
+    eq(changes[0].previous, T.backlogCrit, '从多少');
+    eq(changes[0].current, 500000, '到多少');
+    eq(P.diffThresholds(T, T).length, 0, '同一份口径没有差别');
+});
+
+check('采样上限：缺省用默认，越界与非整数被拒', () => {
+    eq(P.resolveSampling({}).maxTopics, C.INSPECTION_DEFAULTS.maxTopics, '默认值');
+    eq(P.resolveSampling({maxNamespaces: 30}).maxNamespaces, 30, '传了就按传的');
+    assert.throws(() => P.resolveSampling({maxTopics: 0}), /topic 采样上限/);
+    assert.throws(() => P.resolveSampling({maxTopics: 1001}), /topic 采样上限/);
+    assert.throws(() => P.resolveSampling({maxTopics: 1.5}), /topic 采样上限/);
+});
+
+check('判定线一动，同一批数据的级别就跟着动', () => {
+    const rows = [row({name: 'public/default/a', backlog: 600, consumerCount: 1})];
+    eq(S.buildBacklogCheck(rows).level, 'ok', '默认口径下 600 条不算事');
+    eq(S.buildBacklogCheck(rows, {...T, backlogWarn: 500}).level, 'warn', '关注线降到 500 就报关注');
+    eq(S.buildBacklogCheck(rows, {...T, backlogWarn: 500, backlogCrit: 600}).level, 'crit', '严重线降到 600 就报严重');
+});
+
+check('未 ack 关注线降到 100 时 200 条就报关注', () => {
+    const rows = [row({name: 'public/default/a', maxUnacked: 200, consumerCount: 1})];
+    eq(S.buildUnackedCheck(rows).level, 'ok', '默认 5 千以下不报');
+    eq(S.buildUnackedCheck(rows, {...T, unackedWarn: 100}).level, 'warn', '降线之后报关注');
+});
+
+check('速率判定同时受比例线与入向下限约束', () => {
+    const rows = [row({name: 'public/default/a', msgRateIn: 20, msgRateOut: 8, consumerCount: 1})];
+    eq(S.buildThroughputCheck(rows).level, 'ok', '默认 3 倍线以下不算跟不上');
+    eq(S.buildThroughputCheck(rows, {...T, rateRatio: 2}).level, 'warn', '降到 2 倍就命中');
+    eq(S.buildThroughputCheck(rows, {...T, rateRatio: 2, rateMinIn: 50}).level, 'ok', '下限提到 50 之后这点流量不报');
+});
+
+check('明细条数按口径裁剪而不是写死', () => {
+    const rows = [];
+    for (let i = 0; i < 12; i += 1) {
+        rows.push(row({name: `public/default/t${i}`, blockedSubscriptions: ['s'], consumerCount: 1}));
+    }
+    eq(S.buildUnackedCheck(rows, {...T, detailTopN: 3}).detail.length, 3, '只列 3 条');
+    eq(S.buildUnackedCheck(rows).detail.length, T.detailTopN, '默认按默认条数');
+});
+
 // ---------------------------------------------------------------- 环比（inspection-diff）
 
 function item(key, level, summary) {
@@ -327,7 +418,7 @@ check('环比文案：本次未出现不等于已恢复', () => {
     eq(D.diffChangeLabel('worsened'), '恶化', '恶化');
 });
 
-// ---------------------------------------------------------------- 历史表（SQL 口径）
+// ---------------------------------------------------------------- 巡检历史与口径（SQL 口径）
 //
 // 这几条语句与 src/main/database/sqlite.ts 里的 helper 是同一段 SQL 的两份抄本：
 // helper 本身在纯 node 下起不来（node_modules 里的 better-sqlite3 编的是 Electron 的
@@ -340,11 +431,22 @@ const {SCHEMA_SQL} = require('../dist/src/main/database/schema.js');
 
 const INSERT_INSPECTION = `INSERT INTO inspections (
    id, cluster_id, cluster_name, version, generated_at, crit, warn, ok, skip,
-   scope_json, checks_json, markdown
+   scope_json, checks_json, thresholds_json, markdown
  ) VALUES (
    @id, @cluster_id, @cluster_name, @version, @generated_at, @crit, @warn, @ok, @skip,
-   @scope_json, @checks_json, @markdown
+   @scope_json, @checks_json, @thresholds_json, @markdown
  )`;
+
+const UPSERT_PROFILE = `INSERT INTO inspection_profiles (
+   cluster_id, thresholds_json, max_namespaces, max_topics, updated_at
+ ) VALUES (
+   @cluster_id, @thresholds_json, @max_namespaces, @max_topics, @updated_at
+ )
+ ON CONFLICT(cluster_id) DO UPDATE SET
+   thresholds_json = excluded.thresholds_json,
+   max_namespaces = excluded.max_namespaces,
+   max_topics = excluded.max_topics,
+   updated_at = excluded.updated_at`;
 
 const LIST_INSPECTIONS = `SELECT id, cluster_id, cluster_name, version, generated_at, crit, warn, ok, skip, scope_json
  FROM inspections WHERE cluster_id = ? ORDER BY generated_at DESC LIMIT ?`;
@@ -370,6 +472,7 @@ function inspectionRecord(overrides) {
         skip: 1,
         scope_json: '{"topicsSeen":9,"topicsSampled":5}',
         checks_json: '[{"key":"backlog","title":"消息积压","level":"warn","summary":"x"}]',
+        thresholds_json: '{"backlogWarn":10000,"backlogCrit":1000000,"unackedWarn":5000,"rateRatio":3,"rateMinIn":10,"detailTopN":8}',
         markdown: '# 报告',
         ...overrides,
     };
@@ -396,7 +499,7 @@ check('基线 DDL 连跑两次不炸（每次启动都会重跑一遍）', () =>
     const columns = database.prepare('PRAGMA table_info(inspections)').all().map(column => column.name);
     eq(
         columns.join(','),
-        'id,cluster_id,cluster_name,version,generated_at,crit,warn,ok,skip,scope_json,checks_json,markdown',
+        'id,cluster_id,cluster_name,version,generated_at,crit,warn,ok,skip,scope_json,checks_json,thresholds_json,markdown',
         'inspections 列清单',
     );
     database.close();
@@ -487,6 +590,72 @@ check('清空历史按集群隔离；外键让乱写的 cluster_id 进不来', (
         assert.ok(/FOREIGN KEY/i.test(String(error.message)), '报的是外键而不是列名');
     }
     assert.ok(rejected, 'cluster_id 外键真的生效');
+    database.close();
+});
+
+const CLUSTER_A = '11111111-0000-4000-8000-000000000001';
+const CLUSTER_B = '22222222-0000-4000-8000-000000000002';
+
+function profileRow(overrides) {
+    return {
+        cluster_id: CLUSTER_A,
+        thresholds_json: '{"backlogWarn":500}',
+        max_namespaces: 10,
+        max_topics: 20,
+        updated_at: '2026-10-17T00:00:00.000Z',
+        ...overrides,
+    };
+}
+
+check('口径表按基线建出来，列名与 helper 写的一致', () => {
+    const database = openHistoryDb();
+    const columns = database.prepare('PRAGMA table_info(inspection_profiles)').all().map(column => column.name);
+    eq(columns.join(','), 'cluster_id,thresholds_json,max_namespaces,max_topics,updated_at', '列名与顺序');
+    database.close();
+});
+
+check('一簇一份口径：第二次保存覆盖而不是多出一行', () => {
+    const database = openHistoryDb();
+    const statement = database.prepare(UPSERT_PROFILE);
+    statement.run(profileRow({}));
+    statement.run(profileRow({thresholds_json: '{"backlogWarn":900}', max_topics: 21, updated_at: '2026-10-17T01:00:00.000Z'}));
+    eq(Number(database.prepare('SELECT COUNT(*) AS c FROM inspection_profiles').get().c), 1, '仍然一行');
+    const saved = database.prepare('SELECT * FROM inspection_profiles WHERE cluster_id = ?').get(CLUSTER_A);
+    eq(saved.thresholds_json, '{"backlogWarn":900}', '阈值被覆盖');
+    eq(Number(saved.max_topics), 21, '采样上限被覆盖');
+    eq(saved.updated_at, '2026-10-17T01:00:00.000Z', '更新时间刷新');
+    database.close();
+});
+
+check('口径不能配到一台不存在的集群上', () => {
+    const database = openHistoryDb();
+    let rejected = false;
+    try {
+        database.prepare(UPSERT_PROFILE).run(profileRow({cluster_id: '99999999-9999-4999-9999-999999999999'}));
+    } catch (error) {
+        rejected = true;
+        assert.ok(/FOREIGN KEY/i.test(String(error.message)), '报的是外键');
+    }
+    assert.ok(rejected, 'cluster_id 外键挡住了');
+    database.close();
+});
+
+check('删集群时口径行跟着消失，别的集群不受影响', () => {
+    const database = openHistoryDb();
+    database.prepare(UPSERT_PROFILE).run(profileRow({}));
+    database.prepare(UPSERT_PROFILE).run(profileRow({cluster_id: CLUSTER_B}));
+    database.prepare(INSERT_INSPECTION).run(inspectionRecord({cluster_id: CLUSTER_A}));
+    database.prepare('DELETE FROM clusters WHERE id = ?').run(CLUSTER_A);
+    eq(Number(database.prepare('SELECT COUNT(*) AS c FROM inspection_profiles WHERE cluster_id = ?').get(CLUSTER_A).c), 0, '口径级联删除');
+    eq(Number(database.prepare('SELECT COUNT(*) AS c FROM inspections WHERE cluster_id = ?').get(CLUSTER_A).c), 0, '报告级联删除');
+    eq(Number(database.prepare('SELECT COUNT(*) AS c FROM inspection_profiles WHERE cluster_id = ?').get(CLUSTER_B).c), 1, '另一集群还在');
+    database.close();
+});
+
+check('报告行允许没有口径这一格（v2.8 之前存的就是这样）', () => {
+    const database = openHistoryDb();
+    database.prepare(INSERT_INSPECTION).run(inspectionRecord({thresholds_json: null}));
+    eq(database.prepare('SELECT thresholds_json FROM inspections').get().thresholds_json, null, '空读回来是 null，不是默认值');
     database.close();
 });
 
@@ -610,8 +779,8 @@ async function main() {
 
     await checkAsync('默认上限与 options 缺省时一致', async () => {
         const report = await S.runInspection(fakeClient(), BASE_INPUT);
-        eq(report.scope.maxNamespaces, S.INSPECTION_DEFAULTS.maxNamespaces, '命名空间默认上限');
-        eq(report.scope.maxTopics, S.INSPECTION_DEFAULTS.maxTopics, 'topic 默认上限');
+        eq(report.scope.maxNamespaces, C.INSPECTION_DEFAULTS.maxNamespaces, '命名空间默认上限');
+        eq(report.scope.maxTopics, C.INSPECTION_DEFAULTS.maxTopics, 'topic 默认上限');
     });
 
     await checkAsync('告警事件被带进报告', async () => {
@@ -671,6 +840,46 @@ async function main() {
         assert.ok(md.indexOf('与上次巡检的差别') < md.indexOf('Broker 健康检查'), '在逐项清单之前');
         const plain = S.renderInspectionMarkdown(report);
         assert.ok(!plain.includes('与上次巡检的差别'), '没有前一份时不写空段');
+    });
+
+    await checkAsync('报告把当次生效的口径抄进去，导出文件说得出这是调过的线', async () => {
+        const report = await S.runInspection(fakeClient(), {...BASE_INPUT, thresholds: {backlogWarn: 500}});
+        eq(report.thresholds.backlogWarn, 500, '用的就是传进来的');
+        eq(report.thresholds.backlogCrit, T.backlogCrit, '没改的仍是默认');
+        const md = S.renderInspectionMarkdown(report);
+        assert.ok(md.includes('已按本集群调整'), '写明口径调过');
+        assert.ok(md.includes('积压关注线 500 条'), '带上数值与单位');
+    });
+
+    await checkAsync('没调过线的报告写明默认阈值', async () => {
+        const report = await S.runInspection(fakeClient(), BASE_INPUT);
+        const md = S.renderInspectionMarkdown(report);
+        assert.ok(md.includes('判定口径：默认阈值'), '一句话说明没动过线');
+        assert.ok(!md.includes('已按本集群调整'), '不该出现「调整」字样');
+    });
+
+    await checkAsync('口径变过之后，环比要把这部分差别单独摘出来', async () => {
+        const current = await S.runInspection(fakeClient(), {...BASE_INPUT, thresholds: {backlogWarn: 500}});
+        const diff = D.buildInspectionDiff('p-9', '2026-10-16T09:00:00.000Z', current.checks, current.checks, {
+            previous: T,
+            current: current.thresholds,
+        });
+        eq(diff.thresholdChanges.length, 1, '一条口径变化');
+        const md = S.renderInspectionMarkdown(current, diff);
+        assert.ok(md.includes('判定口径与上次不同'), 'Markdown 里有这句');
+        assert.ok(md.includes('积压关注线 10000 条 → 500 条'), '写清从多少到多少');
+        // 级别一项没动，但口径动了：不能只丢一句「结论一致」，那会让人以为线没变
+        assert.ok(md.includes('按新口径重判，级别与上次完全一致'), '结论一致也要说明是重判过的');
+    });
+
+    await checkAsync('前一份报告口径未知时不编造口径变化', async () => {
+        const current = await S.runInspection(fakeClient(), {...BASE_INPUT, thresholds: {backlogWarn: 500}});
+        const diff = D.buildInspectionDiff('p-9', '2026-10-16T09:00:00.000Z', current.checks, current.checks, {
+            previous: null,
+            current: current.thresholds,
+        });
+        eq(diff.thresholdChanges.length, 0, '未知就当未知');
+        assert.ok(!S.renderInspectionMarkdown(current, diff).includes('判定口径与上次不同'), '不写口径段');
     });
 
     console.log(`ALL PASS（${passed} 项）`);
