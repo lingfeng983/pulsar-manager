@@ -30,6 +30,7 @@ import {condenseErrorText} from '../services/http-client';
 import {POLICY_FIELDS} from '../services/namespace-policy-api';
 import {TOPIC_POLICY_FIELDS} from '../services/topic-policy-api';
 import {NAMESPACE_SYNC_MAX_TARGETS} from '../services/namespace-policy-sync';
+import {TOPIC_SYNC_MAX_TARGETS} from '../services/topic-policy-sync';
 import type {NamespacePolicyField, TopicPolicyField} from '../../shared/types';
 import {sshTunnelManager, type TunnelEndpoints, type TunnelTargets} from '../services/ssh-tunnel';
 import {createLogger} from '../utils/logger';
@@ -588,6 +589,27 @@ export const TopicPolicySetSchema = TopicPolicyScopeSchema.extend({
 
 export const TopicPolicyClearSchema = TopicPolicyScopeSchema.extend({
     field: TopicPolicyFieldSchema,
+});
+
+// ========== Topic 级策略批量同步 ==========
+
+const TopicPolicySyncScopeSchema = z.object({
+    tenant: TenantSchema,
+    namespace: NamespaceSchema,
+    topic: TopicSchema,
+    // persistent 这里不给默认值：同名 topic 在持久与非持久两族里是两个不同的 topic，
+    // 缺省成「持久」会让一次本该推给 non-persistent 的同步被认成源自己而从目标里剔掉。
+    persistent: z.boolean(),
+});
+
+// 目标数与字段数在参数校验阶段就限住，理由与命名空间同步一致：
+// 一次同步的请求数是 目标数 ×（6 次读 + 所选字段数的写），
+// 这些请求全部共用同一个 broker 的请求队列。上限数字与主进程编排层同源。
+export const TopicPolicySyncSchema = z.object({
+    clusterId: ClusterIdSchema,
+    source: TopicPolicySyncScopeSchema,
+    targets: z.array(TopicPolicySyncScopeSchema).min(1).max(TOPIC_SYNC_MAX_TARGETS),
+    fields: z.array(TopicPolicyFieldSchema).min(1).max(TOPIC_POLICY_FIELDS.length),
 });
 
 // partitions = 0 表示非分区 topic：这两条路径在 Admin API 里是不同的端点，

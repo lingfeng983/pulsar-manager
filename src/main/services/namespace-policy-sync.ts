@@ -56,8 +56,10 @@ function scopeKey(scope: NamespacePolicySyncScope): string {
  * - 数组按集合比较：broker 把 replication_clusters 当集合用，顺序不同不算差异，
  *   否则每次同步都会把同样的名单重下一遍，操作日志里全是没意义的改动。
  * - null 与 undefined 同一个键：折叠层的「没读到」和「读回来是 null」在比对上是同一件事。
+ *
+ * 导出给 topic 级同步复用：比较口径写两份，迟早一边认顺序、另一边认集合。
  */
-function canonical(value: unknown): string {
+export function canonical(value: unknown): string {
     if (value === null || value === undefined) {
         return 'null';
     }
@@ -75,7 +77,7 @@ function canonical(value: unknown): string {
     return JSON.stringify(value);
 }
 
-function isUnset(value: unknown): boolean {
+export function isUnset(value: unknown): boolean {
     return value === null || value === undefined;
 }
 

@@ -3,10 +3,12 @@ import {
     TopicPolicyClearSchema,
     TopicPolicyGetSchema,
     TopicPolicySetSchema,
+    TopicPolicySyncSchema,
     registerClientHandler,
     registerMutationHandler,
 } from './_shared';
-import type {TopicPolicyField} from '../../shared/types';
+import {applyTopicPolicySync, planTopicPolicySync} from '../services/topic-policy-sync';
+import type {TopicPolicyField, TopicPolicySyncParams, TopicPolicySyncScope} from '../../shared/types';
 
 // Topic 级策略与命名空间策略一样是纯 broker 状态：值存在 broker 那边才改得动，
 // 导出配置包时也跟着集群走，不需要在本地 SQLite 里再留一份副本。
@@ -41,6 +43,51 @@ function topicAudit(action: string) {
 
 function passThrough([params]: unknown[]) {
     return params ?? {};
+}
+
+// 批量同步的入参形状：字段全部写成可选，理由与 TopicPolicyInput 相同
+// （strict:false 之下 z.infer 的属性看着就是可选，两处各写一遍迟早漂移）。
+interface SyncInput {
+    clusterId?: string;
+    source?: Partial<TopicPolicySyncScope>;
+    targets?: Partial<TopicPolicySyncScope>[];
+    fields?: TopicPolicyField[];
+}
+
+// 把那份「全是可选」的解析结果换成服务层要的必填形状。这些键在 schema 那一层
+// 已经保证存在，所以这里用非空断言收口，而不是给编排层加一条「参数缺失」的分支。
+// persistent 走 ?? true 而不是非空断言：schema 里它是必填布尔，
+// 但这里的类型是 Partial，写断言会让「没带 persistent」在类型上看不出来。
+function toSyncParams(input: SyncInput): TopicPolicySyncParams {
+    const scope = (value: Partial<TopicPolicySyncScope>): TopicPolicySyncScope => ({
+        tenant: value.tenant!,
+        namespace: value.namespace!,
+        topic: value.topic!,
+        persistent: value.persistent ?? true,
+    });
+    return {
+        clusterId: input.clusterId!,
+        source: scope(input.source ?? {}),
+        targets: (input.targets ?? []).map(scope),
+        fields: input.fields ?? [],
+    };
+}
+
+// 一次同步改的是十几个 topic × 若干字段，逐条落日志会把「谁改了什么」淹在行数里；
+// 这里记一整笔：源、目标清单、字段清单。改坏了要回滚，按这笔的 fields + targets 反着来即可。
+function syncAudit(input: SyncInput): MutationAudit {
+    const source = scopeOf(input.source ?? {});
+    return {
+        action: 'sync_topic_policies',
+        resource_type: 'pulsar_topic',
+        resource_id: source,
+        resource_name: `${input.targets?.length ?? 0} 个目标 topic`,
+        details: JSON.stringify({
+            source,
+            targets: (input.targets ?? []).map(target => scopeOf(target)),
+            fields: input.fields ?? [],
+        }),
+    };
 }
 
 export function registerTopicPolicyHandlers() {
@@ -79,5 +126,16 @@ export function registerTopicPolicyHandlers() {
                 input.field!,
                 input.persistent ?? true,
             ),
+    );
+
+    // 预览与执行是两条通道：预览只读，界面可以放心多点几次；
+    // 执行自己重新读一遍两边的值再算差异，界面上那份预览只用于核对，不是执行依据——
+    // 否则中间有人改了策略，执行就会按过期视图覆盖现值。
+    registerClientHandler('topic:policy:sync:plan', TopicPolicySyncSchema, passThrough, (client, input) =>
+        planTopicPolicySync(client, toSyncParams(input)),
+    );
+
+    registerMutationHandler('topic:policy:sync:apply', TopicPolicySyncSchema, passThrough, syncAudit, (client, input) =>
+        applyTopicPolicySync(client, toSyncParams(input)),
     );
 }

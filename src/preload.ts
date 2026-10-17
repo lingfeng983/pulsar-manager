@@ -60,6 +60,9 @@ import type {
     TopicPolicyClearParams,
     TopicPolicyScopeParams,
     TopicPolicySetParams,
+    TopicPolicySyncApplyResult,
+    TopicPolicySyncParams,
+    TopicPolicySyncPlanResult,
     TopicPolicyView,
     TopicStats,
     BrokerSchemaInfo,
@@ -505,6 +508,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
         get: (params: TopicPolicyScopeParams) => ipcRenderer.invoke('topic:policy:get', params),
         set: (params: TopicPolicySetParams) => ipcRenderer.invoke('topic:policy:set', params),
         clear: (params: TopicPolicyClearParams) => ipcRenderer.invoke('topic:policy:clear', params),
+        syncPlan: (params: TopicPolicySyncParams) => ipcRenderer.invoke('topic:policy:sync:plan', params),
+        syncApply: (params: TopicPolicySyncParams) => ipcRenderer.invoke('topic:policy:sync:apply', params),
     },
 
     // 拓扑
@@ -934,6 +939,8 @@ declare global {
                 get: (params: TopicPolicyScopeParams) => Promise<APIResponse<TopicPolicyView>>;
                 set: (params: TopicPolicySetParams) => Promise<APIResponse<void>>;
                 clear: (params: TopicPolicyClearParams) => Promise<APIResponse<void>>;
+                syncPlan: (params: TopicPolicySyncParams) => Promise<APIResponse<TopicPolicySyncPlanResult>>;
+                syncApply: (params: TopicPolicySyncParams) => Promise<APIResponse<TopicPolicySyncApplyResult>>;
             };
             topology: {
                 getClusterTopology: (

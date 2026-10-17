@@ -1,12 +1,14 @@
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {Alert, Button, Card, Drawer, Space, Tag, Typography, message} from 'antd';
-import {DeleteOutlined, EditOutlined, ReloadOutlined} from '@ant-design/icons';
+import {DeleteOutlined, DiffOutlined, EditOutlined, ReloadOutlined, SyncOutlined} from '@ant-design/icons';
 import StateBlock from '../common/StateBlock';
 import {useConfirmDanger} from '../common/dangerConfirm';
 import IconButton from '../common/IconButton';
 import {NOT_SET, TOPIC_POLICY_GROUPS, TopicPolicyRow} from './topicPolicyMeta';
 import TopicPolicyEditModal from './TopicPolicyEditModal';
-import type {TopicPolicyView} from '../../types';
+import TopicPolicyDiffModal from './TopicPolicyDiffModal';
+import TopicPolicySyncModal from './TopicPolicySyncModal';
+import type {TopicPolicyField, TopicPolicySyncScope, TopicPolicyView} from '../../types';
 
 interface TopicPolicyPanelProps {
     clusterId: string;
@@ -33,6 +35,9 @@ const TopicPolicyPanel: React.FC<TopicPolicyPanelProps> = ({
     const [editing, setEditing] = useState<TopicPolicyRow | null>(null);
     const [rawOpen, setRawOpen] = useState(false);
     const [busy, setBusy] = useState<string | null>(null);
+    const [modal, setModal] = useState<'diff' | 'sync' | null>(null);
+    // 对比弹窗里点「同步到对端」时带过来的预选：目标就是对端 topic，字段就是界面判出的差异项
+    const [preset, setPreset] = useState<{targets: TopicPolicySyncScope[]; fields: TopicPolicyField[]} | null>(null);
     const loadedRef = useRef(false);
     const requestIdRef = useRef(0);
     const confirmDanger = useConfirmDanger();
@@ -75,6 +80,13 @@ const TopicPolicyPanel: React.FC<TopicPolicyPanelProps> = ({
             void load();
         }
     }, [active, load]);
+
+    // 这一份作用域对象要给对比/同步两个弹窗当 props：每次渲染都新建会让
+    // 弹窗内部的 params useMemo 白算一遍，所以按当前 topic 固定住。
+    const scope = useMemo<TopicPolicySyncScope>(
+        () => ({tenant, namespace, topic, persistent}),
+        [tenant, namespace, topic, persistent],
+    );
 
     const unavailable = useMemo(
         () => new Map(view ? view.unavailable.map(item => [item.field, item.reason] as const) : []),
@@ -126,6 +138,12 @@ const TopicPolicyPanel: React.FC<TopicPolicyPanelProps> = ({
                     <Space size={4}>
                         <Button size="small" onClick={() => setRawOpen(true)} disabled={!view}>
                             端点原始返回
+                        </Button>
+                        <Button size="small" icon={<DiffOutlined />} onClick={() => setModal('diff')}>
+                            与其它 topic 对比
+                        </Button>
+                        <Button size="small" icon={<SyncOutlined />} onClick={() => setModal('sync')}>
+                            同步到其它 topic
                         </Button>
                         <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => void load()}>
                             刷新
@@ -220,6 +238,33 @@ const TopicPolicyPanel: React.FC<TopicPolicyPanelProps> = ({
                     persistent={persistent}
                     onClose={() => setEditing(null)}
                     onSaved={load}
+                />
+            ) : null}
+
+            {modal === 'diff' ? (
+                <TopicPolicyDiffModal
+                    clusterId={clusterId}
+                    base={scope}
+                    onClose={() => setModal(null)}
+                    onSync={payload => {
+                        // 对比自己不写任何东西：把差异交给同步弹窗，用户在那里还要再预览一次
+                        setPreset(payload);
+                        setModal('sync');
+                    }}
+                />
+            ) : null}
+
+            {modal === 'sync' ? (
+                <TopicPolicySyncModal
+                    clusterId={clusterId}
+                    source={scope}
+                    initialTargets={preset?.targets}
+                    initialFields={preset?.fields}
+                    onClose={() => {
+                        setModal(null);
+                        setPreset(null);
+                    }}
+                    onApplied={load}
                 />
             ) : null}
 
