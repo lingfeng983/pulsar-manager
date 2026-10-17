@@ -24,6 +24,10 @@ import type {
     MessageSendParams,
     MessageTemplate,
     MessageTemplateUpsertParams,
+    NamespacePolicyClearParams,
+    NamespacePolicyScopeParams,
+    NamespacePolicySetParams,
+    NamespacePolicyView,
     OperationLog,
     PeekParams,
     PluginEntry,
@@ -130,8 +134,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
             ipcRenderer.invoke('resources:getSubscriptions', clusterId, tenant, namespace, topic, persistent),
         getTenantInfo: (clusterId: string, tenant: string) =>
             ipcRenderer.invoke('resources:getTenantInfo', clusterId, tenant),
-        getNamespaceInfo: (clusterId: string, tenant: string, namespace: string) =>
-            ipcRenderer.invoke('resources:getNamespaceInfo', clusterId, tenant, namespace),
         createSubscription: (
             clusterId: string,
             tenant: string,
@@ -481,6 +483,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
         assignments: (clusterId: string) => ipcRenderer.invoke('worker:assignments', {clusterId}),
     },
 
+    // 命名空间策略：读一次拿折叠好的视图，写按字段端点逐个走
+    namespacePolicy: {
+        get: (params: NamespacePolicyScopeParams) => ipcRenderer.invoke('namespace:policies:get', params),
+        set: (params: NamespacePolicySetParams) => ipcRenderer.invoke('namespace:policy:set', params),
+        clear: (params: NamespacePolicyClearParams) => ipcRenderer.invoke('namespace:policy:clear', params),
+    },
+
     // 拓扑
     topology: {
         getClusterTopology: (clusterId: string, limits?: TopologyLimits) =>
@@ -603,11 +612,6 @@ declare global {
                     clusterId: string,
                     tenant: string,
                 ) => Promise<APIResponse<{adminRoles: string[]; allowedClusters: string[]}>>;
-                getNamespaceInfo: (
-                    clusterId: string,
-                    tenant: string,
-                    namespace: string,
-                ) => Promise<APIResponse<{replicationClusters: string[]; clusters: string[]}>>;
                 createSubscription: (
                     clusterId: string,
                     tenant: string,
@@ -896,6 +900,11 @@ declare global {
                     value: string;
                 }) => Promise<APIResponse<void>>;
                 assignments: (clusterId: string) => Promise<APIResponse<Record<string, string[]>>>;
+            };
+            namespacePolicy: {
+                get: (params: NamespacePolicyScopeParams) => Promise<APIResponse<NamespacePolicyView>>;
+                set: (params: NamespacePolicySetParams) => Promise<APIResponse<void>>;
+                clear: (params: NamespacePolicyClearParams) => Promise<APIResponse<void>>;
             };
             topology: {
                 getClusterTopology: (

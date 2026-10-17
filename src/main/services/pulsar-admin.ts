@@ -5,13 +5,21 @@ import {REQUEST_CONFIG} from '../config/constants';
 import {ResourceAPI} from './resource-api';
 import {MetricsAPI} from './metrics-api';
 import {WorkerAPI} from './worker-api';
-import type {PulsarResourceKind, PulsarRuntimeCreateParams, TopicConfigPatch, TopologyLimits} from '../../shared/types';
+import {NamespacePolicyAPI} from './namespace-policy-api';
+import type {
+    NamespacePolicyField,
+    PulsarResourceKind,
+    PulsarRuntimeCreateParams,
+    TopicConfigPatch,
+    TopologyLimits,
+} from '../../shared/types';
 
 // Re-export all types and infrastructure from sub-modules
 export * from './http-client';
 export {ResourceAPI} from './resource-api';
 export {MetricsAPI} from './metrics-api';
 export {WorkerAPI, WorkerUnavailableError} from './worker-api';
+export {NamespacePolicyAPI} from './namespace-policy-api';
 
 // Re-export specific types for convenience (handlers.ts imports these)
 export type {
@@ -42,6 +50,7 @@ export class PulsarAdminClient {
     private resourceAPI: ResourceAPI;
     private metricsAPI: MetricsAPI;
     private workerAPI: WorkerAPI;
+    private namespacePolicyAPI: NamespacePolicyAPI;
 
     constructor(config: PulsarAdminConfig) {
         this.http = createAxiosClient(config);
@@ -51,6 +60,7 @@ export class PulsarAdminClient {
         this.resourceAPI = new ResourceAPI(this.http, this.semaphore);
         this.metricsAPI = new MetricsAPI(this.http, this.semaphore, this.resourceAPI, this.aggregateSemaphore);
         this.workerAPI = new WorkerAPI(this.http, this.semaphore);
+        this.namespacePolicyAPI = new NamespacePolicyAPI(this.http, this.semaphore);
     }
 
     // ========== 集群操作 ==========
@@ -92,8 +102,20 @@ export class PulsarAdminClient {
         return this.resourceAPI.getNamespaces(tenant);
     }
 
-    async getNamespaceInfo(tenant: string, namespace: string) {
-        return this.resourceAPI.getNamespaceInfo(tenant, namespace);
+    // 命名空间策略（原来的 getNamespaceInfo 已并入这里）：那个方法声明返回
+    // {replicationClusters, clusters}，而 broker 在此路径下返回的是 Policies，
+    // 键名是 replication_clusters / allowed_clusters——两个键从来没被取到过，
+    // 页面上的「复制集群数」因此恒为 0。折叠统一交给 NamespacePolicyAPI 做。
+    async getPolicies(tenant: string, namespace: string) {
+        return this.namespacePolicyAPI.getPolicies(tenant, namespace);
+    }
+
+    async setNamespacePolicy(tenant: string, namespace: string, field: NamespacePolicyField, value: unknown) {
+        return this.namespacePolicyAPI.setPolicy(tenant, namespace, field, value);
+    }
+
+    async clearNamespacePolicy(tenant: string, namespace: string, field: NamespacePolicyField, quotaType?: string) {
+        return this.namespacePolicyAPI.clearPolicy(tenant, namespace, field, quotaType);
     }
 
     async createNamespace(tenant: string, namespace: string) {

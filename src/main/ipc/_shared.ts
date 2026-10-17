@@ -27,6 +27,8 @@ import {encrypt, decrypt} from '../services/encryption';
 import {SERVICE_URL_PATTERN, WEB_URL_PATTERN} from '../services/app-config';
 import {PulsarAdminClient, clientManager} from '../services/pulsar-admin';
 import {condenseErrorText} from '../services/http-client';
+import {POLICY_FIELDS} from '../services/namespace-policy-api';
+import type {NamespacePolicyField} from '../../shared/types';
 import {sshTunnelManager, type TunnelEndpoints, type TunnelTargets} from '../services/ssh-tunnel';
 import {createLogger} from '../utils/logger';
 
@@ -511,6 +513,36 @@ export const FunctionStateGetSchema = RuntimeItemPathSchema.extend({
 
 export const FunctionStateSetSchema = FunctionStateGetSchema.extend({
     value: z.string().max(256 * 1024),
+});
+
+// ========== 命名空间策略 ==========
+
+// 字段名单直接取主进程字段表的键：这里再抄一份，两处名单迟早漂移成
+// 「界面能选、服务层不认识」。
+export const NamespacePolicyFieldSchema = z.enum(
+    POLICY_FIELDS as unknown as [NamespacePolicyField, ...NamespacePolicyField[]],
+);
+
+const NamespacePolicyScopeSchema = z.object({
+    clusterId: ClusterIdSchema,
+    tenant: TenantSchema,
+    namespace: NamespaceSchema,
+});
+
+export const NamespacePolicyGetSchema = NamespacePolicyScopeSchema;
+
+// value 保持 unknown：取值范围与形状随字段走（消息 TTL 是秒、订阅过期是分钟、
+// 限速是对象、复制集群是字符串数组），校验跟着端点放在字段表里；
+// 在这里写成 zod 联合会变成第二张字段表，而且改一个端点要动两个文件。
+export const NamespacePolicySetSchema = NamespacePolicyScopeSchema.extend({
+    field: NamespacePolicyFieldSchema,
+    value: z.unknown(),
+});
+
+export const NamespacePolicyClearSchema = NamespacePolicyScopeSchema.extend({
+    field: NamespacePolicyFieldSchema,
+    // 清除积压配额必须点名删哪一条；其余字段忽略这个键
+    quotaType: z.string().trim().max(64).optional(),
 });
 
 // partitions = 0 表示非分区 topic：这两条路径在 Admin API 里是不同的端点，

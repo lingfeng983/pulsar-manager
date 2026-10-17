@@ -107,6 +107,17 @@ export type {
     PulsarTriggerResult,
     PulsarWorkerNode,
     PulsarWorkerState,
+    // 命名空间策略
+    NamespaceBacklogQuota,
+    NamespaceBacklogQuotaValue,
+    NamespacePolicyClearParams,
+    NamespacePolicyField,
+    NamespacePolicyScopeParams,
+    NamespacePolicySetParams,
+    NamespacePolicyView,
+    NamespaceRateLimit,
+    NamespaceRateValue,
+    NamespaceRetentionValue,
 } from '../../shared/types';
 
 // 订阅

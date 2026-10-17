@@ -130,13 +130,6 @@ export function registerResourceHandlers() {
         (client, {tenant}) => client.getTenantInfo(tenant),
     );
 
-    registerClientHandler(
-        'resources:getNamespaceInfo',
-        NamespacePathSchema,
-        ([clusterId, tenant, namespace]) => ({clusterId, tenant, namespace}),
-        (client, {tenant, namespace}) => client.getNamespaceInfo(tenant, namespace),
-    );
-
     registerMutationHandler(
         'resources:createSubscription',
         CreateSubscriptionSchema,

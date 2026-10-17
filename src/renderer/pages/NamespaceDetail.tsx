@@ -8,6 +8,8 @@ import {matchesFilter} from '../utils/textFilter';
 import {topicTab} from '../utils/tabIds';
 import ResourceDetailPage, {type ResourceStat} from '../components/common/ResourceDetailPage';
 import PermissionsPanel from '../components/common/PermissionsPanel';
+import NamespacePolicyPanel from '../components/namespace/NamespacePolicyPanel';
+import type {NamespacePolicyView} from '../types';
 
 interface NamespaceDetailProps {
     clusterId: string;
@@ -27,10 +29,7 @@ const NamespaceDetail: React.FC<NamespaceDetailProps> = ({clusterId, tenant, nam
     const [error, setError] = useState<string | null>(null);
     const [topics, setTopics] = useState<TopicInfo[]>([]);
     const [topicFilter, setTopicFilter] = useState('');
-    const [namespaceInfo, setNamespaceInfo] = useState<{
-        replicationClusters: string[];
-        clusters: string[];
-    } | null>(null);
+    const [namespaceInfo, setNamespaceInfo] = useState<NamespacePolicyView | null>(null);
 
     // 参数切换时旧请求的晚到响应不能覆盖新数据，编号单调递增、绝不归零
     const requestIdRef = useRef(0);
@@ -42,7 +41,7 @@ const NamespaceDetail: React.FC<NamespaceDetailProps> = ({clusterId, tenant, nam
         try {
             const [topicItems, nsResponse] = await Promise.all([
                 loadTopics(clusterId, tenant, namespace),
-                window.electronAPI.resources.getNamespaceInfo(clusterId, tenant, namespace),
+                window.electronAPI.namespacePolicy.get({clusterId, tenant, namespace}),
             ]);
             if (currentRequestId !== requestIdRef.current) {
                 return;
@@ -126,7 +125,12 @@ const NamespaceDetail: React.FC<NamespaceDetailProps> = ({clusterId, tenant, nam
             value: namespaceInfo?.replicationClusters?.length || 0,
             prefix: <DatabaseOutlined />,
         },
-        {key: 'clusters', title: '集群数', value: namespaceInfo?.clusters?.length || 0, prefix: <TagOutlined />},
+        {
+            key: 'clusters',
+            title: '允许集群数',
+            value: namespaceInfo?.allowedClusters?.length || 0,
+            prefix: <TagOutlined />,
+        },
     ];
 
     return (
@@ -140,8 +144,8 @@ const NamespaceDetail: React.FC<NamespaceDetailProps> = ({clusterId, tenant, nam
             infoTitle="命名空间信息"
             infoRows={[
                 {label: '命名空间', value: `${tenant}/${namespace}`},
-                {label: '复制集群', tags: namespaceInfo?.replicationClusters ?? [], fallback: '默认集群'},
-                {label: '集群', tags: namespaceInfo?.clusters ?? [], fallback: '无'},
+                {label: '复制集群', tags: namespaceInfo?.replicationClusters ?? [], fallback: '不复制'},
+                {label: '允许集群', tags: namespaceInfo?.allowedClusters ?? [], fallback: '无'},
             ]}
             listLabel="Topics"
             listTitle={
@@ -166,6 +170,13 @@ const NamespaceDetail: React.FC<NamespaceDetailProps> = ({clusterId, tenant, nam
             dataSource={visibleTopics}
             rowKey={record => `${record.persistent ? 'persistent' : 'non-persistent'}://${record.name}`}
             extraTabs={[
+                {
+                    key: 'policies',
+                    label: '策略',
+                    // 概览只带复制集群这类头部信息；保留、配额、限速、上限这些
+                    // 日常要调的项全在策略页签里，一页装不下也不该装
+                    children: <NamespacePolicyPanel clusterId={clusterId} tenant={tenant} namespace={namespace} />,
+                },
                 {
                     key: 'permissions',
                     label: '权限',

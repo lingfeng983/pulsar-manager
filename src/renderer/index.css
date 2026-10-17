@@ -287,6 +287,37 @@ pre,
     background-color: color-mix(in srgb, var(--color-danger) 8%, transparent);
 }
 
+/* 命名空间策略：一行一个字段，标签列固定宽度让值对齐——
+   运营扫一眼要比对十几个"当前值"，值随标签长度漂移就没法扫。 */
+.policy-row {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--spacing-md);
+    border-bottom: 1px solid var(--color-border);
+    padding-bottom: var(--spacing-xs);
+}
+
+.policy-row:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+}
+
+.policy-row-label {
+    flex: 0 0 168px;
+    color: var(--color-text-secondary);
+}
+
+.policy-row-value {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.policy-row-actions {
+    display: flex;
+    flex: 0 0 auto;
+    gap: var(--spacing-xs);
+}
+
 /* ===== 页面骨架（规范 §2.3：内容区统一内边距、统一标题基线）=====
    内边距取 12px：桌面工具的有效面积优先，页签栏已经承担了视觉分隔。 */
 .page-shell {

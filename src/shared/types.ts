@@ -1095,6 +1095,152 @@ export interface PulsarRuntimeCreateParams {
     userConfig?: Record<string, unknown>;
 }
 
+// ========== 命名空间策略（Namespace Policies）==========
+
+// broker 的 Policies 对象在命名上就是混的：message_ttl_in_seconds 是下划线，
+// deduplicationEnabled 与 autoTopicCreationOverride 是驼峰，同一个对象里两种都有。
+// 折叠层按 broker 实际发出的键名取值，不能按我们的偏好统一成驼峰再解析——
+// 那样老 broker 的下划线字段会全部读成「未设置」，界面显示一片空白且没有任何报错。
+export type NamespaceBacklogQuotaType = 'destination_storage' | 'message_age';
+
+// broker 侧的三种超限处理策略。第三种的官方名字是 consumer_backlog_eviction，
+// 不是 consumer_backpressure：拼错的值会被 Jackson 拒绝成 400，
+// 而 400 的响应体里没有字段名提示，排查成本很高。
+export type NamespaceBacklogRetentionPolicy =
+    'producer_request_hold' | 'producer_exception' | 'consumer_backlog_eviction';
+
+// 读取形状对未知枚举保持宽容：broker 以后新增配额类型或超限策略时，
+// 界面显示陌生的原文，比把它塞进我们认识的三个值里更接近事实。
+export interface NamespaceBacklogQuota {
+    type: string;
+    limitSizeBytes: number;
+    // 仅 message_age 配额用到；0 表示不按时间限制
+    limitTimeSeconds: number;
+    policy: string;
+}
+
+// 限速三兄弟的字段名互不相同（dispatch 用 ...InMsg/...InByte + ratePeriodInSecond，
+// subscribe 用 subscribeThrottlingRatePerConsumer，publish 根本没有周期），
+// 所以折叠成统一形状、原始体留在 raw 里，写入时再按字段表还原各自形状。
+// broker 用 -1 表示「不限制」而不是省略字段，这里保留原值。
+export interface NamespaceRateLimit {
+    msgPerPeriod: number;
+    bytePerPeriod: number;
+    periodInSeconds: number | null;
+    raw: Record<string, unknown>;
+}
+
+// 写入载荷的对象形状。与读取形状刻意分开：写入不带 raw；
+// 读取里 -1 与 period=null 是 broker 的表达方式，写入时由字段表翻译成各自的键名。
+export interface NamespaceRetentionValue {
+    // -1 = 无限保留
+    timeInMinutes: number;
+    sizeInMB: number;
+}
+
+export interface NamespaceBacklogQuotaValue {
+    type: NamespaceBacklogQuotaType;
+    limitSizeBytes: number;
+    limitTimeSeconds: number;
+    policy: NamespaceBacklogRetentionPolicy;
+}
+
+export interface NamespaceRateValue {
+    msgPerPeriod: number;
+    bytePerPeriod: number;
+    // publish 速率没有周期概念，其余限速必填
+    periodInSeconds?: number;
+}
+
+export interface NamespacePolicyView {
+    messageTtlSeconds: number | null;
+    subscriptionExpirationTimeMinutes: number | null;
+    // -1 是 broker 的「无限保留」写法，与 null（未设置、沿用 broker 默认）不同
+    retentionTimeInMinutes: number | null;
+    retentionSizeInMB: number | null;
+    deduplicationEnabled: boolean | null;
+    deduplicationSnapshotIntervalSeconds: number | null;
+    backlogQuotas: NamespaceBacklogQuota[];
+    maxProducersPerTopic: number | null;
+    maxConsumersPerTopic: number | null;
+    maxConsumersPerSubscription: number | null;
+    maxUnackedMessagesPerConsumer: number | null;
+    maxUnackedMessagesPerSubscription: number | null;
+    maxSubscriptionsPerTopic: number | null;
+    maxTopicsPerNamespace: number | null;
+    compactionThreshold: number | null;
+    schemaValidationEnforced: boolean | null;
+    schemaCompatibilityStrategy: string | null;
+    schemaAutoUpdateStrategy: string | null;
+    allowAutoUpdateSchema: boolean | null;
+    encryptionRequired: boolean | null;
+    subscriptionTypesEnabled: string[];
+    subscriptionAuthMode: string | null;
+    replicationClusters: string[];
+    allowedClusters: string[];
+    resourceGroupName: string | null;
+    dispatchRate: NamespaceRateLimit | null;
+    subscriptionDispatchRate: NamespaceRateLimit | null;
+    subscribeRate: NamespaceRateLimit | null;
+    publishRate: NamespaceRateLimit | null;
+    replicatorDispatchRate: NamespaceRateLimit | null;
+    // 能清除的字段由主进程的字段表给出（哪一端有 DELETE 端点），
+    // 界面不再自己判断一遍——两处判断一定漂移，漂移的结果是清除按钮点了得到 405
+    clearableFields: NamespacePolicyField[];
+    // 整份原始 Policies：不在折叠表里的字段（offload、inactive topic、persistence、
+    // delayed delivery 等）靠它在详情里看全，也让界面敢说「这里只列了常用项」
+    raw: Record<string, unknown>;
+}
+
+// 可写字段。取值范围与单位随字段走（见 namespace-policy-api 的字段表），
+// 数字/布尔/字符串/字符串数组/对象都可能出现，所以载荷里 value 保持 unknown，
+// 由字段表逐字段校验并给出中文错误——写成一张 zod 联合会变成第二张字段表。
+// retention 与 backlogQuota 是整对象写入：broker 的 POST 会整体替换这两个字段，
+// 只发其中一个数字会把另一个悄悄清零，所以不单独开放 retentionTimeInMinutes。
+export type NamespacePolicyField =
+    | 'messageTtlSeconds'
+    | 'subscriptionExpirationTimeMinutes'
+    | 'retention'
+    | 'deduplicationEnabled'
+    | 'deduplicationSnapshotIntervalSeconds'
+    | 'backlogQuota'
+    | 'maxProducersPerTopic'
+    | 'maxConsumersPerTopic'
+    | 'maxConsumersPerSubscription'
+    | 'maxUnackedMessagesPerConsumer'
+    | 'maxUnackedMessagesPerSubscription'
+    | 'maxSubscriptionsPerTopic'
+    | 'maxTopicsPerNamespace'
+    | 'compactionThreshold'
+    | 'schemaValidationEnforced'
+    | 'schemaCompatibilityStrategy'
+    | 'schemaAutoUpdateStrategy'
+    | 'allowAutoUpdateSchema'
+    | 'encryptionRequired'
+    | 'dispatchRate'
+    | 'subscriptionDispatchRate'
+    | 'subscribeRate'
+    | 'publishRate'
+    | 'replicatorDispatchRate'
+    | 'replicationClusters';
+
+export interface NamespacePolicyScopeParams {
+    clusterId: string;
+    tenant: string;
+    namespace: string;
+}
+
+export interface NamespacePolicySetParams extends NamespacePolicyScopeParams {
+    field: NamespacePolicyField;
+    value: unknown;
+}
+
+export interface NamespacePolicyClearParams extends NamespacePolicyScopeParams {
+    field: NamespacePolicyField;
+    // 清除 backlogQuota 必须点名是哪一条配额（按存储 / 按消息年龄）
+    quotaType?: string;
+}
+
 export interface ExportedSshConfig {
     host: string;
     port: number;

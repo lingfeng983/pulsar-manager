@@ -390,19 +390,6 @@ export class ResourceAPI {
         );
     }
 
-    // 获取命名空间详情
-    async getNamespaceInfo(
-        tenant: string,
-        namespace: string,
-    ): Promise<{replicationClusters: string[]; clusters: string[]}> {
-        return this.enqueue(async () => {
-            const response = await withRetry(() =>
-                this.http.get(`/admin/v2/namespaces/${seg(tenant)}/${seg(namespace)}`),
-            );
-            return response.data;
-        });
-    }
-
     // 创建命名空间
     async createNamespace(tenant: string, namespace: string): Promise<void> {
         return this.enqueue(async () => {
