@@ -320,7 +320,9 @@ export interface Message {
     // 不用 messageId 当键——批消息里多条的 id 字符串可能相同，会串消息。
     ackSeq?: number;
     // MessageId.serialize() 的 base64：绑定只有 deserialize，没有 fromString，
-    // 想按 id 回放就必须把字节带出来。
+    // 想按 id 回放就必须把字节带出来。当前没有按 id 回放的入口，而 Electron 29
+    // 的 Node-API 禁止外部 Buffer，调用 serialize() 会直接抛
+    // "External buffers are not allowed" 并把整条消费会话带停，所以这里不再赋值。
     messageIdBytes?: string;
     // 超出可确认窗口被淘汰后为 false：界面据此提示"将由 broker 重投"而不是假装能确认
     ackable?: boolean;

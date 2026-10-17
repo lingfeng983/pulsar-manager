@@ -598,14 +598,11 @@ function buildRequest(field: NamespacePolicyField, value: unknown): PolicyReques
             policy: quota.policy,
         };
     }
-    // replication 端点要的是查询参数 clusters（可重复），不是 JSON 数组请求体：
-    // POST 一个 JSON 数组会被 Jackson 拒成 400，而只 POST 空体则会得到一个
-    // “参数缺失”。数组序列化自己拼，避免 axios 默认的 clusters[]= 形式，
-    // broker 不认带方括号的键名。
+    // 复制集群端点收的是裸 JSON 字符串数组请求体。3.3.9 实测：把集群名放进
+    // clusters 查询参数会返回 412 ClusterIds should not be null or empty，
+    // 请求体 {clusterIds:[...]} 则被 Jackson 拒成 400。
     if (field === 'replicationClusters') {
-        const clusters = body as string[];
-        const query = clusters.map(cluster => `clusters=${encodeURIComponent(cluster)}`).join('&');
-        return {path: `${spec.path}?${query}`, verb: spec.verb, body: undefined};
+        return {path: spec.path, verb: spec.verb, body};
     }
     return {path: spec.path, verb: spec.verb, body, params};
 }

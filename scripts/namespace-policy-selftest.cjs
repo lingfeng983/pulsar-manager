@@ -404,16 +404,24 @@ const READ_ROUTES = {
         assert(http.calls.length === 1, '没点名类型时不该发出第二条 DELETE');
     });
 
-    await check('复制集群整表覆盖用 POST + 可重复 clusters 查询参数（不是 JSON 数组请求体）', async () => {
+    // 3.3.9 实测：clusters 查询参数返回 412 ClusterIds should not be null or empty，
+    // {clusterIds:[...]} 请求体被 Jackson 拒成 400，只有裸 JSON 数组能过。
+    await check('复制集群整表覆盖用 POST + 裸 JSON 字符串数组请求体（不是 clusters 查询参数）', async () => {
         const {api, http} = writeApi();
         await api.setPolicy('public', 'default', 'replicationClusters', ['cluster-a', 'cluster b']);
         assert(
-            http.calls[0].url ===
-                '/admin/v2/namespaces/public/default/replication?clusters=cluster-a&clusters=cluster%20b',
-            `集群名应逐个放进 clusters 查询参数：${http.calls[0].url}`,
+            http.calls[0].url === '/admin/v2/namespaces/public/default/replication',
+            `不应把集群名拼进 URL：${http.calls[0].url}`,
         );
         assert(http.calls[0].method === 'post', `应为 POST，实际 ${http.calls[0].method}`);
-        assert(http.calls[0].body === undefined, `请求体应为空，实际 ${JSON.stringify(http.calls[0].body)}`);
+        assert(
+            JSON.stringify(http.calls[0].body) === JSON.stringify(['cluster-a', 'cluster b']),
+            `请求体应为裸数组：${JSON.stringify(http.calls[0].body)}`,
+        );
+        assert(
+            !http.calls[0].params || !('clusters' in http.calls[0].params),
+            `不应再带 clusters 查询参数：${JSON.stringify(http.calls[0].params)}`,
+        );
     });
 
     await check('字段级校验拦掉拼错的枚举与越界数字', async () => {

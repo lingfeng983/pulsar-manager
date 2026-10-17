@@ -811,7 +811,6 @@ export class NativeClientManager {
                           if (handle.unacked.size < MAX_UNACKED_WINDOW) {
                               handle.unacked.set(seq, message);
                               rendered.ackable = true;
-                              rendered.messageIdBytes = message.getMessageId().serialize().toString('base64');
                           } else {
                               rendered.ackable = false;
                           }
