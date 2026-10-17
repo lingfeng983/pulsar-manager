@@ -16,6 +16,7 @@ import WorkerCenter from '../../pages/WorkerCenter';
 import ProducerWorkspace from '../../pages/ProducerWorkspace';
 import ConsumerWorkspace from '../../pages/ConsumerWorkspace';
 import ClusterInspection from '../../pages/ClusterInspection';
+import FleetInspection from '../../pages/FleetInspection';
 import DocCenter from '../../pages/DocCenter';
 import ShortcutConfig from '../../pages/ShortcutConfig';
 import ConfigCenter from '../../pages/ConfigCenter';
@@ -153,6 +154,8 @@ const TabWorkspace: React.FC = () => {
                 return <ClusterTopology clusterId={tab.data?.clusterId} />;
             case 'inspection':
                 return <ClusterInspection clusterId={tab.data?.clusterId} />;
+            case 'fleet-inspection':
+                return <FleetInspection />;
             case 'docs':
                 return <DocCenter />;
             case 'topic': {

@@ -122,3 +122,11 @@ export const inspectionTab = (clusterId?: string, clusterName?: string): TabItem
     type: 'inspection',
     data: clusterId ? {clusterId} : undefined,
 });
+
+// 跨集群汇总与告警中心、文档中心同样是全局单页：它说的就是「所有集群摆在一起」，
+// 按集群各开一页会得到 N 份一模一样的表。
+export const fleetInspectionTab = (): TabItem => ({
+    id: 'fleet-inspection',
+    title: '巡检汇总',
+    type: 'fleet-inspection',
+});

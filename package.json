@@ -22,6 +22,7 @@
         "selftest:k8s": "npm run build:main && node scripts/k8s-forward-selftest.cjs",
         "selftest:inspection": "npm run build:main && node scripts/inspection-selftest.cjs",
         "selftest:schedule": "npm run build:main && node scripts/inspection-schedule-selftest.cjs",
+        "selftest:summary": "npm run build:main && node scripts/inspection-summary-selftest.cjs",
         "selftest:docs": "npm run build:main && node scripts/doc-kb-selftest.cjs",
         "icon": "node scripts/make-icon.mjs",
         "electron:pack": "npm run build && electron-builder --dir && npm run verify:package",

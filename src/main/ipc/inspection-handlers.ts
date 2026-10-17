@@ -21,10 +21,12 @@ import {
     saveInspectionSchedule,
     toInspectionSchedule,
 } from '../services/inspection-schedule';
+import {buildFleetSummary, runFleetInspection} from '../services/inspection-summary';
+import {FLEET_RUN_MAX_CLUSTERS} from '../../shared/inspection-summary';
 import {resolveSampling, resolveThresholds} from '../services/inspection-profile';
 import {sendToRenderer} from './stream';
 import type {InspectionProfileDraft, InspectionRunResult, InspectionScheduleDraft} from '../../shared/types';
-import {INSPECTION_SCHEDULE_CHANNEL} from '../../shared/types';
+import {INSPECTION_FLEET_CHANNEL, INSPECTION_SCHEDULE_CHANNEL} from '../../shared/types';
 import {createLogger} from '../utils/logger';
 
 const log = createLogger('Inspection');
@@ -84,6 +86,16 @@ const ScheduleSaveSchema = z
 // 一次列表最多 50 行。历史的价值在「最近几次怎么变的」，翻到第 51 条还没找到要的那份，
 // 说明该清库而不是把上限调大。
 const HISTORY_LIST_LIMIT = 50;
+
+// 汇总的「一次跑几台」与采样上限同源：区间在这里钉死，越界是拒绝而不是夹住。
+// 一台集群一次巡检就打几百个请求，放开台数等于允许一次点击打出去几万
+const FleetRunSchema = z
+    .object({
+        limit: z.number().int().min(1).max(FLEET_RUN_MAX_CLUSTERS).optional(),
+        maxNamespaces: z.number().int().min(1).max(200).optional(),
+        maxTopics: z.number().int().min(1).max(1000).optional(),
+    })
+    .strict();
 
 export function registerInspectionHandlers() {
     // 调度引擎不 import 这一层（这一层反过来 import 它的保存入口），所以「取客户端」与「下行推送」
@@ -197,4 +209,20 @@ export function registerInspectionHandlers() {
     // 列的是所有配过调度的集群（含关着的）：配置中心要说的是「哪些集群挂着自动巡检」，
     // 只列 enabled 的会让「刚存了但还没打开」那一行凭空消失
     registerHandler('inspection:schedule:list', async () => listInspectionSchedules().map(toInspectionSchedule));
+
+    // 只读那份汇总：每台集群最近的一份报告，一次数据库查询都不碰 broker。
+    // 数字因此可能已经是几小时前的，行上的「最近一次」与新鲜度就是为了让这件事看得见
+    registerHandler('inspection:summary', async () => buildFleetSummary());
+
+    registerHandler('inspection:summary:run', async (params: unknown) => {
+        const input = FleetRunSchema.parse(params);
+        // 串行逐台、每台一个进度：一屏集群挂着同一个「加载中」会让人猜跑到哪一台了
+        return runFleetInspection({
+            getClient: clusterId => getAdminClient(clusterId),
+            publish: progress => sendToRenderer(INSPECTION_FLEET_CHANNEL, progress),
+            limit: input.limit,
+            maxNamespaces: input.maxNamespaces,
+            maxTopics: input.maxTopics,
+        });
+    });
 }

@@ -96,6 +96,10 @@ import type {
     InspectionSchedule,
     InspectionScheduleDraft,
     InspectionScheduledPush,
+    InspectionFleetRunParams,
+    InspectionFleetSummary,
+    InspectionFleetRunResult,
+    InspectionFleetProgress,
     TopologyLimits,
 } from './shared/types';
 
@@ -110,6 +114,7 @@ const PRODUCER_STATS_CHANNEL: StreamChannel['producerStats'] = 'msg:producer-sta
 const LOAD_TEST_PROGRESS_CHANNEL: typeof import('./shared/types').LOAD_TEST_CHANNEL = 'benchmark:progress';
 const ALERT_EVENT_CHANNEL: typeof import('./shared/types').ALERT_EVENT_CHANNEL = 'alert:event';
 const INSPECTION_SCHEDULE_CHANNEL: typeof import('./shared/types').INSPECTION_SCHEDULE_CHANNEL = 'inspection:scheduled';
+const INSPECTION_FLEET_CHANNEL: typeof import('./shared/types').INSPECTION_FLEET_CHANNEL = 'inspection:fleet-progress';
 
 // 主进程 → 渲染进程的下行订阅。返回反订阅闭包：组件卸载时必须能摘掉监听，
 // 否则切了标签页还在往旧组件推数据。载荷只允许纯 JSON（sandbox 下传不了类实例）。
@@ -542,6 +547,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
         // 否则用户只能自己猜应用什么时候动过手
         onScheduled: (callback: (push: InspectionScheduledPush) => void) =>
             subscribe(INSPECTION_SCHEDULE_CHANNEL, callback),
+        // 跨集群汇总：读的是每台最近一份落库的报告，跑的是逐台串行
+        summary: {
+            get: () => ipcRenderer.invoke('inspection:summary'),
+            run: (params: InspectionFleetRunParams) => ipcRenderer.invoke('inspection:summary:run', params),
+        },
+        onFleetProgress: (callback: (progress: InspectionFleetProgress) => void) =>
+            subscribe(INSPECTION_FLEET_CHANNEL, callback),
     },
 
     // 拓扑
@@ -997,7 +1009,12 @@ declare global {
                     save: (params: InspectionScheduleDraft) => Promise<APIResponse<InspectionSchedule>>;
                     list: () => Promise<APIResponse<InspectionSchedule[]>>;
                 };
+                summary: {
+                    get: () => Promise<APIResponse<InspectionFleetSummary>>;
+                    run: (params: InspectionFleetRunParams) => Promise<APIResponse<InspectionFleetRunResult>>;
+                };
                 onScheduled: (callback: (push: InspectionScheduledPush) => void) => () => void;
+                onFleetProgress: (callback: (progress: InspectionFleetProgress) => void) => () => void;
             };
             topology: {
                 getClusterTopology: (

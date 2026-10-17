@@ -13,6 +13,7 @@ import {
     FileTextOutlined,
     BarChartOutlined,
     ApartmentOutlined,
+    ClusterOutlined,
     FunctionOutlined,
     AlertOutlined,
     SafetyCertificateOutlined,
@@ -38,6 +39,7 @@ import {
     alertTab,
     workerTab,
     inspectionTab,
+    fleetInspectionTab,
     docCenterTab,
 } from '../../utils/tabIds';
 import {matchesFilter} from '../../utils/textFilter';
@@ -335,6 +337,11 @@ const TopNav: React.FC = () => {
         addTab(inspectionTab());
     }, [addTab]);
 
+    // 巡检汇总：全局单页，说的就是「所有集群摆在一起」，所以不带集群参数。
+    const handleOpenFleet = useCallback(() => {
+        addTab(fleetInspectionTab());
+    }, [addTab]);
+
     // 文档中心：内置 8 篇 Pulsar 文档，与集群无关，所以也是全局单页。
     const handleOpenDocs = useCallback(() => {
         addTab(docCenterTab());
@@ -493,6 +500,14 @@ const TopNav: React.FC = () => {
                             onClick={handleOpenInspection}
                         >
                             巡检
+                        </Button>
+                        <Button
+                            size="small"
+                            icon={<ClusterOutlined />}
+                            title="跨集群巡检汇总"
+                            onClick={handleOpenFleet}
+                        >
+                            汇总
                         </Button>
                         <Button size="small" icon={<FileTextOutlined />} title="内置文档中心" onClick={handleOpenDocs}>
                             文档

@@ -1176,6 +1176,33 @@ export function deleteInspections(clusterId: string): number {
     return database.prepare('DELETE FROM inspections WHERE cluster_id = ?').run(clusterId).changes;
 }
 
+/** 汇总要的那份行：比历史列表多带 checks_json（跨集群分组要用），但仍旧不带 markdown。 */
+export type InspectionLatestRow = Omit<InspectionRecord, 'markdown'>;
+
+/**
+ * 每台集群最近的一份报告。
+ *
+ * 一条 SQL 而不是按集群循环查：汇总页打开就要跑，几十台集群几十次查询会明显卡一下界面。
+ * generated_at 完全相同的两份（同一毫秒里手点一次、定时一次）会各出一行，
+ * 由调用方按 cluster_id 去重——这里不 DISTINCT，因为要保住的列不止一个。
+ */
+export function listLatestInspections(): InspectionLatestRow[] {
+    const database = getDatabase();
+    return database
+        .prepare(
+            `SELECT i.id, i.cluster_id, i.cluster_name, i.version, i.generated_at,
+                    i.crit, i.warn, i.ok, i.skip, i.scope_json, i.checks_json, i.thresholds_json, i.source
+             FROM inspections i
+             JOIN (
+               SELECT cluster_id, MAX(generated_at) AS generated_at
+               FROM inspections
+               GROUP BY cluster_id
+             ) t ON t.cluster_id = i.cluster_id AND t.generated_at = i.generated_at
+             ORDER BY i.cluster_id`,
+        )
+        .all() as InspectionLatestRow[];
+}
+
 // ========== 巡检口径 ==========
 
 export interface InspectionProfileRecord {

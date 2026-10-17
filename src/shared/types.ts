@@ -1804,6 +1804,106 @@ export interface InspectionScheduledPush {
 
 export const INSPECTION_SCHEDULE_CHANNEL = 'inspection:scheduled' as const;
 
+// ========== 跨集群巡检汇总（v3.2） ==========
+
+/**
+ * 一台集群在汇总里的位置。
+ *
+ * 只有四档，且「从没看过」单独一档而不是并进 quiet：汇总对一台没跑过的集群唯一知道的事
+ * 就是没人看过，把它算成「没发现问题」是最容易害人的那种误读。
+ */
+export type FleetSection = 'crit' | 'warn' | 'never' | 'quiet';
+
+/** 汇总的一行：这台集群自己最近的一份报告，加上它的调度与新鲜度。 */
+export interface InspectionFleetCluster {
+    clusterId: string;
+    clusterName: string;
+    /** 库里最近的一份；从来没有过就是 null，界面与导出都必须能区分这两件事。 */
+    latest: InspectionHistoryRow | null;
+    /** 那一份报告的检查项。只用来挑出 crit 做跨集群分组，不复制整份报告。 */
+    checks: InspectionCheck[];
+    schedule: InspectionSchedule | null;
+    /** 相对这台集群自己的节奏有多旧（不是相对全局写死的一个数）。 */
+    freshness: 'never' | 'fresh' | 'aging' | 'stale';
+}
+
+/** 同一个检查项在多台集群上一起亮时合并成一组：这才看得出是一类问题还是一堆独立故障。 */
+export interface InspectionFleetGroup {
+    key: string;
+    title: string;
+    items: {
+        clusterId: string;
+        clusterName: string;
+        summary: string;
+        suggestion?: string;
+    }[];
+}
+
+export interface InspectionFleetTotals {
+    clusters: number;
+    /** 有报告的台数 = clusters - never。 */
+    inspected: number;
+    never: number;
+    crit: number;
+    warn: number;
+    /** 报告已经偏旧或过期的台数：这些行的数字不能当现在用。 */
+    stale: number;
+    /** 开着定时的台数：一屏全 0 时先确认这里不是 0。 */
+    scheduled: number;
+}
+
+/** 本轮跑坏的那台，与「因为上限没跑的」是两个原因，分开列。 */
+export interface InspectionFleetFailure {
+    clusterId: string;
+    clusterName: string;
+    message: string;
+}
+
+export interface InspectionFleetSkipped {
+    clusterId: string;
+    clusterName: string;
+}
+
+/** 一页汇总。跨集群这份文件要能脱离应用读懂，所以口径都写在结构里而不是只留在界面上。 */
+export interface InspectionFleetSummary {
+    generatedAt: string;
+    clusters: InspectionFleetCluster[];
+    critGroups: InspectionFleetGroup[];
+    totals: InspectionFleetTotals;
+    /** 这一轮逐台跑时失败的集群（读最近一份汇总时为空）。 */
+    failures: InspectionFleetFailure[];
+    /** 这一轮因为「一次最多 N 台」而没跑的集群。 */
+    skipped: InspectionFleetSkipped[];
+}
+
+/** 逐台跑的时候每完成一台推一条，界面才不会在一屏集群前挂着「加载中」猜进度。 */
+export interface InspectionFleetProgress {
+    clusterId: string;
+    clusterName: string;
+    index: number;
+    total: number;
+    status: 'started' | 'done' | 'failed';
+    /** 跑坏了就是 null：没有一份报告，不该替它编一个全 0 的计数。 */
+    totals: InspectionTotals | null;
+    message: string;
+}
+
+export interface InspectionFleetRunParams {
+    /** 一次最多跑几台，主进程 clamp 到 1..20。 */
+    limit?: number;
+    maxNamespaces?: number;
+    maxTopics?: number;
+}
+
+/** 逐台跑完之后返回的那一份：summary 已经按跑完的库重算过。 */
+export interface InspectionFleetRunResult {
+    summary: InspectionFleetSummary;
+    ran: number;
+    failed: number;
+}
+
+export const INSPECTION_FLEET_CHANNEL = 'inspection:fleet-progress' as const;
+
 export type InspectionChangeKind = 'new' | 'resolved' | 'worsened' | 'improved' | 'unchanged';
 
 export interface InspectionDiffItem {
