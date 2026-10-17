@@ -277,6 +277,48 @@ CREATE TABLE IF NOT EXISTS inspection_schedules (
     FOREIGN KEY (cluster_id) REFERENCES clusters(id) ON DELETE CASCADE
 );
 
+-- 外部通知渠道：一条渠道一行，全局（不属于某个集群），所以不按 cluster_id 建主键。
+-- url 与签名密钥存密文：这几家机器人的 key 直接写在 URL 查询串里，拿到 db 文件就等于
+-- 拿到「往值班群里发任意消息」的能力；界面读到的永远是打码后的地址。
+-- events / min_level 分开存：一条渠道想「只收严重项」、另一条想「什么都收」，
+-- 这两件事互相独立，合成一个开关就表达不出来。
+-- fail_count 与 last_error 落在渠道上：一条悄悄坏了两个星期的渠道，
+-- 在界面上和一条正常的长得一模一样，用户唯一的发现时机是那次没收到的告警。
+CREATE TABLE IF NOT EXISTS notify_channels (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    url_enc TEXT NOT NULL,
+    secret_enc TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    events_json TEXT NOT NULL,
+    min_level TEXT NOT NULL DEFAULT 'warn',
+    timeout_ms INTEGER NOT NULL DEFAULT 5000,
+    rate_per_minute INTEGER NOT NULL DEFAULT 20,
+    last_sent_at TEXT,
+    last_error TEXT,
+    fail_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- 投递记录：每次决定（发出去、发失败、被规则挡下）都写一行。
+-- 「被级别挡下」也要记：不然用户只会看到「没收到通知」，而这里其实发生过一次明确的拒绝。
+-- channel_name 是写入时的副本，改名不该改写已经发生的那些（与 alert_events 同一个理由）。
+-- 只留最近 N 条，由服务层裁剪：这张表是唯一会随告警频率一直长的表。
+CREATE TABLE IF NOT EXISTS notify_deliveries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel_id TEXT NOT NULL,
+    channel_name TEXT NOT NULL,
+    event_kind TEXT NOT NULL,
+    level TEXT NOT NULL,
+    ok INTEGER NOT NULL,
+    skipped INTEGER NOT NULL DEFAULT 0,
+    message TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (channel_id) REFERENCES notify_channels(id) ON DELETE CASCADE
+);
+
 -- 创建索引
 CREATE INDEX IF NOT EXISTS idx_clusters_status ON clusters(status);
 CREATE INDEX IF NOT EXISTS idx_operation_logs_cluster_id ON operation_logs(cluster_id);
@@ -290,6 +332,10 @@ CREATE INDEX IF NOT EXISTS idx_send_history_created_at ON send_history(created_a
 CREATE INDEX IF NOT EXISTS idx_metrics_snapshots_scope ON metrics_snapshots(cluster_id, topic_uri, captured_at);
 CREATE INDEX IF NOT EXISTS idx_alert_rules_cluster ON alert_rules(cluster_id, enabled);
 CREATE INDEX IF NOT EXISTS idx_alert_events_state ON alert_events(state, fired_at);
+-- 投递记录只被「取最近 N 条」和「按渠道取最近一条」读到，两处都按自增 id 倒序：
+-- id 记的是派发发生的顺序，比 created_at 稳（系统时钟被往回调时，后写的那行时间戳反而更早，
+-- 按时间排就会把这次派发插到中间去）。因此不再单独给 created_at 建索引，主键已经覆盖它。
+CREATE INDEX IF NOT EXISTS idx_notify_deliveries_channel ON notify_deliveries(channel_id, id DESC);
 -- 一条规则同时只能有一条未恢复事件。这条偏唯一索引是让"是否已立案"这个判断
 -- 不依赖进程内存：重启后引擎照样能看到事件还开着，只刷新观测值、不再弹一次通知。
 CREATE UNIQUE INDEX IF NOT EXISTS idx_alert_events_open ON alert_events(rule_id) WHERE resolved_at IS NULL;

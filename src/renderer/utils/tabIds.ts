@@ -130,3 +130,11 @@ export const fleetInspectionTab = (): TabItem => ({
     title: '巡检汇总',
     type: 'fleet-inspection',
 });
+
+// 通知渠道也是全局单页，而且刻意不按集群开：渠道发的是「这台机器上看到的事」，
+// 一台集群一个页签会让「哪些事件在往哪发」变成要翻 N 页才能拼出来的东西。
+export const notifyChannelsTab = (): TabItem => ({
+    id: 'notify-channels',
+    title: '通知渠道',
+    type: 'notify-channels',
+});

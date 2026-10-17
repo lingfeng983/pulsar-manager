@@ -15,6 +15,7 @@ import {
     type AlertRuleRecord,
 } from '../database/sqlite';
 import {readAppSettings} from './app-config';
+import {dispatchQuietly} from './notify-dispatch';
 import {
     alertMetric,
     buildAlertMessage,
@@ -244,18 +245,31 @@ function isBreached(comparator: AlertComparator, value: number, threshold: numbe
 function publishAlert(record: AlertEventRecord, kind: AlertPush['kind'], notify: boolean): void {
     const event = toAlertEvent(record);
     deps?.publish({kind, event});
-    if (!notify) {
-        return;
-    }
     // 集群名只是把通知写得更像人话，查得到就用、查不到就用 id，不为了一个标签丢掉整条通知
     const clusterName = getClusterById(event.clusterId)?.name || event.clusterId;
     const body = kind === 'fired' ? event.message : buildRecoveredMessage(event, event.lastValue);
+    const title = kind === 'fired' ? `告警：${event.ruleName}` : `告警恢复：${event.ruleName}`;
+    // 外部渠道不看 rule.notify：那个开关管的是「这台机器上的人要不要被打扰」，而一条渠道收不收
+    // 这件事由它自己的订阅清单与级别线决定（与定时巡检同一口径）。恢复给了 info 级：按默认级别线
+    // 只收 warn 以上的渠道不会被恢复消息刷屏，但愿意收 info 的人能凑齐一条完整的时间线。
+    dispatchQuietly({
+        kind: kind === 'fired' ? 'alertFired' : 'alertRecovered',
+        level: kind === 'fired' ? 'crit' : 'info',
+        title,
+        text: body,
+        clusterId: event.clusterId,
+        clusterName,
+        atMs: kind === 'fired' ? event.firedAt : (event.resolvedAt ?? Date.now()),
+    });
+    if (!notify) {
+        return;
+    }
     try {
         if (!Notification.isSupported()) {
             return;
         }
         const notification = new Notification({
-            title: kind === 'fired' ? `告警：${event.ruleName}` : `告警恢复：${event.ruleName}`,
+            title,
             body: `${clusterName} · ${body}`,
             urgency: kind === 'fired' ? 'critical' : 'normal',
         });

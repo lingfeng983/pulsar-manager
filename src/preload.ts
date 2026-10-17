@@ -100,6 +100,10 @@ import type {
     InspectionFleetSummary,
     InspectionFleetRunResult,
     InspectionFleetProgress,
+    NotifyChannel,
+    NotifyChannelDraft,
+    NotifyDelivery,
+    NotifyDispatchResult,
     TopologyLimits,
 } from './shared/types';
 
@@ -554,6 +558,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
         },
         onFleetProgress: (callback: (progress: InspectionFleetProgress) => void) =>
             subscribe(INSPECTION_FLEET_CHANNEL, callback),
+    },
+
+    // 外部通知渠道：告警与巡检的结论要能离开这台机器，所以这里只管配置与查投递结果，
+    // 发是主进程在事件落库之后自己顺手发的
+    notify: {
+        channel: {
+            list: () => ipcRenderer.invoke('notify:channel:list'),
+            save: (draft: NotifyChannelDraft) => ipcRenderer.invoke('notify:channel:save', draft),
+            delete: (params: {id: string}) => ipcRenderer.invoke('notify:channel:delete', params),
+            enable: (params: {id: string; enabled: boolean}) => ipcRenderer.invoke('notify:channel:enable', params),
+            test: (params: {id: string}) => ipcRenderer.invoke('notify:channel:test', params),
+        },
+        delivery: {
+            list: (params?: {limit?: number}) => ipcRenderer.invoke('notify:delivery:list', params ?? {}),
+        },
     },
 
     // 拓扑
@@ -1015,6 +1034,18 @@ declare global {
                 };
                 onScheduled: (callback: (push: InspectionScheduledPush) => void) => () => void;
                 onFleetProgress: (callback: (progress: InspectionFleetProgress) => void) => () => void;
+            };
+            notify: {
+                channel: {
+                    list: () => Promise<APIResponse<NotifyChannel[]>>;
+                    save: (draft: NotifyChannelDraft) => Promise<APIResponse<NotifyChannel>>;
+                    delete: (params: {id: string}) => Promise<APIResponse<{deleted: boolean}>>;
+                    enable: (params: {id: string; enabled: boolean}) => Promise<APIResponse<{updated: boolean}>>;
+                    test: (params: {id: string}) => Promise<APIResponse<NotifyDispatchResult>>;
+                };
+                delivery: {
+                    list: (params?: {limit?: number}) => Promise<APIResponse<NotifyDelivery[]>>;
+                };
             };
             topology: {
                 getClusterTopology: (

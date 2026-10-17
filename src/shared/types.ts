@@ -1925,3 +1925,104 @@ export interface InspectionDiff {
     // 不写出来的话环比会把应用自己的改动说成集群的变化。
     thresholdChanges: InspectionThresholdChange[];
 }
+
+// ========== 外部通知渠道 ==========
+
+/**
+ * 渠道类型决定请求体长什么样：这几家的机器人 webhook 形状互不相同，
+ * 但对「一条通知该说什么」没有影响，所以正文在 shared/notify-channels 里只拼一次。
+ */
+export type NotifyChannelKind = 'generic' | 'dingtalk' | 'feishu' | 'wecom' | 'slack';
+
+export type NotifyEventKind =
+    | 'alertFired'
+    | 'alertRecovered'
+    | 'inspectionCrit'
+    | 'inspectionRecovered'
+    | 'inspectionFailed'
+    /** 手动「发送测试」造出来的那一条。渠道的订阅清单里不会有它：测试要问的是地址通不通，
+     *  而不是按规则这条该不该发，所以它绕开订阅、级别与限流，但仍然照常落一条投递记录。 */
+    | 'test';
+
+/** 通知自己的级别，与巡检的 crit/warn 同词：一条渠道可以只收严重项。 */
+export type NotifyLevel = 'info' | 'warn' | 'crit';
+
+export interface NotifyChannel {
+    id: string;
+    name: string;
+    kind: NotifyChannelKind;
+    /**
+     * 发给渲染层的是打码后的地址（查询串里的 token 换成 ***），落库的是完整地址的密文。
+     * 地址本身就是凭据的一部分：企微/钉钉的 key 直接写在 URL 里，列表页截图发群里不能把它带出去。
+     */
+    url: string;
+    /** 签名密钥不回填：界面只知道「这里存过东西」。 */
+    hasSecret: boolean;
+    enabled: boolean;
+    events: NotifyEventKind[];
+    minLevel: NotifyLevel;
+    timeoutMs: number;
+    ratePerMinute: number;
+    lastSentAt: string | null;
+    /** 最近一次为什么没送出去。手动测试也写这一格：配置坏了要看得见。 */
+    lastError: string | null;
+    /** 连续失败次数，成功一次清零：一次都没成过和昨天还能通是两种不同的坏法。 */
+    failCount: number;
+    createdAt: string;
+    updatedAt: string;
+}
+
+/** 新建与编辑共用：不带 id 是新建；secret 缺省或空串表示「保持库里已有的那个」。 */
+export interface NotifyChannelDraft {
+    id?: string;
+    name: string;
+    kind: NotifyChannelKind;
+    url: string;
+    secret?: string;
+    enabled?: boolean;
+    events?: NotifyEventKind[];
+    minLevel?: NotifyLevel;
+    timeoutMs?: number;
+    ratePerMinute?: number;
+}
+
+/** 要发出去的一件事。告警引擎与巡检调度都往这里给，两边都不自己拼文本。 */
+export interface NotifyEvent {
+    kind: NotifyEventKind;
+    level: NotifyLevel;
+    title: string;
+    /** 多行正文，渠道格式的差异在 payload 那层处理 */
+    text: string;
+    clusterId: string;
+    clusterName: string;
+    /** epoch 毫秒：渲染与限流都用它，不做字符串时间解析 */
+    atMs: number;
+    /** 手动测试：跳过限流，也照实落一条投递记录 */
+    test?: boolean;
+}
+
+/** 一次投递的结论，落进 notify_deliveries 给「最近投递」那页读。 */
+export interface NotifyDelivery {
+    id: number;
+    channelId: string;
+    channelName: string;
+    eventKind: NotifyEventKind;
+    level: NotifyLevel;
+    ok: boolean;
+    /** 没发出去的那一条也算结论：被级别或限流挡下时必须写明是谁挡的、为什么 */
+    skipped: boolean;
+    message: string;
+    createdAt: string;
+}
+
+/** dispatch 的返回：每个渠道一条结论，界面据此提示「三条渠道里有一条没送到」。 */
+export interface NotifyDispatchResult {
+    event: {kind: NotifyEventKind; title: string};
+    deliveries: {
+        channelId: string;
+        channelName: string;
+        ok: boolean;
+        skipped: boolean;
+        message: string;
+    }[];
+}

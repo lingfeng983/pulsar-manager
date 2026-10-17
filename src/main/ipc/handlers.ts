@@ -15,6 +15,7 @@ import {registerWorkerHandlers} from './worker-handlers';
 import {registerNamespacePolicyHandlers} from './namespace-policy-handlers';
 import {registerTopicPolicyHandlers} from './topic-policy-handlers';
 import {registerInspectionHandlers} from './inspection-handlers';
+import {registerNotifyHandlers} from './notify-handlers';
 import {ensureDbInitialized, cleanupDatabase} from './_shared';
 
 // Re-export cleanupDatabase for external consumers
@@ -42,4 +43,5 @@ export function registerIPCHandlers() {
     registerNamespacePolicyHandlers();
     registerTopicPolicyHandlers();
     registerInspectionHandlers();
+    registerNotifyHandlers();
 }

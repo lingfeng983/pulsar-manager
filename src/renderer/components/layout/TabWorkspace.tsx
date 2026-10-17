@@ -17,6 +17,7 @@ import ProducerWorkspace from '../../pages/ProducerWorkspace';
 import ConsumerWorkspace from '../../pages/ConsumerWorkspace';
 import ClusterInspection from '../../pages/ClusterInspection';
 import FleetInspection from '../../pages/FleetInspection';
+import NotifyChannels from '../../pages/NotifyChannels';
 import DocCenter from '../../pages/DocCenter';
 import ShortcutConfig from '../../pages/ShortcutConfig';
 import ConfigCenter from '../../pages/ConfigCenter';
@@ -156,6 +157,8 @@ const TabWorkspace: React.FC = () => {
                 return <ClusterInspection clusterId={tab.data?.clusterId} />;
             case 'fleet-inspection':
                 return <FleetInspection />;
+            case 'notify-channels':
+                return <NotifyChannels />;
             case 'docs':
                 return <DocCenter />;
             case 'topic': {

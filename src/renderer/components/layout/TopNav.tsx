@@ -19,6 +19,7 @@ import {
     SafetyCertificateOutlined,
     MenuFoldOutlined,
     MenuUnfoldOutlined,
+    NotificationOutlined,
 } from '@ant-design/icons';
 import {useThemeStore} from '../../store/theme';
 import UpdateModal from '../UpdateModal';
@@ -41,6 +42,7 @@ import {
     inspectionTab,
     fleetInspectionTab,
     docCenterTab,
+    notifyChannelsTab,
 } from '../../utils/tabIds';
 import {matchesFilter} from '../../utils/textFilter';
 import {downloadBlob} from '../../utils/download';
@@ -347,6 +349,11 @@ const TopNav: React.FC = () => {
         addTab(docCenterTab());
     }, [addTab]);
 
+    // 通知渠道：全局单页。渠道属于这台应用而不是某台集群，按集群开只会得到 N 份一样的表。
+    const handleOpenNotify = useCallback(() => {
+        addTab(notifyChannelsTab());
+    }, [addTab]);
+
     // 告警中心：徽标是"未恢复事件数"，点开页面并不清空它——
     // 事件要在告警中心里逐条确认或等它自动恢复，徽标跟着界面走才会误导。
     const openAlertCount = useAlertStore(state => state.openCount);
@@ -511,6 +518,14 @@ const TopNav: React.FC = () => {
                         </Button>
                         <Button size="small" icon={<FileTextOutlined />} title="内置文档中心" onClick={handleOpenDocs}>
                             文档
+                        </Button>
+                        <Button
+                            size="small"
+                            icon={<NotificationOutlined />}
+                            title="外部通知渠道（告警与巡检结论发到哪里）"
+                            onClick={handleOpenNotify}
+                        >
+                            通知
                         </Button>
                         <Button
                             size="small"

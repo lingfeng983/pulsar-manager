@@ -11,7 +11,7 @@ let db: Database.Database | null = null;
 // schema 版本以 user_version 跟踪。改基线 DDL 时：升 SCHEMA_VERSION，
 // 并把该版本的增量 DDL 写进 migrate()——CREATE TABLE IF NOT EXISTS 对已存在的
 // 旧库什么都不做，没有这套机制，加列只会对新装用户生效，旧库静默落后。
-const SCHEMA_VERSION = 13;
+const SCHEMA_VERSION = 14;
 
 function migrate(database: Database.Database, from: number): void {
     // v2：refreshInterval 那行出厂值是 30000，而监控页的刷新间隔单位是秒，
@@ -90,8 +90,11 @@ function migrate(database: Database.Database, from: number): void {
             database.prepare("ALTER TABLE inspections ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'").run();
         }
     }
+    // v14：外部通知渠道。notify_channels / notify_deliveries 都是新表，靠每次启动的幂等基线
+    // 补齐，这里没有数据要修补——老库里这两张表本来不存在，也没有任何东西引用过它们，
+    // 不存在「老行缺列」这种状态。留这一段是为了下次翻 user_version 不必回头猜 v14 做没做事
+    // （与 v5 同一口径）。
 }
-
 // 每次启动都执行基线再补迁移：基线全是幂等语句，因此旧库缺的表和出厂设置行
 // 都会被补齐（只按 user_version 走迁移分支的话，迁移路径上的库永远拿不到
 // 后来新增的默认键）。整个过程包在一个事务里——中途崩溃不能留下
@@ -1437,4 +1440,180 @@ export function cleanupOrphanK8sForwards(): number {
         )
         .run();
     return result.changes;
+}
+
+// ========== 外部通知渠道 ==========
+
+export interface NotifyChannelRecord {
+    id: string;
+    name: string;
+    kind: string;
+    /** 完整地址的密文。这一列没有任何读取方能拿到明文——出界的地方只给打码后的地址。 */
+    url_enc: string;
+    secret_enc: string | null;
+    enabled: number;
+    events_json: string;
+    min_level: string;
+    timeout_ms: number;
+    rate_per_minute: number;
+    last_sent_at: string | null;
+    last_error: string | null;
+    fail_count: number;
+    created_at: string;
+    updated_at: string;
+}
+
+const NOTIFY_CHANNEL_COLUMNS =
+    'id, name, kind, url_enc, secret_enc, enabled, events_json, min_level, timeout_ms, ' +
+    'rate_per_minute, last_sent_at, last_error, fail_count, created_at, updated_at';
+
+export function listNotifyChannels(): NotifyChannelRecord[] {
+    const database = getDatabase();
+    return database
+        .prepare(`SELECT ${NOTIFY_CHANNEL_COLUMNS} FROM notify_channels ORDER BY created_at, name`)
+        .all() as NotifyChannelRecord[];
+}
+
+export function getNotifyChannelById(id: string): NotifyChannelRecord | null {
+    const database = getDatabase();
+    const row = database.prepare(`SELECT ${NOTIFY_CHANNEL_COLUMNS} FROM notify_channels WHERE id = ?`).get(id) as
+        NotifyChannelRecord | undefined;
+    return row ?? null;
+}
+
+export function insertNotifyChannel(record: NotifyChannelRecord): void {
+    const database = getDatabase();
+    database
+        .prepare(
+            `INSERT INTO notify_channels (${NOTIFY_CHANNEL_COLUMNS})
+             VALUES (@id, @name, @kind, @url_enc, @secret_enc, @enabled, @events_json, @min_level,
+                     @timeout_ms, @rate_per_minute, @last_sent_at, @last_error, @fail_count,
+                     @created_at, @updated_at)`,
+        )
+        .run(record);
+}
+
+/**
+ * 整行覆盖（不含 created_at）。
+ *
+ * 只 UPDATE 不 upsert：调用方拿到 id 就必须先确认这一行存在，否则一条被别的窗口删掉的渠道
+ * 会被这里悄悄写回来，而那个 id 是别人手里的——与 clusters 上那套按 owner 校验同一个理由。
+ */
+export function updateNotifyChannel(record: NotifyChannelRecord): number {
+    const database = getDatabase();
+    return database
+        .prepare(
+            `UPDATE notify_channels
+             SET name = @name, kind = @kind, url_enc = @url_enc, secret_enc = @secret_enc,
+                 enabled = @enabled, events_json = @events_json, min_level = @min_level,
+                 timeout_ms = @timeout_ms, rate_per_minute = @rate_per_minute, updated_at = @updated_at
+             WHERE id = @id`,
+        )
+        .run(record).changes;
+}
+
+export function deleteNotifyChannel(id: string): number {
+    const database = getDatabase();
+    // 投递记录跟着外键一起删：留着指向不存在渠道的行，界面上只能说「这条记录没有主人」
+    return database.prepare('DELETE FROM notify_channels WHERE id = ?').run(id).changes;
+}
+
+/**
+ * 把一次投递的结论写回渠道：成功就清掉连败计数并盖时间，失败就累加并留下原因。
+ *
+ * 时间一律由调用方给（不是 datetime('now')）：这条更新要和投递记录行用同一个时刻，
+ * 否则「最近一次」与「最近一条投递」在边界上会互相说不上一致。
+ */
+export function markNotifyChannelResult(id: string, args: {ok: boolean; message: string; at: string}): void {
+    const database = getDatabase();
+    if (args.ok) {
+        database
+            .prepare(
+                `UPDATE notify_channels
+                 SET last_sent_at = ?, last_error = NULL, fail_count = 0, updated_at = ?
+                 WHERE id = ?`,
+            )
+            .run(args.at, args.at, id);
+        return;
+    }
+    database
+        .prepare(
+            `UPDATE notify_channels
+             SET last_error = ?, fail_count = fail_count + 1, updated_at = ?
+             WHERE id = ?`,
+        )
+        .run(args.message.slice(0, 500), args.at, id);
+}
+
+export interface NotifyDeliveryRecord {
+    /** 自增主键：界面上「最近投递」那一段用它做行 key 与「这一条之后没有更新的了」的判断 */
+    id: number;
+    channel_id: string;
+    channel_name: string;
+    event_kind: string;
+    level: string;
+    ok: number;
+    skipped: number;
+    message: string;
+    created_at: string;
+}
+
+export function insertNotifyDelivery(record: Omit<NotifyDeliveryRecord, 'id'>): number {
+    const database = getDatabase();
+    return database
+        .prepare(
+            `INSERT INTO notify_deliveries
+             (channel_id, channel_name, event_kind, level, ok, skipped, message, created_at)
+             VALUES (@channel_id, @channel_name, @event_kind, @level, @ok, @skipped, @message, @created_at)`,
+        )
+        .run(record).lastInsertRowid as number;
+}
+
+export function listNotifyDeliveries(limit: number): NotifyDeliveryRecord[] {
+    const database = getDatabase();
+    return database
+        .prepare(
+            `SELECT id, channel_id, channel_name, event_kind, level, ok, skipped, message, created_at
+             FROM notify_deliveries
+             ORDER BY id DESC
+             LIMIT ?`,
+        )
+        .all(limit) as NotifyDeliveryRecord[];
+}
+
+/** 这条渠道最近的一次投递（界面上「最近一次」那一列读它，比渠道上的汇总字段更具体）。 */
+export function getLatestNotifyDelivery(channelId: string): NotifyDeliveryRecord | null {
+    const database = getDatabase();
+    const row = database
+        .prepare(
+            `SELECT id, channel_id, channel_name, event_kind, level, ok, skipped, message, created_at
+             FROM notify_deliveries
+             WHERE channel_id = ?
+             ORDER BY id DESC
+             LIMIT 1`,
+        )
+        .get(channelId) as NotifyDeliveryRecord | undefined;
+    return row ?? null;
+}
+
+/**
+ * 只留最近 keep 条。这张表是唯一随告警频率一直长的：一条每分钟都在触发的规则，
+ * 一天就是上千行，而没人会去看三个月前那次投递成功还是失败。
+ */
+export function pruneNotifyDeliveries(keep: number): number {
+    const database = getDatabase();
+    return database
+        .prepare(
+            `DELETE FROM notify_deliveries
+             WHERE id NOT IN (SELECT id FROM notify_deliveries ORDER BY id DESC LIMIT ?)`,
+        )
+        .run(keep).changes;
+}
+
+/** 表格里那个开关：单独一条 UPDATE，而不是把整行 draft 送回去再拼一遍——开关不该有清空地址的机会。 */
+export function setNotifyChannelEnabled(id: string, enabled: boolean): number {
+    const database = getDatabase();
+    return database
+        .prepare('UPDATE notify_channels SET enabled = ?, updated_at = ? WHERE id = ?')
+        .run(enabled ? 1 : 0, new Date().toISOString(), id).changes;
 }

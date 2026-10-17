@@ -9,6 +9,7 @@ import {
     type InspectionScheduleRecord,
 } from '../database/sqlite';
 import {executeInspection} from './inspection-run';
+import {dispatchQuietly} from './notify-dispatch';
 import {
     buildScheduledPush,
     isInspectionDue,
@@ -150,6 +151,19 @@ async function runDue(record: InspectionScheduleRecord, nowMs: number): Promise<
             message: `定时巡检没能开始：${reason}`,
             generatedAt: ranAt,
         });
+        // 同一句失败原因只发一次：一台关着的集群每 4 小时跑一次，如果每次都往群里发，
+        // 第三天没人再看这条消息，而真正换了新故障的那一次恰好混在里面被当成又一轮重复
+        if (record.last_error !== reason) {
+            dispatchQuietly({
+                kind: 'inspectionFailed',
+                level: 'warn',
+                title: '巡检：这一轮没跑成',
+                text: `定时巡检没能开始：${reason}`,
+                clusterId: record.cluster_id,
+                clusterName: cluster.name,
+                atMs: nowMs,
+            });
+        }
         return;
     }
     if (!client) {
@@ -178,6 +192,18 @@ async function runDue(record: InspectionScheduleRecord, nowMs: number): Promise<
             message: `定时巡检失败：${reason}`,
             generatedAt: ranAt,
         });
+        // 与上面「没能开始」同一口径：原因换了才再打扰一次，手动那轮占着集群不算换原因
+        if (record.last_error !== reason) {
+            dispatchQuietly({
+                kind: 'inspectionFailed',
+                level: 'warn',
+                title: '巡检：这一轮没跑成',
+                text: `定时巡检失败：${reason}`,
+                clusterId: record.cluster_id,
+                clusterName: cluster.name,
+                atMs: nowMs,
+            });
+        }
         return;
     }
 
@@ -203,6 +229,21 @@ async function runDue(record: InspectionScheduleRecord, nowMs: number): Promise<
     );
     if (kind && record.notify_on_crit === 1) {
         notify({title: scheduleNoticeTitle(kind), body: message, urgent: kind !== 'recovered'});
+    }
+    // 外部渠道不看 notify_on_crit：那个开关管的是「这台机器上的人要不要被打扰」，
+    // 而一条渠道收不收这件事由它自己的订阅清单与级别线决定，两件事各有各的关法
+    if (kind) {
+        dispatchQuietly({
+            kind: kind === 'recovered' ? 'inspectionRecovered' : 'inspectionCrit',
+            // 恢复是「可以放下」，触发与加重是「现在就要看」：差一档级别，
+            // 一条只想收严重项的渠道才不会既漏掉坏消息又被好消息刷屏
+            level: kind === 'recovered' ? 'info' : 'crit',
+            title: scheduleNoticeTitle(kind),
+            text: message,
+            clusterId: record.cluster_id,
+            clusterName: cluster.name,
+            atMs: nowMs,
+        });
     }
     log.info(`scheduled inspection ${record.cluster_id}: crit=${report.totals.crit} notice=${kind ?? 'none'}`);
 }

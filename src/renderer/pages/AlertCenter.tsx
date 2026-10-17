@@ -6,6 +6,7 @@ import {
     DeleteOutlined,
     EditOutlined,
     ExperimentOutlined,
+    NotificationOutlined,
     PlusOutlined,
     ReloadOutlined,
 } from '@ant-design/icons';
@@ -16,6 +17,8 @@ import IconButton from '../components/common/IconButton';
 import AlertRuleModal from '../components/alert/AlertRuleModal';
 import {useConfirmDanger} from '../components/common/dangerConfirm';
 import {useAlertStore} from '../store/alerts';
+import {useTabStore} from '../store/tabs';
+import {notifyChannelsTab} from '../utils/tabIds';
 import {useClusterStore} from '../store/cluster';
 import {useSettingsStore} from '../store/settings';
 import {
@@ -63,6 +66,7 @@ const AlertCenter: React.FC = () => {
     const alertEnabled = useSettingsStore(state => state.settings.alertEnabled);
     const alertCheckSeconds = useSettingsStore(state => state.settings.alertCheckSeconds);
     const setAlertEnabled = useSettingsStore(state => state.update);
+    const addTab = useTabStore(state => state.addTab);
 
     const rules = useAlertStore(state => state.rules);
     const events = useAlertStore(state => state.events);
@@ -358,6 +362,16 @@ const AlertCenter: React.FC = () => {
                     />
                     <Button size="small" icon={<ReloadOutlined />} onClick={() => void refresh()} loading={loading}>
                         刷新
+                    </Button>
+                    {/* 规则里那个「通知」开关只管桌面通知；要发到群里得另配渠道，
+                        而这两件事最容易被混为一谈，所以把入口直接摆在告警中心里 */}
+                    <Button
+                        size="small"
+                        icon={<NotificationOutlined />}
+                        title="告警要发到哪些外部渠道（群机器人 / webhook）"
+                        onClick={() => addTab(notifyChannelsTab())}
+                    >
+                        通知渠道
                     </Button>
                     <Button size="small" type="primary" icon={<PlusOutlined />} onClick={openCreate}>
                         新建规则
