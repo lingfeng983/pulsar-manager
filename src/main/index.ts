@@ -7,6 +7,7 @@ import {loadTestManager} from './services/load-test';
 import {sshTunnelManager} from './services/ssh-tunnel';
 import {k8sForwardManager} from './services/k8s-port-forward';
 import {stopAlertEngine, syncAlertEngine} from './services/alert-engine';
+import {startInspectionScheduler, stopInspectionScheduler} from './services/inspection-schedule';
 import {createLogger, setLogFileForMainProcess} from './utils/logger';
 
 // 日志文件路径要在任何 logger 调用之前定下来
@@ -292,6 +293,14 @@ if (!gotTheLock) {
             log.error('alert engine start failed', error instanceof Error ? error.message : String(error));
         }
 
+        // 巡检调度器与告警引擎同构：常驻、收进托盘也照跑。这里只挂一个 60 秒的扫描，
+        // 到没到期由库里的调度行决定，所以存完配置不需要回来重挂定时器。
+        try {
+            startInspectionScheduler();
+        } catch (error) {
+            log.error('inspection scheduler start failed', error instanceof Error ? error.message : String(error));
+        }
+
         app.on('activate', () => {
             if (BrowserWindow.getAllWindows().length === 0) {
                 showMainWindow();
@@ -327,6 +336,7 @@ app.on('will-quit', event => {
     // 先停定时器：评估循环正等着 admin 请求时把隧道与原生客户端关掉，
     // 拿到的就是"半死资源"，而这条路径是有段错误先例的。
     stopAlertEngine();
+    stopInspectionScheduler();
     const release = async (step: string, task: () => Promise<void>) => {
         try {
             await task();

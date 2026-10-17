@@ -1,7 +1,13 @@
 import React, {useCallback, useEffect, useMemo, useState} from 'react';
-import {Alert, Button, InputNumber, Modal, Select, Space, Table, Tag, Typography, message} from 'antd';
+import {Alert, Button, InputNumber, Modal, Select, Space, Switch, Table, Tag, Typography, message} from 'antd';
 import type {ColumnsType} from 'antd/es/table';
-import {DeleteOutlined, DownloadOutlined, SafetyCertificateOutlined, SlidersOutlined} from '@ant-design/icons';
+import {
+    ClockCircleOutlined,
+    DeleteOutlined,
+    DownloadOutlined,
+    SafetyCertificateOutlined,
+    SlidersOutlined,
+} from '@ant-design/icons';
 import PageShell from '../components/common/PageShell';
 import StateBlock from '../components/common/StateBlock';
 import {downloadBlob} from '../utils/download';
@@ -17,6 +23,14 @@ import {
     thresholdDisplay,
     type ThresholdField,
 } from '../../shared/inspection-caliber';
+import {
+    DEFAULT_INTERVAL_MINUTES,
+    INSPECTION_HISTORY_KEEP,
+    INTERVAL_LIMITS,
+    formatIntervalMinutes,
+    inspectionSourceLabel,
+    nextInspectionRunAt,
+} from '../../shared/inspection-schedule';
 import type {
     InspectionChangeKind,
     InspectionCheck,
@@ -26,6 +40,7 @@ import type {
     InspectionLevel,
     InspectionProfile,
     InspectionReport,
+    InspectionSchedule,
     InspectionScope,
     InspectionThresholdChange,
     InspectionThresholds,
@@ -37,6 +52,22 @@ interface Props {
 
 /** 口径弹窗里的可编辑表单：六个判定线加两个采样上限，全是数字。 */
 type CaliberDraft = Record<ThresholdField, number> & {maxNamespaces: number; maxTopics: number};
+
+/** 调度弹窗里的表单。开关默认关：存间隔不该顺手把「应用自己会打 broker」这条路打开。 */
+type ScheduleDraft = {enabled: boolean; intervalMinutes: number; notifyOnCrit: boolean};
+
+const DEFAULT_SCHEDULE_DRAFT: ScheduleDraft = {
+    enabled: false,
+    intervalMinutes: DEFAULT_INTERVAL_MINUTES,
+    notifyOnCrit: true,
+};
+
+function scheduleDraftFrom(schedule: InspectionSchedule | null): ScheduleDraft {
+    if (!schedule) {
+        return DEFAULT_SCHEDULE_DRAFT;
+    }
+    return {enabled: schedule.enabled, intervalMinutes: schedule.intervalMinutes, notifyOnCrit: schedule.notifyOnCrit};
+}
 
 function draftFrom(profile: InspectionProfile | null): CaliberDraft {
     const thresholds = profile?.thresholds ?? INSPECTION_THRESHOLDS;
@@ -137,6 +168,10 @@ const ClusterInspection: React.FC<Props> = ({clusterId: propClusterId}) => {
     const [caliberOpen, setCaliberOpen] = useState(false);
     const [draft, setDraft] = useState<CaliberDraft>(draftFrom(null));
     const [savingCaliber, setSavingCaliber] = useState(false);
+    const [schedule, setSchedule] = useState<InspectionSchedule | null>(null);
+    const [scheduleOpen, setScheduleOpen] = useState(false);
+    const [scheduleDraft, setScheduleDraft] = useState<ScheduleDraft>(DEFAULT_SCHEDULE_DRAFT);
+    const [savingSchedule, setSavingSchedule] = useState(false);
     const [report, setReport] = useState<InspectionReport | null>(null);
     const [markdown, setMarkdown] = useState('');
     const [diff, setDiff] = useState<InspectionDiff | null>(null);
@@ -172,15 +207,26 @@ const ClusterInspection: React.FC<Props> = ({clusterId: propClusterId}) => {
         setHistory(response.success && response.data ? response.data : []);
     }, []);
 
+    const loadSchedule = useCallback(async (targetClusterId: string) => {
+        if (!targetClusterId) {
+            setSchedule(null);
+            return;
+        }
+        const response = await window.electronAPI.inspection.schedule.get({clusterId: targetClusterId});
+        setSchedule(response.success ? (response.data ?? null) : null);
+    }, []);
+
     // 换集群就把历史与口径重新拉一遍，同时清掉上一台集群的报告与环比：
     // 报告是"某个集群某一时刻"的快照，挂着别的集群的结果比空着更危险。
     // 采样上限跟着这台集群存过的口径走，否则表单上显示的是默认值、实际用的却是另一套。
     useEffect(() => {
         void loadHistory(clusterId);
+        void loadSchedule(clusterId);
         setReport(null);
         setMarkdown('');
         setDiff(null);
         setCaliberOpen(false);
+        setScheduleOpen(false);
         if (!clusterId) {
             setProfile(null);
             return;
@@ -193,7 +239,32 @@ const ClusterInspection: React.FC<Props> = ({clusterId: propClusterId}) => {
                 setMaxTopics(next.maxTopics);
             }
         });
-    }, [clusterId, loadHistory]);
+    }, [clusterId, loadHistory, loadSchedule]);
+
+    // 定时那一轮跑完（或跑坏）之后要把历史与调度状态拉回来：屏幕上挂着上一份报告、
+    // 库里却已经多了一份自动的，是最容易让人误读的组合。
+    // 开着弹窗时不覆盖正在编辑的草稿——保存按钮那一份是用户手填的。
+    useEffect(() => {
+        if (!clusterId) {
+            return;
+        }
+        return window.electronAPI.inspection.onScheduled(push => {
+            if (push.clusterId !== clusterId) {
+                return;
+            }
+            void loadHistory(clusterId);
+            void loadSchedule(clusterId);
+            if (push.kind === 'failed') {
+                message.error(push.message);
+                return;
+            }
+            if (push.totals && push.totals.crit > 0) {
+                message.warning(push.message);
+                return;
+            }
+            message.success(push.message);
+        });
+    }, [clusterId, loadHistory, loadSchedule]);
 
     const clusterOptions = useMemo(() => clusters.map(item => ({value: item.id, label: item.name})), [clusters]);
 
@@ -270,6 +341,45 @@ const ClusterInspection: React.FC<Props> = ({clusterId: propClusterId}) => {
             setSavingCaliber(false);
         }
     }, [clusterId, draft]);
+
+    // 与口径弹窗同一条规矩：按这台集群当前存着的调度填表，没存过就用默认，
+    // 不留着上次编辑到一半的数字
+    const handleOpenSchedule = useCallback(() => {
+        setScheduleDraft(scheduleDraftFrom(schedule));
+        setScheduleOpen(true);
+    }, [schedule]);
+
+    const handleSaveSchedule = useCallback(async () => {
+        if (!clusterId) {
+            return;
+        }
+        setSavingSchedule(true);
+        try {
+            const response = await window.electronAPI.inspection.schedule.save({
+                clusterId,
+                enabled: scheduleDraft.enabled,
+                intervalMinutes: scheduleDraft.intervalMinutes,
+                notifyOnCrit: scheduleDraft.notifyOnCrit,
+            });
+            if (!response.success || !response.data) {
+                // 间隔越界是主进程拒的（「只能在 30～10080 分钟之间」），这里原样显示：
+                // 夹到边界会让人以为存的是自己填的那个数字
+                message.error(response.error || '调度保存失败');
+                return;
+            }
+            setSchedule(response.data);
+            setScheduleOpen(false);
+            message.success(
+                response.data.enabled
+                    ? `已开启定时巡检，每 ${formatIntervalMinutes(response.data.intervalMinutes)} 一次`
+                    : '调度已保存，定时巡检处于关闭状态',
+            );
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : '调度保存失败');
+        } finally {
+            setSavingSchedule(false);
+        }
+    }, [clusterId, scheduleDraft]);
 
     const handleExport = useCallback(() => {
         if (!report || !markdown) {
@@ -356,6 +466,15 @@ const ClusterInspection: React.FC<Props> = ({clusterId: propClusterId}) => {
             {title: '正常', dataIndex: ['totals', 'ok'], width: 70},
             {title: '未覆盖', dataIndex: ['totals', 'skip'], width: 80},
             {
+                title: '来源',
+                dataIndex: 'source',
+                width: 80,
+                // 自动那份没人核对过采样范围，回看时要能一眼分出来哪份是应用自己跑的
+                render: (source: InspectionHistoryRow['source']) => (
+                    <Tag color={source === 'scheduled' ? 'blue' : 'default'}>{inspectionSourceLabel(source)}</Tag>
+                ),
+            },
+            {
                 title: '采样',
                 dataIndex: ['scope', 'topicsSampled'],
                 width: 110,
@@ -403,6 +522,14 @@ const ClusterInspection: React.FC<Props> = ({clusterId: propClusterId}) => {
                     <Button icon={<SlidersOutlined />} disabled={!clusterId} onClick={handleOpenCaliber}>
                         巡检口径
                     </Button>
+                    <Button icon={<ClockCircleOutlined />} disabled={!clusterId} onClick={handleOpenSchedule}>
+                        定时巡检
+                    </Button>
+                    {schedule?.enabled ? (
+                        <Tag color="processing" style={{marginInlineStart: 0}}>
+                            每 {formatIntervalMinutes(schedule.intervalMinutes)} 自动跑一次
+                        </Tag>
+                    ) : null}
                     <Button type="primary" icon={<SafetyCertificateOutlined />} loading={loading} onClick={handleRun}>
                         开始巡检
                     </Button>
@@ -514,7 +641,8 @@ const ClusterInspection: React.FC<Props> = ({clusterId: propClusterId}) => {
                     {history.length ? (
                         <Space direction="vertical" size={6} style={{width: '100%'}}>
                             <Typography.Text type="secondary">
-                                历史报告（点一行看那一份当时的结论与它的环比；每台集群最多留 30 份）
+                                历史报告（点一行看那一份当时的结论与它的环比；每台集群最多留 {INSPECTION_HISTORY_KEEP}{' '}
+                                份，自动与手动共用这一份额度）
                             </Typography.Text>
                             <Table<InspectionHistoryRow>
                                 rowKey="id"
@@ -594,6 +722,86 @@ const ClusterInspection: React.FC<Props> = ({clusterId: propClusterId}) => {
                 </Space>
                 <Typography.Paragraph type="secondary" style={{marginTop: 12, marginBottom: 0}}>
                     积压严重线不能低于关注线，否则积压只会报到「关注」就停住——这条在保存时校验。
+                </Typography.Paragraph>
+            </Modal>
+            <Modal
+                title="定时巡检（只影响这台集群）"
+                open={scheduleOpen}
+                onCancel={() => setScheduleOpen(false)}
+                onOk={handleSaveSchedule}
+                okText="保存"
+                confirmLoading={savingSchedule}
+                width={520}
+            >
+                <Typography.Paragraph type="secondary">
+                    到点由应用自己跑一次只读巡检，结果与手点的那份走同一条路：进历史、带环比、抄上当次口径。
+                    间隔改了立刻生效，不必重启应用。
+                </Typography.Paragraph>
+                <Space direction="vertical" size={12} style={{width: '100%'}}>
+                    <Space style={{width: '100%', justifyContent: 'space-between'}}>
+                        <Typography.Text>开启定时巡检</Typography.Text>
+                        <Switch
+                            checked={scheduleDraft.enabled}
+                            onChange={checked => setScheduleDraft(prev => ({...prev, enabled: checked}))}
+                        />
+                    </Space>
+                    <Space style={{width: '100%', justifyContent: 'space-between'}}>
+                        <Typography.Text>
+                            间隔（分钟）
+                            <Typography.Text type="secondary" style={{marginLeft: 6}}>
+                                {INTERVAL_LIMITS.min}～{INTERVAL_LIMITS.max}，默认{' '}
+                                {formatIntervalMinutes(DEFAULT_INTERVAL_MINUTES)}
+                            </Typography.Text>
+                        </Typography.Text>
+                        <InputNumber
+                            min={INTERVAL_LIMITS.min}
+                            max={INTERVAL_LIMITS.max}
+                            step={30}
+                            value={scheduleDraft.intervalMinutes}
+                            onChange={value =>
+                                setScheduleDraft(prev => ({
+                                    ...prev,
+                                    intervalMinutes: value ?? DEFAULT_INTERVAL_MINUTES,
+                                }))
+                            }
+                            style={{width: 170}}
+                            addonAfter={
+                                Number.isInteger(scheduleDraft.intervalMinutes)
+                                    ? formatIntervalMinutes(scheduleDraft.intervalMinutes)
+                                    : ''
+                            }
+                        />
+                    </Space>
+                    <Space style={{width: '100%', justifyContent: 'space-between'}}>
+                        <Typography.Text>判出严重项时发桌面通知</Typography.Text>
+                        <Switch
+                            checked={scheduleDraft.notifyOnCrit}
+                            onChange={checked => setScheduleDraft(prev => ({...prev, notifyOnCrit: checked}))}
+                        />
+                    </Space>
+                    {schedule ? (
+                        <Typography.Text type="secondary">
+                            上次自动运行：
+                            {schedule.lastRunAt ? schedule.lastRunAt.slice(0, 19).replace('T', ' ') : '还没跑过'}
+                            {' · '}下次大约：
+                            {(() => {
+                                const next = nextInspectionRunAt(schedule.lastRunAt, schedule.intervalMinutes);
+                                return next ? new Date(next).toLocaleString() : '待首次';
+                            })()}
+                        </Typography.Text>
+                    ) : null}
+                    {schedule?.lastError ? (
+                        <Alert
+                            type="warning"
+                            showIcon
+                            message="最近一次自动巡检没有跑成"
+                            description={`${schedule.lastError}（这一轮跳过了，到下一个间隔还会再试）`}
+                        />
+                    ) : null}
+                </Space>
+                <Typography.Paragraph type="secondary" style={{marginTop: 12, marginBottom: 0}}>
+                    同一台集群同时只允许一次巡检在跑：手点的那一轮还没结束时，定时这一轮会跳过而不是叠加请求。
+                    自动那份同样占「每台集群最多 {INSPECTION_HISTORY_KEEP} 份」的历史额度。
                 </Typography.Paragraph>
             </Modal>
         </PageShell>

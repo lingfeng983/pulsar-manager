@@ -93,6 +93,9 @@ import type {
     InspectionProfile,
     InspectionProfileDraft,
     InspectionRunResult,
+    InspectionSchedule,
+    InspectionScheduleDraft,
+    InspectionScheduledPush,
     TopologyLimits,
 } from './shared/types';
 
@@ -106,6 +109,7 @@ const SESSION_END_CHANNEL: StreamChannel['sessionEnd'] = 'msg:session-end';
 const PRODUCER_STATS_CHANNEL: StreamChannel['producerStats'] = 'msg:producer-stats';
 const LOAD_TEST_PROGRESS_CHANNEL: typeof import('./shared/types').LOAD_TEST_CHANNEL = 'benchmark:progress';
 const ALERT_EVENT_CHANNEL: typeof import('./shared/types').ALERT_EVENT_CHANNEL = 'alert:event';
+const INSPECTION_SCHEDULE_CHANNEL: typeof import('./shared/types').INSPECTION_SCHEDULE_CHANNEL = 'inspection:scheduled';
 
 // 主进程 → 渲染进程的下行订阅。返回反订阅闭包：组件卸载时必须能摘掉监听，
 // 否则切了标签页还在往旧组件推数据。载荷只允许纯 JSON（sandbox 下传不了类实例）。
@@ -529,6 +533,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
             get: (params: {clusterId: string}) => ipcRenderer.invoke('inspection:profile:get', params),
             save: (params: InspectionProfileDraft) => ipcRenderer.invoke('inspection:profile:save', params),
         },
+        schedule: {
+            get: (params: {clusterId: string}) => ipcRenderer.invoke('inspection:schedule:get', params),
+            save: (params: InspectionScheduleDraft) => ipcRenderer.invoke('inspection:schedule:save', params),
+            list: () => ipcRenderer.invoke('inspection:schedule:list'),
+        },
+        // 定时那一轮跑完（或跑坏）之后推来的那一条：巡检页靠它把历史刷回来，
+        // 否则用户只能自己猜应用什么时候动过手
+        onScheduled: (callback: (push: InspectionScheduledPush) => void) =>
+            subscribe(INSPECTION_SCHEDULE_CHANNEL, callback),
     },
 
     // 拓扑
@@ -979,6 +992,12 @@ declare global {
                     get: (params: {clusterId: string}) => Promise<APIResponse<InspectionProfile | null>>;
                     save: (params: InspectionProfileDraft) => Promise<APIResponse<InspectionProfile>>;
                 };
+                schedule: {
+                    get: (params: {clusterId: string}) => Promise<APIResponse<InspectionSchedule | null>>;
+                    save: (params: InspectionScheduleDraft) => Promise<APIResponse<InspectionSchedule>>;
+                    list: () => Promise<APIResponse<InspectionSchedule[]>>;
+                };
+                onScheduled: (callback: (push: InspectionScheduledPush) => void) => () => void;
             };
             topology: {
                 getClusterTopology: (

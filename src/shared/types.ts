@@ -1740,11 +1740,16 @@ export interface InspectionRunParams {
     maxTopics?: number;
 }
 
+// 一次巡检是谁发起的。定时行不会替手动行说话：「03:00 那一份是应用自己跑的」
+// 与「这一份是你点的」在回看时是两种可信度——自动那份没人核对过采样范围。
+export type InspectionSource = 'manual' | 'scheduled';
+
 export interface InspectionRunResult {
     report: InspectionReport;
     markdown: string;
     // 与上一次巡检的差别。第一次跑（库里没有前一份）时为 null，界面就不显示对比区
     diff: InspectionDiff | null;
+    source: InspectionSource;
 }
 
 // 历史列表的一行。checks 不进这个形状：列表要扫的是「哪次跑出了几项严重」，
@@ -1757,7 +1762,47 @@ export interface InspectionHistoryRow {
     version: string | null;
     totals: InspectionTotals;
     scope: InspectionScope;
+    source: InspectionSource;
 }
+
+// ========== 定时巡检（v3.1） ==========
+
+/** 一台集群的调度行。没配过调度时整条为 null，界面据此区分「没配」与「配了但关着」。 */
+export interface InspectionSchedule {
+    clusterId: string;
+    enabled: boolean;
+    intervalMinutes: number;
+    /** 判出严重项时发桌面通知；恢复也发一条，与告警规则的 notify 同一个开关口径。 */
+    notifyOnCrit: boolean;
+    lastRunAt: string | null;
+    /** 最近一次调度跑失败的原文，手动跑不写这一格：它说的是「自动这条链路坏了」。 */
+    lastError: string | null;
+    /** 上一次发通知时那份报告的严重项数，用来把「还是那件事」的重复通知挡掉。 */
+    lastNotifiedCrit: number;
+    updatedAt: string;
+}
+
+/** 界面提交的调度改动：全字段可选，缺省落回现值或默认间隔。 */
+export interface InspectionScheduleDraft {
+    clusterId: string;
+    enabled?: boolean;
+    intervalMinutes?: number;
+    notifyOnCrit?: boolean;
+}
+
+/** 主进程 → 渲染进程：一次调度跑完了（或跑坏了），让对应集群的巡检页把历史刷回来。 */
+export interface InspectionScheduledPush {
+    kind: 'completed' | 'failed';
+    clusterId: string;
+    clusterName: string;
+    /** 跑坏了就是 null：没有一份报告，也就不该替它编一个全 0 的计数。 */
+    totals: InspectionTotals | null;
+    /** 通知文案（失败时是错误原因），界面直接用，不再各处重算一遍。 */
+    message: string;
+    generatedAt: string;
+}
+
+export const INSPECTION_SCHEDULE_CHANNEL = 'inspection:scheduled' as const;
 
 export type InspectionChangeKind = 'new' | 'resolved' | 'worsened' | 'improved' | 'unchanged';
 

@@ -3,6 +3,7 @@ import path from 'path';
 import {app} from 'electron';
 import fs from 'fs';
 import {SCHEMA_SQL} from './schema';
+import type {InspectionSource} from '../../shared/types';
 
 // 数据库实例
 let db: Database.Database | null = null;
@@ -10,7 +11,7 @@ let db: Database.Database | null = null;
 // schema 版本以 user_version 跟踪。改基线 DDL 时：升 SCHEMA_VERSION，
 // 并把该版本的增量 DDL 写进 migrate()——CREATE TABLE IF NOT EXISTS 对已存在的
 // 旧库什么都不做，没有这套机制，加列只会对新装用户生效，旧库静默落后。
-const SCHEMA_VERSION = 12;
+const SCHEMA_VERSION = 13;
 
 function migrate(database: Database.Database, from: number): void {
     // v2：refreshInterval 那行出厂值是 30000，而监控页的刷新间隔单位是秒，
@@ -77,6 +78,16 @@ function migrate(database: Database.Database, from: number): void {
         const columns = database.prepare('PRAGMA table_info(inspections)').all() as {name: string}[];
         if (!columns.some(column => column.name === 'thresholds_json')) {
             database.prepare('ALTER TABLE inspections ADD COLUMN thresholds_json TEXT').run();
+        }
+    }
+    // v13：定时巡检。inspection_schedules 靠基线补齐；inspections 上多一个 source 列，
+    // 老库必须 ALTER——不 ALTER 的话写入直接 no such column，而新库基线已带这一列，
+    // 不查表结构就 ALTER 又是 duplicate column 顶掉整个启动事务（与 v10/v12 同一个坑）。
+    // 默认值 'manual' 是给老行补的：v3.1 之前没有定时这条路，历史上每一份都只能是手点的。
+    if (from < 13) {
+        const columns = database.prepare('PRAGMA table_info(inspections)').all() as {name: string}[];
+        if (!columns.some(column => column.name === 'source')) {
+            database.prepare("ALTER TABLE inspections ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'").run();
         }
     }
 }
@@ -1088,13 +1099,16 @@ export interface InspectionRecord {
     checks_json: string;
     /** 当次生效的判定口径；v2.8 之前存的行为 null，含义是「口径未知」而不是「用的默认值」。 */
     thresholds_json: string | null;
+    /** 手点的还是定时跑的；v3.1 之前的行由迁移补成 manual。 */
+    source: InspectionSource;
     markdown: string;
 }
 
 /** 历史列表用的行：不带 checks_json / markdown，一屏几十行不去解析整份报告。 */
 export type InspectionListRow = Omit<InspectionRecord, 'checks_json' | 'markdown' | 'thresholds_json'>;
 
-const INSPECTION_LIST_COLUMNS = 'id, cluster_id, cluster_name, version, generated_at, crit, warn, ok, skip, scope_json';
+const INSPECTION_LIST_COLUMNS =
+    'id, cluster_id, cluster_name, version, generated_at, crit, warn, ok, skip, scope_json, source';
 
 export function insertInspection(record: InspectionRecord): void {
     const database = getDatabase();
@@ -1102,10 +1116,10 @@ export function insertInspection(record: InspectionRecord): void {
         .prepare(
             `INSERT INTO inspections (
                id, cluster_id, cluster_name, version, generated_at, crit, warn, ok, skip,
-               scope_json, checks_json, thresholds_json, markdown
+               scope_json, checks_json, thresholds_json, source, markdown
              ) VALUES (
                @id, @cluster_id, @cluster_name, @version, @generated_at, @crit, @warn, @ok, @skip,
-               @scope_json, @checks_json, @thresholds_json, @markdown
+               @scope_json, @checks_json, @thresholds_json, @source, @markdown
              )`,
         )
         .run({...record, version: record.version ?? null, thresholds_json: record.thresholds_json ?? null});
@@ -1198,6 +1212,85 @@ export function getInspectionProfile(clusterId: string): InspectionProfileRecord
     const database = getDatabase();
     return database.prepare('SELECT * FROM inspection_profiles WHERE cluster_id = ?').get(clusterId) as
         InspectionProfileRecord | undefined;
+}
+
+// ========== 定时巡检 ==========
+
+export interface InspectionScheduleRecord {
+    cluster_id: string;
+    enabled: number;
+    interval_minutes: number;
+    notify_on_crit: number;
+    last_run_at: string | null;
+    last_error: string | null;
+    last_notified_crit: number;
+    updated_at: string;
+}
+
+/**
+ * 保存的是配置四列，运行期三列（last_run_at / last_error / last_notified_crit）在更新分支里
+ * 刻意不写：改一次间隔不该把「上次什么时候跑的」抹成空，否则刚存完配置就立刻又到期、
+ * 又跑一遍，而且上一轮的通知去重依据也没了。首次插入时这三列由调用方给默认值。
+ */
+export function upsertInspectionSchedule(record: InspectionScheduleRecord): void {
+    const database = getDatabase();
+    database
+        .prepare(
+            `INSERT INTO inspection_schedules (
+               cluster_id, enabled, interval_minutes, notify_on_crit,
+               last_run_at, last_error, last_notified_crit, updated_at
+             ) VALUES (
+               @cluster_id, @enabled, @interval_minutes, @notify_on_crit,
+               @last_run_at, @last_error, @last_notified_crit, @updated_at
+             )
+             ON CONFLICT(cluster_id) DO UPDATE SET
+               enabled = excluded.enabled,
+               interval_minutes = excluded.interval_minutes,
+               notify_on_crit = excluded.notify_on_crit,
+               updated_at = excluded.updated_at`,
+        )
+        .run(record);
+}
+
+export function getInspectionSchedule(clusterId: string): InspectionScheduleRecord | undefined {
+    const database = getDatabase();
+    return database.prepare('SELECT * FROM inspection_schedules WHERE cluster_id = ?').get(clusterId) as
+        InspectionScheduleRecord | undefined;
+}
+
+export function listInspectionSchedules(): InspectionScheduleRecord[] {
+    const database = getDatabase();
+    return database
+        .prepare('SELECT * FROM inspection_schedules ORDER BY cluster_id')
+        .all() as InspectionScheduleRecord[];
+}
+
+/** 引擎每轮只要开着的那几行：一簇一行、总量等于集群数，不必为它建索引。 */
+export function listEnabledInspectionSchedules(): InspectionScheduleRecord[] {
+    const database = getDatabase();
+    return database
+        .prepare('SELECT * FROM inspection_schedules WHERE enabled = 1 ORDER BY cluster_id')
+        .all() as InspectionScheduleRecord[];
+}
+
+/**
+ * 跑完一轮之后的回写。用 UPDATE 而不是 upsert：调度行可能在这一轮跑的过程中被删掉
+ * （集群删了、级联删了这行），此时该什么都不写，而不是替一台不存在的集群复活一行调度。
+ */
+export function markInspectionScheduleRun(
+    clusterId: string,
+    args: {ranAt: string; error: string | null; notifiedCrit: number | null},
+): void {
+    const database = getDatabase();
+    database
+        .prepare(
+            `UPDATE inspection_schedules
+             SET last_run_at = @ranAt,
+                 last_error = @error,
+                 last_notified_crit = COALESCE(@notifiedCrit, last_notified_crit)
+             WHERE cluster_id = @clusterId`,
+        )
+        .run({ranAt: args.ranAt, error: args.error, notifiedCrit: args.notifiedCrit, clusterId});
 }
 
 // 用户设置相关操作

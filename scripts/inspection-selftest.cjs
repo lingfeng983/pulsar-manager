@@ -431,10 +431,10 @@ const {SCHEMA_SQL} = require('../dist/src/main/database/schema.js');
 
 const INSERT_INSPECTION = `INSERT INTO inspections (
    id, cluster_id, cluster_name, version, generated_at, crit, warn, ok, skip,
-   scope_json, checks_json, thresholds_json, markdown
+   scope_json, checks_json, thresholds_json, source, markdown
  ) VALUES (
    @id, @cluster_id, @cluster_name, @version, @generated_at, @crit, @warn, @ok, @skip,
-   @scope_json, @checks_json, @thresholds_json, @markdown
+   @scope_json, @checks_json, @thresholds_json, @source, @markdown
  )`;
 
 const UPSERT_PROFILE = `INSERT INTO inspection_profiles (
@@ -448,7 +448,7 @@ const UPSERT_PROFILE = `INSERT INTO inspection_profiles (
    max_topics = excluded.max_topics,
    updated_at = excluded.updated_at`;
 
-const LIST_INSPECTIONS = `SELECT id, cluster_id, cluster_name, version, generated_at, crit, warn, ok, skip, scope_json
+const LIST_INSPECTIONS = `SELECT id, cluster_id, cluster_name, version, generated_at, crit, warn, ok, skip, scope_json, source
  FROM inspections WHERE cluster_id = ? ORDER BY generated_at DESC LIMIT ?`;
 
 const PREVIOUS_INSPECTION = `SELECT * FROM inspections
@@ -473,6 +473,7 @@ function inspectionRecord(overrides) {
         scope_json: '{"topicsSeen":9,"topicsSampled":5}',
         checks_json: '[{"key":"backlog","title":"消息积压","level":"warn","summary":"x"}]',
         thresholds_json: '{"backlogWarn":10000,"backlogCrit":1000000,"unackedWarn":5000,"rateRatio":3,"rateMinIn":10,"detailTopN":8}',
+        source: 'manual',
         markdown: '# 报告',
         ...overrides,
     };
@@ -499,7 +500,7 @@ check('基线 DDL 连跑两次不炸（每次启动都会重跑一遍）', () =>
     const columns = database.prepare('PRAGMA table_info(inspections)').all().map(column => column.name);
     eq(
         columns.join(','),
-        'id,cluster_id,cluster_name,version,generated_at,crit,warn,ok,skip,scope_json,checks_json,thresholds_json,markdown',
+        'id,cluster_id,cluster_name,version,generated_at,crit,warn,ok,skip,scope_json,checks_json,thresholds_json,source,markdown',
         'inspections 列清单',
     );
     database.close();

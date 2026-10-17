@@ -237,6 +237,9 @@ CREATE TABLE IF NOT EXISTS inspections (
     -- 当次生效的判定口径。可空：v2.8 存的那些报告根本没有这个概念，
     -- 空就是「口径未知」，环比时不据此下「判定线没动」的结论。
     thresholds_json TEXT,
+    -- 这份报告是手点的还是定时跑的。老行一律算 manual：v3.1 之前根本没有定时这条路，
+    -- 这个推断有依据，不是替历史补一个好看的默认值。
+    source TEXT NOT NULL DEFAULT 'manual',
     markdown TEXT NOT NULL,
     FOREIGN KEY (cluster_id) REFERENCES clusters(id) ON DELETE CASCADE
 );
@@ -250,6 +253,26 @@ CREATE TABLE IF NOT EXISTS inspection_profiles (
     thresholds_json TEXT NOT NULL,
     max_namespaces INTEGER NOT NULL,
     max_topics INTEGER NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (cluster_id) REFERENCES clusters(id) ON DELETE CASCADE
+);
+
+-- 定时巡检：同样一簇一行（与 inspection_profiles 同一张「按集群各一份」的形状），
+-- 主键直接用 cluster_id，不必再生成一个 id——调度没有并存的第二份，也没有历史。
+-- 单独一张表而不是往 inspection_profiles 上加列：口径行「不存在」是有含义的
+-- （这台集群没改过判定线），调度行如果和它挤在一行，配了定时却没动过阈值就会被读成
+-- 「配过、而且恰好等于默认值」。
+-- 不建 enabled 的索引：一张一簇一行、总量等于集群数的表，扫描成本不高于一次 PRAGMA。
+CREATE TABLE IF NOT EXISTS inspection_schedules (
+    cluster_id TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    interval_minutes INTEGER NOT NULL,
+    notify_on_crit INTEGER NOT NULL DEFAULT 1,
+    last_run_at TEXT,
+    -- 只在定时这条路上写。手动跑失败直接回到界面上，不需要落库等人回看
+    last_error TEXT,
+    -- 上次发通知那份的严重项数：数字没动就不再打扰第二次
+    last_notified_crit INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL,
     FOREIGN KEY (cluster_id) REFERENCES clusters(id) ON DELETE CASCADE
 );
