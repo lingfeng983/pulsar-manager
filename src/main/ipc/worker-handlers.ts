@@ -1,8 +1,5 @@
 import {
     z,
-    BuiltinConfigSchema,
-    FunctionStateGetSchema,
-    FunctionStateSetSchema,
     FunctionTriggerSchema,
     RuntimeControlSchema,
     RuntimeCreateSchema,
@@ -56,10 +53,6 @@ export function registerWorkerHandlers() {
 
     registerClientHandler('worker:builtin:list', WorkerKindSchema, passThrough, (client, {kind}) =>
         client.listBuiltinRuntime(kind),
-    );
-
-    registerClientHandler('worker:builtin:config', BuiltinConfigSchema, passThrough, (client, {kind, name}) =>
-        client.getBuiltinRuntimeConfig(kind, name),
     );
 
     // 触发一次会往 input topic 投一条消息，属于变更；审计里把 topic 记进 details，
@@ -155,29 +148,5 @@ export function registerWorkerHandlers() {
         async (client, {kind}) => {
             await client.reloadBuiltinRuntime(kind);
         },
-    );
-
-    registerClientHandler(
-        'worker:function:state:get',
-        FunctionStateGetSchema,
-        passThrough,
-        (client, {tenant, namespace, name, key}) => client.getFunctionState(tenant, namespace, name, key),
-    );
-
-    registerMutationHandler(
-        'worker:function:state:set',
-        FunctionStateSetSchema,
-        passThrough,
-        input => ({
-            ...itemAudit('set_state')(input),
-            details: JSON.stringify({key: input.key, length: input.value.length}),
-        }),
-        async (client, {tenant, namespace, name, key, value}) => {
-            await client.setFunctionState(tenant, namespace, name, key, value);
-        },
-    );
-
-    registerClientHandler('worker:assignments', WorkerClusterSchema, passThrough, client =>
-        client.getWorkerAssignments(),
     );
 }

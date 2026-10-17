@@ -2,9 +2,7 @@ import {dialog} from 'electron';
 import {basename} from 'node:path';
 import {statSync} from 'node:fs';
 import {
-    getAllSSHTunnels,
     getSSHTunnelById,
-    getAllK8sForwards,
     getK8sForwardById,
     getSetting,
     setSetting,
@@ -37,10 +35,6 @@ function isAllowedSettingsKey(key: unknown): key is string {
     return typeof key === 'string' && SETTINGS_KEYS.has(key);
 }
 
-function tunnelStatus(id: string): 'connected' | 'disconnected' {
-    return sshTunnelManager.endpoints(id) ? 'connected' : 'disconnected';
-}
-
 const ThemeSchema = z.enum(['light', 'dark', 'eyeCare']);
 
 // 一次最多取 1000 条：日志表没有上限地把整张表读进内存再序列化给渲染进程，
@@ -53,33 +47,6 @@ function normalizeLogLimit(limit: unknown): number {
 
 export function registerSystemHandlers() {
     // ========== SSH 隧道 ==========
-
-    registerRawHandler('ssh:list', async () => {
-        try {
-            ensureDbInitialized();
-            const tunnels = getAllSSHTunnels();
-            return {
-                success: true,
-                data: tunnels.map(t => ({
-                    id: t.id,
-                    host: t.host,
-                    port: t.port,
-                    username: t.username,
-                    authType: t.auth_type,
-                    // 库里的 status 可能停在异常值，以当前是否有活的本地转发为准
-                    status: tunnelStatus(t.id),
-                    localAdminPort: t.local_admin_port,
-                    localBrokerPort: t.local_broker_port,
-                    remoteHost: t.remote_host,
-                    remoteAdminPort: t.remote_admin_port,
-                    remoteBrokerPort: t.remote_broker_port,
-                })),
-            };
-        } catch (error) {
-            log.error('ssh:list failed', formatError(error));
-            return {success: false, error: formatError(error)};
-        }
-    });
 
     registerRawHandler('ssh:connect', async config => {
         try {
@@ -130,34 +97,6 @@ export function registerSystemHandlers() {
     });
 
     // ========== K8s 端口转发 ==========
-
-    registerRawHandler('k8s:list', async () => {
-        try {
-            ensureDbInitialized();
-            const forwards = getAllK8sForwards();
-            return {
-                success: true,
-                data: forwards.map(f => ({
-                    id: f.id,
-                    namespace: f.namespace,
-                    resource: f.resource,
-                    context: f.context,
-                    kubeconfigPath: f.kubeconfig_path,
-                    kubectlPath: f.kubectl_path,
-                    // 库里的 status 可能停在异常值（进程被外部杀掉、应用崩溃），
-                    // 以当前是否真的还持有 kubectl 进程为准
-                    status: k8sForwardManager.isForwarding(f.id) ? 'connected' : 'disconnected',
-                    localAdminPort: f.local_admin_port,
-                    localBrokerPort: f.local_broker_port,
-                    remoteAdminPort: f.remote_admin_port,
-                    remoteBrokerPort: f.remote_broker_port,
-                })),
-            };
-        } catch (error) {
-            log.error('k8s:list failed', formatError(error));
-            return {success: false, error: formatError(error)};
-        }
-    });
 
     registerRawHandler('k8s:connect', async config => {
         try {

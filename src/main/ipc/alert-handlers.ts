@@ -62,15 +62,6 @@ export function registerAlertHandlers() {
 
     registerHandler('alert:rules:count', async () => countOpenAlertEvents());
 
-    registerHandler('alert:rule:get', async (params: unknown) => {
-        const {id} = AlertRuleIdSchema.parse(params);
-        const record = getAlertRuleById(id);
-        if (!record) {
-            throw new Error('规则不存在，可能已被删除');
-        }
-        return toAlertRule(record);
-    });
-
     registerHandler('alert:rule:upsert', async (params: unknown) => {
         const input = AlertRuleUpsertSchema.parse(params) as AlertRuleUpsertParams;
         if (!getClusterById(input.clusterId)) {

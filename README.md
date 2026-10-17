@@ -118,7 +118,10 @@ pulsar-manager/
 │       │                      # 消费者工作台、监控、配置中心、插件市场、快捷键
 │       ├── store/             # Zustand：集群、Tab、主题、命令、快捷键、应用设置、插件
 │       └── utils/             # 格式化、导出、拓扑配色、按键解析、统一筛选匹配
-├── docs/DATA_SOURCES.md       # 每个页面的数据来源说明
+├── docs/pulsar/               # 内置文档中心的 8 篇 Pulsar 资料（随构建打进渲染包）
+├── docs/design/               # 项目设计稿与实施方案
+├── docs/guides/               # 使用与扩展指南
+├── docs/reference/            # 数据来源等内部参考说明
 ├── build/                     # 应用图标产物（icon.ico / icon.png，由脚本生成，入库）
 ├── release.sh                 # 一键出包 + 发布 Gitee 发行版
 ├── scripts/make-icon.mjs      # 图标唯一来源：纯 Node 画图标并生成 build/* 与 src/main/app-icon.ts
@@ -131,7 +134,7 @@ pulsar-manager/
 └── tsconfig.node.json         # 主进程/preload 的 TS 配置（CommonJS）
 ```
 
-`docs/` 下另有一份[《详细设计说明书》](./docs/Pulsar%20桌面管理工具详细设计说明书.md)和一份[《UI 详细设计规范》](./docs/Pulsar%20桌面管理工具%20UI%20详细设计规范（最终完整版）.md)，是项目最初的设计输入，部分细节已被后续实现取代。
+`docs/design/` 下另有一份[《详细设计说明书》](./docs/design/Pulsar%20桌面管理工具详细设计说明书.md)和一份[《UI 详细设计规范》](./docs/design/Pulsar%20桌面管理工具%20UI%20详细设计规范（最终完整版）.md)，是项目最初的设计输入，部分细节已被后续实现取代。
 
 ## 快速开始
 

@@ -108,8 +108,6 @@ function toTemplate(record: MessageTemplateRecord): MessageTemplate {
         producerOptions: parseProducerOptions(record.producer_options_json),
         schemaMode: normalizeSchemaMode(record.schema_mode),
         schemaJson: record.schema_json ?? undefined,
-        useCount: record.use_count,
-        lastUsedAt: record.last_used_at ?? null,
         createdAt: record.created_at,
         updatedAt: record.updated_at,
     };
@@ -128,8 +126,6 @@ function toConsumerConfig(record: ConsumerSessionConfigRecord): ConsumerSessionC
         topicUri: record.topic_uri,
         subscription: record.subscription,
         name: record.name,
-        useCount: record.use_count,
-        lastUsedAt: record.last_used_at ?? null,
         createdAt: record.created_at,
         updatedAt: record.updated_at,
     };
@@ -241,12 +237,6 @@ export function registerTemplateHandlers() {
         return listMessageTemplates(clusterId, topicUri).map(toTemplate);
     });
 
-    registerHandler('template:get', async (params: unknown) => {
-        const {id} = TemplateIdSchema.parse(params);
-        const record = getMessageTemplateById(id);
-        return record ? toTemplate(record) : null;
-    });
-
     registerHandler('template:create', async (params: unknown) => {
         const input = parseTemplateInput(params);
         requireCluster(input.clusterId);
@@ -347,12 +337,6 @@ export function registerTemplateHandlers() {
     registerHandler('consumerConfig:list', async (params: unknown) => {
         const {clusterId, topicUri} = TemplateScopeSchema.parse(params);
         return listConsumerSessionConfigs(clusterId, topicUri).map(toConsumerConfig);
-    });
-
-    registerHandler('consumerConfig:get', async (params: unknown) => {
-        const {id} = TemplateIdSchema.parse(params);
-        const record = getConsumerSessionConfigById(id);
-        return record ? toConsumerConfig(record) : null;
     });
 
     registerHandler('consumerConfig:create', async (params: unknown) => {

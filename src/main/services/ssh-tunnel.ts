@@ -139,10 +139,6 @@ export class SshTunnelManager {
         return this.active.get(tunnelId)?.endpoints;
     }
 
-    isConnecting(tunnelId: string): boolean {
-        return this.pending.has(tunnelId);
-    }
-
     private currentGeneration(tunnelId: string): number {
         return this.generation.get(tunnelId) ?? 0;
     }

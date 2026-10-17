@@ -14,10 +14,10 @@ export interface KbDoc {
  * 文档正文在构建时被打进渲染包（Vite 的 ?raw 导入），所以这里没有运行时读文件：
  * 生产页面走 file:// 加载，安装包里也只有 dist，读不到仓库的 docs 目录。
  *
- * 模式写死成 docs/0*.md：docs/ 下另有 DATA_SOURCES.md 与几份本项目的设计稿，
+ * 模式写死成 docs/pulsar/0*.md：docs/ 下另有数据源说明与几份本项目的设计稿，
  * 里面写着本机路径和内部方案，不该出现在发给用户的界面里。
  */
-const sources = import.meta.glob<string>('../../../docs/0*.md', {
+const sources = import.meta.glob<string>('../../../docs/pulsar/0*.md', {
     query: '?raw',
     import: 'default',
     eager: true,

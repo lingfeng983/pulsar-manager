@@ -509,8 +509,6 @@ export interface MessageTemplateRecord {
     producer_options_json: string;
     schema_mode: string;
     schema_json?: string | null;
-    use_count: number;
-    last_used_at?: string | null;
     created_at: string;
     updated_at: string;
 }
@@ -538,18 +536,16 @@ export function getMessageTemplateById(id: string): MessageTemplateRecord | unde
         MessageTemplateRecord | undefined;
 }
 
-export function insertMessageTemplate(
-    template: Omit<MessageTemplateRecord, 'created_at' | 'updated_at' | 'use_count'> & {use_count?: number},
-): void {
+export function insertMessageTemplate(template: Omit<MessageTemplateRecord, 'created_at' | 'updated_at'>): void {
     const database = getDatabase();
     const now = new Date().toISOString();
     const stmt = database.prepare(`
     INSERT INTO message_templates (
       id, cluster_id, topic_uri, name, body, variables_json, properties_json,
-      producer_options_json, schema_mode, schema_json, use_count, last_used_at, created_at, updated_at
+      producer_options_json, schema_mode, schema_json, created_at, updated_at
     ) VALUES (
       @id, @cluster_id, @topic_uri, @name, @body, @variables_json, @properties_json,
-      @producer_options_json, @schema_mode, @schema_json, @use_count, @last_used_at, @created_at, @updated_at
+      @producer_options_json, @schema_mode, @schema_json, @created_at, @updated_at
     )
   `);
     stmt.run({
@@ -557,10 +553,6 @@ export function insertMessageTemplate(
         // schema 原文没内容时存 NULL 而不是空串：'inline 但 schema 是空的'这种
         // 半配置状态在列上必须看得出来，空串会被读成"存过 schema"。
         schema_json: template.schema_json ?? null,
-        // 默认值写在展开之后：调用方传 last_used_at: undefined 时，展开会把
-        // null 顶掉，而 better-sqlite3 对 undefined 直接抛错而不是当 NULL。
-        last_used_at: template.last_used_at ?? null,
-        use_count: template.use_count ?? 0,
         created_at: now,
         updated_at: now,
     });
@@ -576,7 +568,6 @@ const MESSAGE_TEMPLATE_ALLOWED_FIELDS = new Set([
     'producer_options_json',
     'schema_mode',
     'schema_json',
-    'last_used_at',
 ]);
 
 export function updateMessageTemplate(id: string, updates: Partial<MessageTemplateRecord>): void {
@@ -607,16 +598,6 @@ export function deleteMessageTemplate(id: string): void {
     database.prepare('DELETE FROM message_templates WHERE id = ?').run(id);
 }
 
-// 发送/引用一次模板就记一笔，模板库按它排序「最近用过」。
-// 单独一个语句而不是并进 update：业务改名不该顺带把使用次数写回去。
-export function touchMessageTemplateUse(id: string): void {
-    const database = getDatabase();
-    const now = new Date().toISOString();
-    database
-        .prepare('UPDATE message_templates SET use_count = use_count + 1, last_used_at = ? WHERE id = ?')
-        .run(now, id);
-}
-
 // 消费者会话配置（消费者工作台）
 export interface ConsumerSessionConfigRecord {
     id: string;
@@ -625,8 +606,6 @@ export interface ConsumerSessionConfigRecord {
     subscription: string;
     name: string;
     config_json: string;
-    use_count: number;
-    last_used_at?: string | null;
     created_at: string;
     updated_at: string;
 }
@@ -653,36 +632,25 @@ export function getConsumerSessionConfigById(id: string): ConsumerSessionConfigR
 }
 
 export function insertConsumerSessionConfig(
-    config: Omit<ConsumerSessionConfigRecord, 'created_at' | 'updated_at' | 'use_count'> & {use_count?: number},
+    config: Omit<ConsumerSessionConfigRecord, 'created_at' | 'updated_at'>,
 ): void {
     const database = getDatabase();
     const now = new Date().toISOString();
     const stmt = database.prepare(`
     INSERT INTO consumer_session_configs (
-      id, cluster_id, topic_uri, subscription, name, config_json,
-      use_count, last_used_at, created_at, updated_at
+      id, cluster_id, topic_uri, subscription, name, config_json, created_at, updated_at
     ) VALUES (
-      @id, @cluster_id, @topic_uri, @subscription, @name, @config_json,
-      @use_count, @last_used_at, @created_at, @updated_at
+      @id, @cluster_id, @topic_uri, @subscription, @name, @config_json, @created_at, @updated_at
     )
   `);
     stmt.run({
         ...config,
-        last_used_at: config.last_used_at ?? null,
-        use_count: config.use_count ?? 0,
         created_at: now,
         updated_at: now,
     });
 }
 
-const CONSUMER_CONFIG_ALLOWED_FIELDS = new Set([
-    'cluster_id',
-    'topic_uri',
-    'subscription',
-    'name',
-    'config_json',
-    'last_used_at',
-]);
+const CONSUMER_CONFIG_ALLOWED_FIELDS = new Set(['cluster_id', 'topic_uri', 'subscription', 'name', 'config_json']);
 
 export function updateConsumerSessionConfig(id: string, updates: Partial<ConsumerSessionConfigRecord>): void {
     const database = getDatabase();
@@ -712,14 +680,6 @@ export function updateConsumerSessionConfig(id: string, updates: Partial<Consume
 export function deleteConsumerSessionConfig(id: string): void {
     const database = getDatabase();
     database.prepare('DELETE FROM consumer_session_configs WHERE id = ?').run(id);
-}
-
-export function touchConsumerSessionConfigUse(id: string): void {
-    const database = getDatabase();
-    const now = new Date().toISOString();
-    database
-        .prepare('UPDATE consumer_session_configs SET use_count = use_count + 1, last_used_at = ? WHERE id = ?')
-        .run(now, id);
 }
 
 // 发送历史（生产者工作台，默认只存预览；全文留存开关打开时带 body_full）
@@ -1682,21 +1642,6 @@ export function listNotifyDeliveries(limit: number): NotifyDeliveryRecord[] {
              LIMIT ?`,
         )
         .all(limit) as NotifyDeliveryRecord[];
-}
-
-/** 这条渠道最近的一次投递（界面上「最近一次」那一列读它，比渠道上的汇总字段更具体）。 */
-export function getLatestNotifyDelivery(channelId: string): NotifyDeliveryRecord | null {
-    const database = getDatabase();
-    const row = database
-        .prepare(
-            `SELECT id, channel_id, channel_name, event_kind, level, ok, skipped, message, created_at
-             FROM notify_deliveries
-             WHERE channel_id = ?
-             ORDER BY id DESC
-             LIMIT 1`,
-        )
-        .get(channelId) as NotifyDeliveryRecord | undefined;
-    return row ?? null;
 }
 
 /**

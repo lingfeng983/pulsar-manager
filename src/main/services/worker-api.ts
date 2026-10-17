@@ -577,71 +577,10 @@ export class WorkerAPI {
         });
     }
 
-    // 内置连接器的参数 schema：新建表单照着它列字段，而不是让用户猜 key 名。
-    // 内置函数没有这个端点，它的参数就在 builtins 那一条记录里。
-    async getBuiltinConfigDefinition(kind: PulsarResourceKind, name: string): Promise<Record<string, unknown>> {
-        return this.enqueue(async () => {
-            await this.requireWorker();
-            if (kind === 'function') {
-                const response = await orNotFound(() => this.http.get(builtinBase(kind)), undefined);
-                const entry = (Array.isArray(response?.data) ? response!.data : []).find(
-                    (item: any) => String(item?.name ?? '') === name,
-                );
-                return entry ? (entry as Record<string, unknown>) : {};
-            }
-            const response = await orNotFound(
-                () => this.http.get(`${builtinBase(kind)}/${seg(name)}/configdefinition`),
-                undefined,
-            );
-            return response ? (response.data as Record<string, unknown>) : {};
-        });
-    }
-
     async reloadBuiltins(kind: PulsarResourceKind): Promise<void> {
         return this.enqueue(async () => {
             await this.requireWorker();
             await this.http.post(reloadPath(kind));
-        });
-    }
-
-    // ========== 状态读写（函数的 key/value state store） ==========
-
-    async getFunctionState(tenant: string, namespace: string, name: string, key: string): Promise<string> {
-        return this.enqueue(async () => {
-            await this.requireWorker();
-            const response = await orNotFound(
-                () => this.http.get(`${itemPath('function', tenant, namespace, name)}/state/${seg(key)}`),
-                undefined,
-            );
-            const value = response?.data?.value ?? response?.data?.string;
-            return value === undefined || value === null ? '' : String(value);
-        });
-    }
-
-    async setFunctionState(tenant: string, namespace: string, name: string, key: string, value: string): Promise<void> {
-        return this.enqueue(async () => {
-            await this.requireWorker();
-            const form = WorkerAPI.buildForm({
-                state: JSON.stringify({key, value, string: value}),
-            });
-            await this.http.post(`${itemPath('function', tenant, namespace, name)}/state/${seg(key)}`, form);
-        });
-    }
-
-    // worker 节点地址可能不带协议头，界面直接显示原值；这里只做归一化，不猜补全。
-    async getAssignments(): Promise<Record<string, string[]>> {
-        return this.enqueue(async () => {
-            await this.requireWorker();
-            const response = await orNotFound(() => this.http.get(WORKER_BASE + '/assignments'), undefined);
-            const raw = response?.data;
-            if (!raw || typeof raw !== 'object') {
-                return {};
-            }
-            const out: Record<string, string[]> = {};
-            for (const [workerId, list] of Object.entries(raw as Record<string, unknown>)) {
-                out[workerId] = (Array.isArray(list) ? list : []).map(String);
-            }
-            return out;
         });
     }
 }

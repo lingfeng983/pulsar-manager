@@ -585,21 +585,6 @@ export const WorkerClusterSchema = z.object({clusterId: ClusterIdSchema});
 // 只按「口径」区分的那几档：内置函数/连接器清单与重载
 export const WorkerKindSchema = WorkerClusterSchema.extend({kind: PulsarResourceKindSchema});
 
-export const BuiltinConfigSchema = z.object({
-    clusterId: ClusterIdSchema,
-    kind: PulsarResourceKindSchema,
-    name: TopicSchema,
-});
-
-// state 的键直接进路径、值进表单，长度按 worker 侧实际能接受的来
-export const FunctionStateGetSchema = RuntimeItemPathSchema.extend({
-    key: z.string().trim().min(1).max(255),
-});
-
-export const FunctionStateSetSchema = FunctionStateGetSchema.extend({
-    value: z.string().max(256 * 1024),
-});
-
 // ========== 命名空间策略 ==========
 
 // 字段名单直接取主进程字段表的键：这里再抄一份，两处名单迟早漂移成
@@ -1140,37 +1125,6 @@ export function encryptSensitiveFields(config: z.infer<typeof ClusterConfigSchem
     }
     return encrypted;
 }
-
-// SSH 隧道凭据单独加密：字段名与 ssh_tunnels 表一致，直接落库。
-export function encryptSshSecrets(ssh: z.infer<typeof SshInlineSchema>): Partial<SSHTunnelRecord> {
-    const record: Partial<SSHTunnelRecord> = {
-        host: ssh.host,
-        port: ssh.port || 22,
-        username: ssh.username,
-        auth_type: ssh.authType,
-    };
-    if (ssh.password) {
-        record.password = encrypt(ssh.password);
-    }
-    if (ssh.privateKey) {
-        record.private_key = encrypt(ssh.privateKey);
-    }
-    if (ssh.passphrase) {
-        record.passphrase = encrypt(ssh.passphrase);
-    }
-    if (ssh.remoteHost) {
-        record.remote_host = ssh.remoteHost;
-    }
-    if (ssh.remoteAdminPort) {
-        record.remote_admin_port = ssh.remoteAdminPort;
-    }
-    if (ssh.remoteBrokerPort) {
-        record.remote_broker_port = ssh.remoteBrokerPort;
-    }
-    return record;
-}
-
-// 解密敏感字段
 
 // 标准化集群数据。
 // 注意：authParams / tlsTrustCerts / SSH 凭据属于凭据，只在主进程内解密使用，

@@ -5,7 +5,6 @@ import {
     getInspectionProfile,
     getInspectionSchedule,
     listInspections,
-    listInspectionSchedules,
     upsertInspectionProfile,
     type InspectionProfileRecord,
 } from '../database/sqlite';
@@ -205,10 +204,6 @@ export function registerInspectionHandlers() {
         const input = ScheduleSaveSchema.parse(params) as InspectionScheduleDraft;
         return saveInspectionSchedule(input);
     });
-
-    // 列的是所有配过调度的集群（含关着的）：配置中心要说的是「哪些集群挂着自动巡检」，
-    // 只列 enabled 的会让「刚存了但还没打开」那一行凭空消失
-    registerHandler('inspection:schedule:list', async () => listInspectionSchedules().map(toInspectionSchedule));
 
     // 只读那份汇总：每台集群最近的一份报告，一次数据库查询都不碰 broker。
     // 数字因此可能已经是几小时前的，行上的「最近一次」与新鲜度就是为了让这件事看得见

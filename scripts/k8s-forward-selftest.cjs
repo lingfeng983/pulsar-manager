@@ -424,11 +424,10 @@ async function main() {
         eq(result.data.clusters[0].k8s, undefined, '缺省的 k8s 不该被填成对象');
     });
 
-    // ---- 管理器的空闲状态：没起过进程时任何查询都不该抛异常 ----
-    await check('未建立转发时 endpoints / isForwarding 都是空的', () => {
+    // ---- 管理器的空闲状态：没起过进程时查询不该抛异常 ----
+    await check('未建立转发时 endpoints 是空的', () => {
         const manager = new K8sPortForwardManager();
         eq(manager.endpoints('nope'), undefined, '不存在的 id 不该返回端点');
-        eq(manager.isForwarding('nope'), false, '不存在的 id 不该算在转发');
     });
 
     console.log(failures === 0 ? '\nALL PASS' : `\n${failures} 项失败`);

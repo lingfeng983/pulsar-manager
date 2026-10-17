@@ -190,10 +190,3 @@ export function trimMessageList<T extends {data: string}>(merged: T[], maxCount:
     }
     return merged;
 }
-
-export const formatMessageBatch = (dataList: string[]): Map<string, string> => {
-    const decoded = decodeMessageBatch(dataList);
-    const formatted = new Map<string, string>();
-    decoded.forEach((payload, key) => formatted.set(key, payload.formatted));
-    return formatted;
-};

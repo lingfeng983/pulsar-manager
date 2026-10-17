@@ -316,24 +316,8 @@ export class PulsarAdminClient {
         return this.workerAPI.listBuiltins(kind);
     }
 
-    async getBuiltinRuntimeConfig(kind: PulsarResourceKind, name: string) {
-        return this.workerAPI.getBuiltinConfigDefinition(kind, name);
-    }
-
     async reloadBuiltinRuntime(kind: PulsarResourceKind) {
         return this.workerAPI.reloadBuiltins(kind);
-    }
-
-    async getFunctionState(tenant: string, namespace: string, name: string, key: string) {
-        return this.workerAPI.getFunctionState(tenant, namespace, name, key);
-    }
-
-    async setFunctionState(tenant: string, namespace: string, name: string, key: string, value: string) {
-        return this.workerAPI.setFunctionState(tenant, namespace, name, key, value);
-    }
-
-    async getWorkerAssignments() {
-        return this.workerAPI.getAssignments();
     }
 
     // ========== 订阅操作 ==========

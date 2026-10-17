@@ -154,10 +154,6 @@ export class K8sPortForwardManager {
         return this.active.get(forwardId)?.endpoints;
     }
 
-    isForwarding(forwardId: string): boolean {
-        return this.active.has(forwardId);
-    }
-
     private currentGeneration(forwardId: string): number {
         return this.generation.get(forwardId) ?? 0;
     }

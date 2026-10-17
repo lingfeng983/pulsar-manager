@@ -76,8 +76,3 @@ export const SAMPLING_LIMITS = {
 export function thresholdDisplay(field: ThresholdField, value: number): string {
     return `${value} ${THRESHOLD_UNITS[field]}`;
 }
-
-/** 一个字段调没调过：界面上的「默认 / 已调整」标记与导出的口径行都靠它。 */
-export function isThresholdOverridden(field: ThresholdField, value: number): boolean {
-    return value !== INSPECTION_THRESHOLDS[field];
-}

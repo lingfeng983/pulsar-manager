@@ -49,8 +49,6 @@ import type {
     SendHistoryListParams,
     SessionEndEvent,
     SSHConfig,
-    SSHTunnel,
-    K8sForward,
     K8sForwardConfig,
     SubscriptionPathParams,
     WorkbenchCopyParams,
@@ -405,7 +403,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // 报文模板库（生产者工作台）：纯本地 SQLite，集群离线也能翻出上次写好的报文
     template: {
         list: (params: WorkbenchScopeParams) => ipcRenderer.invoke('template:list', params),
-        get: (id: string) => ipcRenderer.invoke('template:get', {id}),
         create: (params: MessageTemplateUpsertParams) => ipcRenderer.invoke('template:create', params),
         update: (params: MessageTemplateUpsertParams) => ipcRenderer.invoke('template:update', params),
         delete: (id: string) => ipcRenderer.invoke('template:delete', {id}),
@@ -415,7 +412,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // 消费者会话配置：同样只在本地库里
     consumerConfig: {
         list: (params: WorkbenchScopeParams) => ipcRenderer.invoke('consumerConfig:list', params),
-        get: (id: string) => ipcRenderer.invoke('consumerConfig:get', {id}),
         create: (params: ConsumerConfigUpsertParams) => ipcRenderer.invoke('consumerConfig:create', params),
         update: (params: ConsumerConfigUpsertParams) => ipcRenderer.invoke('consumerConfig:update', params),
         delete: (id: string) => ipcRenderer.invoke('consumerConfig:delete', {id}),
@@ -499,21 +495,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
         }) => ipcRenderer.invoke('worker:function:trigger', {kind: 'function', ...params}),
         listBuiltins: (clusterId: string, kind: PulsarResourceKind) =>
             ipcRenderer.invoke('worker:builtin:list', {clusterId, kind}),
-        builtinConfig: (params: {clusterId: string; kind: PulsarResourceKind; name: string}) =>
-            ipcRenderer.invoke('worker:builtin:config', params),
         reloadBuiltins: (clusterId: string, kind: PulsarResourceKind) =>
             ipcRenderer.invoke('worker:builtin:reload', {clusterId, kind}),
-        getStateValue: (params: {clusterId: string; tenant: string; namespace: string; name: string; key: string}) =>
-            ipcRenderer.invoke('worker:function:state:get', {kind: 'function', ...params}),
-        setStateValue: (params: {
-            clusterId: string;
-            tenant: string;
-            namespace: string;
-            name: string;
-            key: string;
-            value: string;
-        }) => ipcRenderer.invoke('worker:function:state:set', {kind: 'function', ...params}),
-        assignments: (clusterId: string) => ipcRenderer.invoke('worker:assignments', {clusterId}),
     },
 
     // 命名空间策略：读一次拿折叠好的视图，写按字段端点逐个走
@@ -547,7 +530,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
         schedule: {
             get: (params: {clusterId: string}) => ipcRenderer.invoke('inspection:schedule:get', params),
             save: (params: InspectionScheduleDraft) => ipcRenderer.invoke('inspection:schedule:save', params),
-            list: () => ipcRenderer.invoke('inspection:schedule:list'),
         },
         // 定时那一轮跑完（或跑坏）之后推来的那一条：巡检页靠它把历史刷回来，
         // 否则用户只能自己猜应用什么时候动过手
@@ -592,14 +574,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
     // SSH 隧道
     ssh: {
-        list: () => ipcRenderer.invoke('ssh:list'),
         connect: (config: SSHConfig) => ipcRenderer.invoke('ssh:connect', config),
         disconnect: (tunnelId: string) => ipcRenderer.invoke('ssh:disconnect', tunnelId),
     },
 
     // K8s 端口转发
     k8s: {
-        list: () => ipcRenderer.invoke('k8s:list'),
         connect: (config: K8sForwardConfig) => ipcRenderer.invoke('k8s:connect', config),
         disconnect: (forwardId: string) => ipcRenderer.invoke('k8s:disconnect', forwardId),
     },
@@ -901,7 +881,6 @@ declare global {
             };
             template: {
                 list: (params: WorkbenchScopeParams) => Promise<APIResponse<MessageTemplate[]>>;
-                get: (id: string) => Promise<APIResponse<MessageTemplate | null>>;
                 create: (params: MessageTemplateUpsertParams) => Promise<APIResponse<MessageTemplate>>;
                 update: (params: MessageTemplateUpsertParams) => Promise<APIResponse<MessageTemplate>>;
                 delete: (id: string) => Promise<APIResponse<{deleted: boolean}>>;
@@ -909,7 +888,6 @@ declare global {
             };
             consumerConfig: {
                 list: (params: WorkbenchScopeParams) => Promise<APIResponse<ConsumerSessionConfig[]>>;
-                get: (id: string) => Promise<APIResponse<ConsumerSessionConfig | null>>;
                 create: (params: ConsumerConfigUpsertParams) => Promise<APIResponse<ConsumerSessionConfig>>;
                 update: (params: ConsumerConfigUpsertParams) => Promise<APIResponse<ConsumerSessionConfig>>;
                 delete: (id: string) => Promise<APIResponse<{deleted: boolean}>>;
@@ -986,28 +964,7 @@ declare global {
                     clusterId: string,
                     kind: PulsarResourceKind,
                 ) => Promise<APIResponse<PulsarBuiltinDefinition[]>>;
-                builtinConfig: (params: {
-                    clusterId: string;
-                    kind: PulsarResourceKind;
-                    name: string;
-                }) => Promise<APIResponse<Record<string, unknown>>>;
                 reloadBuiltins: (clusterId: string, kind: PulsarResourceKind) => Promise<APIResponse<void>>;
-                getStateValue: (params: {
-                    clusterId: string;
-                    tenant: string;
-                    namespace: string;
-                    name: string;
-                    key: string;
-                }) => Promise<APIResponse<string>>;
-                setStateValue: (params: {
-                    clusterId: string;
-                    tenant: string;
-                    namespace: string;
-                    name: string;
-                    key: string;
-                    value: string;
-                }) => Promise<APIResponse<void>>;
-                assignments: (clusterId: string) => Promise<APIResponse<Record<string, string[]>>>;
             };
             namespacePolicy: {
                 get: (params: NamespacePolicyScopeParams) => Promise<APIResponse<NamespacePolicyView>>;
@@ -1035,7 +992,6 @@ declare global {
                 schedule: {
                     get: (params: {clusterId: string}) => Promise<APIResponse<InspectionSchedule | null>>;
                     save: (params: InspectionScheduleDraft) => Promise<APIResponse<InspectionSchedule>>;
-                    list: () => Promise<APIResponse<InspectionSchedule[]>>;
                 };
                 summary: {
                     get: () => Promise<APIResponse<InspectionFleetSummary>>;
@@ -1069,14 +1025,12 @@ declare global {
                 ) => Promise<APIResponse<ClusterTopology>>;
             };
             ssh: {
-                list: () => Promise<APIResponse<SSHTunnel[]>>;
                 connect: (
                     config: SSHConfig,
                 ) => Promise<APIResponse<{tunnelId: string; localPort: number; localBrokerPort: number}>>;
                 disconnect: (tunnelId: string) => Promise<APIResponse<void>>;
             };
             k8s: {
-                list: () => Promise<APIResponse<K8sForward[]>>;
                 connect: (
                     config: K8sForwardConfig,
                 ) => Promise<APIResponse<{forwardId: string; localAdminPort: number; localBrokerPort: number}>>;

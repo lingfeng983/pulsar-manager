@@ -102,8 +102,6 @@ CREATE TABLE IF NOT EXISTS message_templates (
     schema_mode TEXT NOT NULL DEFAULT 'none',
     -- 「内联 Schema」校验用的 JSON Schema 原文；schema_mode 不是 inline 时为 NULL
     schema_json TEXT,
-    use_count INTEGER NOT NULL DEFAULT 0,
-    last_used_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE (cluster_id, topic_uri, name),
@@ -119,8 +117,6 @@ CREATE TABLE IF NOT EXISTS consumer_session_configs (
     subscription TEXT NOT NULL DEFAULT '',
     name TEXT NOT NULL,
     config_json TEXT NOT NULL,
-    use_count INTEGER NOT NULL DEFAULT 0,
-    last_used_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE (cluster_id, topic_uri, subscription, name),

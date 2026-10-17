@@ -21,7 +21,7 @@ const SIDE_MAX_WIDTH = 460;
 const SIDE_DEFAULT_WIDTH = 280;
 
 /**
- * 内置文档中心：把 docs/01–08 变成能查的东西。
+ * 内置文档中心：把 docs/pulsar/01–08 变成能查的东西。
  *
  * 这些文档原本只在仓库里，运维要查一个参数得离开应用去翻 markdown；而巡检报告和
  * 监控页给的数值，恰恰要靠这些参数说明才能判读。所以这一页的入口是检索而不是目录：
@@ -141,7 +141,7 @@ const DocCenter: React.FC = () => {
             <PageShell title="文档中心" subtitle="内置的 Pulsar 参数与运维文档">
                 <StateBlock
                     empty
-                    emptyText="应用包里没有内置文档（docs/0*.md 未随构建打入渲染包），这一页只能显示空内容"
+                    emptyText="应用包里没有内置文档（docs/pulsar/0*.md 未随构建打入渲染包），这一页只能显示空内容"
                     height={240}
                 />
             </PageShell>

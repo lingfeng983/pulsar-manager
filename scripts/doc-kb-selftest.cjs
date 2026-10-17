@@ -55,9 +55,9 @@ clusterName=pulsar-cluster-1
 重名小节，用来验证 slug 加后缀。
 `;
 
-/** 真实文档目录：与页面里 import.meta.glob('docs/0*.md') 同一套选取口径。 */
+/** 真实文档目录：与页面里 import.meta.glob('docs/pulsar/0*.md') 同一套选取口径。 */
 function realDocs() {
-    const dir = path.join(__dirname, '..', 'docs');
+    const dir = path.join(__dirname, '..', 'docs', 'pulsar');
     return fs
         .readdirSync(dir)
         .filter(file => /^0[^/]*\.md$/.test(file))
@@ -214,7 +214,7 @@ check('buildSnippet：长行从命中处向两侧裁，并补省略号', () => {
 const REAL = realDocs();
 
 check('真实文档：8 篇都在，内部设计稿不被选中', () => {
-    eq(REAL.length, 8, 'docs/0*.md 的篇数');
+    eq(REAL.length, 8, 'docs/pulsar/0*.md 的篇数');
     const names = REAL.map(doc => doc.file);
     assert.ok(!names.includes('DATA_SOURCES.md'), '内部数据源说明不该进应用');
     assert.ok(!names.some(name => name.includes('设计')), '设计稿不该进应用');

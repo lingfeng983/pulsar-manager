@@ -370,8 +370,6 @@ CREATE TABLE message_templates (
     properties_json TEXT NOT NULL DEFAULT '{}',
     producer_options_json TEXT NOT NULL DEFAULT '{}',
     schema_mode TEXT NOT NULL DEFAULT 'none',
-    use_count INTEGER NOT NULL DEFAULT 0,
-    last_used_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE (cluster_id, topic_uri, name),
@@ -388,8 +386,6 @@ CREATE TABLE consumer_session_configs (
     subscription TEXT NOT NULL DEFAULT '',
     name TEXT NOT NULL,
     config_json TEXT NOT NULL,            -- 订阅类型/确认方式/死信这一组，整份存取、不按列查
-    use_count INTEGER NOT NULL DEFAULT 0,
-    last_used_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE (cluster_id, topic_uri, subscription, name),
@@ -484,7 +480,6 @@ Admin REST 没有发消息与 peek 的端点（真实 broker 上返回 HTML 404�
 ### 4.5 SSH 隧道（`system-handlers.ts`）
 | IPC 通道 | 方向 | 功能 |
 |---------|------|------|
-| `ssh:list` | renderer → main | 获取隧道配置与状态列表 |
 | `ssh:connect` | renderer → main | 按表单里的参数建立本地端口转发 |
 | `ssh:disconnect` | renderer → main | 关闭指定隧道并释放本地端口 |
 

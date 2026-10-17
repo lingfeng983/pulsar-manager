@@ -1,5 +1,5 @@
 /**
- * 内置文档中心（docs/01–08）的解析与检索口径。
+ * 内置文档中心（docs/pulsar/01–08）的解析与检索口径。
  *
  * 这层是纯函数：输入 markdown 字符串，输出目录、锚点与检索命中，不碰 fs、不碰 ipc、
  * 不依赖 marked。放在 shared 里是为了能被 scripts/doc-kb-selftest.cjs 直接 require

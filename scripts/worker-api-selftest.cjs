@@ -339,28 +339,12 @@ const ROUTES = {
         assert(!call.url.includes('?'), '不该把参数拼到查询串上');
     });
 
-    await check('内置清单：函数走 builtins，连接器走 configdefinition', async () => {
+    await check('内置清单：函数走 builtins，连接器走 builtinsinks', async () => {
         const {api} = apiWith(ROUTES);
         const fns = await api.listBuiltins('function');
         assert(fns.length === 1 && fns[0].className.includes('FilterFunction'), '内置函数清单没读出来');
         const sinks = await api.listBuiltins('sink');
         assert(sinks.length === 1 && sinks[0].name === 'jdbc', '内置连接器清单没读出来');
-        const definition = await api.getBuiltinConfigDefinition('sink', 'jdbc');
-        assert(definition.description === 'JDBC sink', `configdefinition 没读到: ${JSON.stringify(definition)}`);
-        const fnDefinition = await api.getBuiltinConfigDefinition('function', 'filter');
-        assert(fnDefinition.className && String(fnDefinition.className).includes('FilterFunction'), '内置函数参数应从 builtins 条目里取');
-    });
-
-    await check('state 读写取的是 value 字段', async () => {
-        const {api, http} = apiWith({
-            '/admin/v2/worker/cluster': ROUTES['/admin/v2/worker/cluster'],
-            '/admin/v3/functions/public/default/x/state/counter': {data: {key: 'counter', value: '7'}},
-        });
-        assert((await api.getFunctionState('public', 'default', 'x', 'counter')) === '7', 'state 值没读出来');
-        await api.setFunctionState('public', 'default', 'x', 'counter', '9');
-        const post = http.calls.find(call => call.method === 'post' && call.url.endsWith('/state/counter'));
-        const state = JSON.parse([...post.body.entries()].find(([key]) => key === 'state')[1]);
-        assert(state.key === 'counter' && state.value === '9' && state.string === '9', `state 体错: ${JSON.stringify(state)}`);
     });
 
     console.log(failures === 0 ? 'ALL PASS' : `${failures} FAILED`);

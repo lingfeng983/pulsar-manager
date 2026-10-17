@@ -447,8 +447,6 @@ export interface MessageTemplate extends MessageTemplateBody {
     name: string;
     producerOptions?: ProducerOptions;
     schemaMode: TemplateSchemaMode;
-    useCount: number;
-    lastUsedAt?: string | null;
     createdAt: string;
     updatedAt: string;
 }
@@ -639,8 +637,6 @@ export interface ConsumerSessionConfig extends ConsumerConfigDraft {
     topicUri: string;
     subscription: string;
     name: string;
-    useCount: number;
-    lastUsedAt?: string | null;
     createdAt: string;
     updatedAt: string;
 }
@@ -792,11 +788,6 @@ export interface LoadTestProgress {
     // 因为几条失败不改变终态，但必须让用户看到失败原因
     error?: string;
     lastError?: string;
-}
-
-export interface LoadTestStartResult {
-    runId: string;
-    topic: string;
 }
 
 export interface BacklogInfo {
@@ -2036,13 +2027,6 @@ export interface MailProfileDraft {
     fromAddress: string;
     fromName?: string;
     allowSelfSigned?: boolean;
-}
-
-/** 「测试这台服务器」的结果：一次登录 + 一封发给自己的信。 */
-export interface MailProfileTestParams {
-    id: string;
-    /** 测试收件人；留空用这台服务器自己的发件地址（等于发给自己一圈）。 */
-    to?: string;
 }
 
 /** 要发出去的一件事。告警引擎与巡检调度都往这里给，两边都不自己拼文本。 */
