@@ -38,6 +38,7 @@ import {
     alertTab,
     workerTab,
     inspectionTab,
+    docCenterTab,
 } from '../../utils/tabIds';
 import {matchesFilter} from '../../utils/textFilter';
 import {downloadBlob} from '../../utils/download';
@@ -334,6 +335,11 @@ const TopNav: React.FC = () => {
         addTab(inspectionTab());
     }, [addTab]);
 
+    // 文档中心：内置 8 篇 Pulsar 文档，与集群无关，所以也是全局单页。
+    const handleOpenDocs = useCallback(() => {
+        addTab(docCenterTab());
+    }, [addTab]);
+
     // 告警中心：徽标是"未恢复事件数"，点开页面并不清空它——
     // 事件要在告警中心里逐条确认或等它自动恢复，徽标跟着界面走才会误导。
     const openAlertCount = useAlertStore(state => state.openCount);
@@ -487,6 +493,9 @@ const TopNav: React.FC = () => {
                             onClick={handleOpenInspection}
                         >
                             巡检
+                        </Button>
+                        <Button size="small" icon={<FileTextOutlined />} title="内置文档中心" onClick={handleOpenDocs}>
+                            文档
                         </Button>
                         <Button
                             size="small"
