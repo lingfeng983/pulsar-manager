@@ -103,6 +103,8 @@ import type {
     NotifyChannel,
     NotifyChannelDraft,
     NotifyDelivery,
+    MailProfile,
+    MailProfileDraft,
     NotifyDispatchResult,
     TopologyLimits,
 } from './shared/types';
@@ -572,6 +574,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
         },
         delivery: {
             list: (params?: {limit?: number}) => ipcRenderer.invoke('notify:delivery:list', params ?? {}),
+        },
+        // 邮件服务器（SMTP）：一台服务器可以多条邮件渠道共用，所以它与渠道分开管
+        mail: {
+            list: () => ipcRenderer.invoke('notify:mail:list'),
+            save: (draft: MailProfileDraft) => ipcRenderer.invoke('notify:mail:save', draft),
+            delete: (params: {id: string}) => ipcRenderer.invoke('notify:mail:delete', params),
+            test: (params: {id: string; to?: string}) => ipcRenderer.invoke('notify:mail:test', params),
         },
     },
 
@@ -1045,6 +1054,12 @@ declare global {
                 };
                 delivery: {
                     list: (params?: {limit?: number}) => Promise<APIResponse<NotifyDelivery[]>>;
+                };
+                mail: {
+                    list: () => Promise<APIResponse<MailProfile[]>>;
+                    save: (draft: MailProfileDraft) => Promise<APIResponse<MailProfile>>;
+                    delete: (params: {id: string}) => Promise<APIResponse<{deleted: boolean; channelsUsing: number}>>;
+                    test: (params: {id: string; to?: string}) => Promise<APIResponse<{ok: boolean; message: string}>>;
                 };
             };
             topology: {

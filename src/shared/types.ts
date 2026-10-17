@@ -1929,10 +1929,11 @@ export interface InspectionDiff {
 // ========== 外部通知渠道 ==========
 
 /**
- * 渠道类型决定请求体长什么样：这几家的机器人 webhook 形状互不相同，
+ * 渠道类型决定一次发送走哪条路、请求体长什么样：这几家的机器人 webhook 形状互不相同，
  * 但对「一条通知该说什么」没有影响，所以正文在 shared/notify-channels 里只拼一次。
+ * email 是唯一不走 HTTP 的那一个：它发往一台 SMTP 服务器，服务器配置在渠道之外。
  */
-export type NotifyChannelKind = 'generic' | 'dingtalk' | 'feishu' | 'wecom' | 'slack';
+export type NotifyChannelKind = 'generic' | 'dingtalk' | 'feishu' | 'wecom' | 'slack' | 'email';
 
 export type NotifyEventKind =
     | 'alertFired'
@@ -1952,21 +1953,26 @@ export interface NotifyChannel {
     name: string;
     kind: NotifyChannelKind;
     /**
-     * 发给渲染层的是打码后的地址（查询串里的 token 换成 ***），落库的是完整地址的密文。
-     * 地址本身就是凭据的一部分：企微/钉钉的 key 直接写在 URL 里，列表页截图发群里不能把它带出去。
+     * 发给渲染层的是打码后的地址（查询串与路径里的 token 都只留前三个字符），落库的是完整地址的密文。
+     * 地址本身就是凭据的一部分：企微/钉钉的 key 写在 URL 查询串里，飞书与 Slack 写在路径里，
+     * 列表页截图发群里不能把它们带出去。邮件渠道没有地址，这一格是空串。
      */
     url: string;
     /** 签名密钥不回填：界面只知道「这里存过东西」。 */
     hasSecret: boolean;
+    /** 邮件渠道指向的那台 SMTP 服务器；其余类型为 null。 */
+    mailProfileId: string | null;
+    /** 邮件渠道的收件人（已去重）；其余类型为空数组。 */
+    recipients: string[];
     enabled: boolean;
     events: NotifyEventKind[];
     minLevel: NotifyLevel;
     timeoutMs: number;
     ratePerMinute: number;
     lastSentAt: string | null;
-    /** 最近一次为什么没送出去。手动测试也写这一格：配置坏了要看得见。 */
+    /** 最近一次为什么没送出去：真发失败，或这条自己配坏了以致压根没发出去。手动测试也写这一格。 */
     lastError: string | null;
-    /** 连续失败次数，成功一次清零：一次都没成过和昨天还能通是两种不同的坏法。 */
+    /** 连续没送出去的次数，成功一次清零：一次都没成过和昨天还能通是两种不同的坏法。 */
     failCount: number;
     createdAt: string;
     updatedAt: string;
@@ -1977,13 +1983,66 @@ export interface NotifyChannelDraft {
     id?: string;
     name: string;
     kind: NotifyChannelKind;
+    /** webhook 类渠道的地址；邮件渠道留空（它没有地址）。留空在编辑时都是「沿用库里那一份」。 */
     url: string;
     secret?: string;
+    /** 邮件渠道用：那台 SMTP 服务器的 id。 */
+    mailProfileId?: string | null;
+    /** 邮件渠道用：收件人原文（逗号/分号/换行分隔都行），解析与校验在 shared/notify-mail.ts。 */
+    recipients?: string;
     enabled?: boolean;
     events?: NotifyEventKind[];
     minLevel?: NotifyLevel;
     timeoutMs?: number;
     ratePerMinute?: number;
+}
+
+/** SMTP 的加密方式：25 不加密、587 STARTTLS、465 隐式 TLS（端口与它是一对，配错就是「连上了但说不出话」）。 */
+export type MailSecurity = 'plain' | 'starttls' | 'tls';
+
+/**
+ * 一台 SMTP 服务器：主机、账号与密码放在渠道之外，让多条邮件渠道共用一份（收件人各自不同）。
+ *
+ * 密码在界面里永远是 `hasPassword`，出界的表面看不到它；用户名可以显示，它不是秘密但也不该
+ * 出现在截图里，所以给的是打码后的那一份。
+ */
+export interface MailProfile {
+    id: string;
+    name: string;
+    host: string;
+    port: number;
+    security: MailSecurity;
+    /** 打码后的用户名（`po***@corp.com`）；库里存的是原文。 */
+    username: string;
+    hasPassword: boolean;
+    /** 发件人地址与显示名：许多企业 SMTP 会拒绝与登录账号明显不符的发件人。 */
+    fromAddress: string;
+    fromName: string;
+    /** 内网自签证书：勾了它才不校验服务端证书，代价是这台连接不防中间人。 */
+    allowSelfSigned: boolean;
+    createdAt: string;
+    updatedAt: string;
+}
+
+/** 新建与编辑共用：password 缺省或空串表示「保持库里已有的那个」（同渠道的 secret 口径）。 */
+export interface MailProfileDraft {
+    id?: string;
+    name: string;
+    host: string;
+    port: number;
+    security: MailSecurity;
+    username?: string;
+    password?: string;
+    fromAddress: string;
+    fromName?: string;
+    allowSelfSigned?: boolean;
+}
+
+/** 「测试这台服务器」的结果：一次登录 + 一封发给自己的信。 */
+export interface MailProfileTestParams {
+    id: string;
+    /** 测试收件人；留空用这台服务器自己的发件地址（等于发给自己一圈）。 */
+    to?: string;
 }
 
 /** 要发出去的一件事。告警引擎与巡检调度都往这里给，两边都不自己拼文本。 */
@@ -2009,7 +2068,7 @@ export interface NotifyDelivery {
     eventKind: NotifyEventKind;
     level: NotifyLevel;
     ok: boolean;
-    /** 没发出去的那一条也算结论：被级别或限流挡下时必须写明是谁挡的、为什么 */
+    /** 该发却没发成的那一条（地址配坏、限流用完）：写明是谁挡的、为什么。没订阅/低于级别线不落行 */
     skipped: boolean;
     message: string;
     createdAt: string;

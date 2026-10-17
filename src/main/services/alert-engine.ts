@@ -84,8 +84,11 @@ let kickoff: ReturnType<typeof setTimeout> | null = null;
 // 上一轮没跑完就跳过这一轮，而不是把 tick 排成长队：大集群 + 慢 broker 时排队会让
 // 请求堆积，表现得像应用在攻击自己的 broker。
 let evaluating = false;
-// 连续命中计数只活在内存里：重启后从头数，代价是"连续 N 轮"的判定慢一轮启动，
-// 换来的是不必为一串瞬时计数维护一张表。
+// 连续命中计数只活在内存里：重启后从 0 重新数。代价要说准：
+// alert_events 上那条「一条规则同时只有一条未恢复事件」的偏唯一索引让重启后照样认得出
+// 这条还在烧（于是不会重复立案、重复通知），但认不出它烧到第几轮了。所以一次重启正好落在
+// 一个还没立案的异常中间时，那一串计数从头开始，重启后立案的那次实际连烧的轮数可以少于 N。
+// 换的是不必为一串瞬时计数维护一张表——这里不假装它没有代价。
 const hitCounts = new Map<string, number>();
 
 export function bindAlertEngineDeps(next: AlertEngineDeps): void {

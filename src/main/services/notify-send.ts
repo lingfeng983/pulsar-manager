@@ -13,8 +13,15 @@ import type {NotifyRequest} from './notify-payload';
 
 const log = createLogger('NotifySend');
 
-/** 响应体只取前这么多字节：对端偶尔会回一整页 HTML，那玩意的全文既不该落库也不该显示。 */
-const MAX_RESPONSE_BYTES = 2048;
+/**
+ * 允许读回来的响应体上限。
+ *
+ * 这个数不能抠：axios 在超出时抛的是网络层错误，于是「服务端返回 200 + 一整页 HTML 帮助文档」
+ * 这种明明已经送达的响应会被判成发送失败、连败计数 +1——一条健康渠道显示成故障，
+ * 比读回大正文贵一百倍的是那个错误的结论。取 1MB；真正落库的只有从 JSON 里取出的那一句
+ * 对端原文（shared 里限到 200 字符），大正文既不落库也不显示。
+ */
+const MAX_RESPONSE_BODY_BYTES = 1024 * 1024;
 
 export interface NotifySendOutcome {
     ok: boolean;
@@ -31,20 +38,12 @@ export async function sendNotifyRequest(request: NotifyRequest, timeoutMs: numbe
             maxRedirects: 0,
             // 状态码一律交回这里判定：200 里的 errcode≠0 与 3xx 都要走到同一套结论上
             validateStatus: () => true,
-            maxContentLength: MAX_RESPONSE_BYTES * 4,
+            maxContentLength: MAX_RESPONSE_BODY_BYTES,
         });
         const location = typeof response.headers?.location === 'string' ? response.headers.location : undefined;
-        if (response.status >= 300 && response.status < 400) {
-            return {
-                ok: false,
-                message: classifyNotifyFailure(
-                    undefined,
-                    response.status,
-                    location ? maskNotifyUrl(location) : undefined,
-                ).message,
-            };
-        }
-        const info = classifyNotifyResponse(response.status, response.data);
+        // 3xx 与 4xx/5xx 走同一个分类入口：状态码到结论的规则只有一处（shared 里那份），
+        // 在这里再写一遍 3xx 分支的话，改那一份的时候很容易漏掉这一处
+        const info = classifyNotifyResponse(response.status, response.data, location);
         return {ok: info.ok, message: info.message};
     } catch (error) {
         // axios 在非 2xx 且 validateStatus 放行之外仍会抛（网络层错误、超时、体过大）

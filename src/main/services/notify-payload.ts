@@ -17,7 +17,12 @@ export interface NotifyRequest {
 
 /** 签名用的时间戳：钉钉与飞书都把它算进签名里，所以必须由调用方给而不是内部取 Date.now()。 */
 export interface NotifyPayloadArgs {
-    kind: NotifyChannelKind;
+    /**
+     * 只有 webhook 类型会走到这里。类型写成「除 email 之外」是刻意的：邮件走
+     * services/notify-mail.ts，如果哪天有人把邮件渠道塞进这一层，这里要编译不过，
+     * 而不是拿一个空 URL 发一次请求、在投递记录里留一句看不懂的话。
+     */
+    kind: Exclude<NotifyChannelKind, 'email'>;
     /** 未签名的完整地址（密文已在落库层解出来） */
     url: string;
     /** 签名密钥；没有就不签 */

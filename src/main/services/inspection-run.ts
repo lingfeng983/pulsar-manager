@@ -10,6 +10,7 @@ import {
     type InspectionRecord,
 } from '../database/sqlite';
 import {renderInspectionMarkdown, runInspection, type InspectionAlertRow} from './cluster-inspection';
+import {dispatchQuietly} from './notify-dispatch';
 import {resolveSampling} from './inspection-profile';
 import {buildInspectionDiff} from './inspection-diff';
 import {INSPECTION_HISTORY_KEEP} from '../../shared/inspection-schedule';
@@ -75,13 +76,18 @@ export function toInspectionProfile(record: InspectionProfileRecord): Inspection
 }
 
 /** 这份报告相对它前一份的环比；库里没有前一份时返回 null（第一次跑没有可比对象）。 */
-export function diffAgainstPrevious(record: InspectionRecord, current: InspectionReport): InspectionDiff | null {
-    const previous = getPreviousInspection(record.cluster_id, record.generated_at, record.id);
-    if (!previous) {
+export function diffAgainstPrevious(
+    record: InspectionRecord,
+    current: InspectionReport,
+    previous?: InspectionRecord | null,
+): InspectionDiff | null {
+    const row =
+        previous === undefined ? getPreviousInspection(record.cluster_id, record.generated_at, record.id) : previous;
+    if (!row) {
         return null;
     }
-    const previousReport = toInspectionReport(previous);
-    return buildInspectionDiff(previous.id, previousReport.generatedAt, previousReport.checks, current.checks, {
+    const previousReport = toInspectionReport(row);
+    return buildInspectionDiff(row.id, previousReport.generatedAt, previousReport.checks, current.checks, {
         previous: previousReport.thresholds ?? null,
         current: current.thresholds ?? null,
     });
@@ -105,6 +111,53 @@ export interface ExecuteInspectionArgs {
     /** 本次单独的采样上限覆盖：「这次只想扫前 10 个命名空间」是临时意图，不写进长期配置。 */
     maxNamespaces?: number;
     maxTopics?: number;
+}
+
+/**
+ * 手动（含逐台汇总）跑完一次之后，要不要把这份报告也推给外部渠道。
+ *
+ * 定时的每一轮有 inspection-schedule 那套「与上次比是否恶化」的判断和 last_notified_crit
+ * 作为依据，手动这几格都不在（它不属于任何调度周期）。这里用的是同一件事最朴素的版本：
+ * 只在「这一次比上次多出了严重项」时开口——上次也是同样的 N 项就不再发一遍，
+ * 否则一个人连点三次巡检按钮就往值班群发三封一样的邮件。
+ *
+ * 不发明「恢复」这一种：手点的一次性动作没有「开始盯着这件事」的含义，
+ * 恢复由定时那一轮或告警规则的 resolve 来说，两边混着发只会让人分不清哪句话算数。
+ */
+function dispatchManualInspection(
+    source: InspectionSource,
+    clusterName: string,
+    report: InspectionReport,
+    previous: InspectionRecord | null,
+): void {
+    // 定时那一轮在 inspection-schedule 里自己发（它按跨轮次的级别变化判触发/加重/恢复），
+    // 这里再发一次，同一次巡检就会在群里出现两条口径不同的消息
+    if (source !== 'manual') {
+        return;
+    }
+    if (report.totals.crit <= 0) {
+        return;
+    }
+    const before = previous?.crit ?? 0;
+    if (before >= report.totals.crit) {
+        return;
+    }
+    const items = report.checks
+        .filter(item => item.level === 'crit')
+        .slice(0, 5)
+        .map(item => `· ${item.title}：${item.summary}`)
+        .join('\n');
+    const head =
+        before > 0 ? `严重项从 ${before} 项增加到 ${report.totals.crit} 项` : `有 ${report.totals.crit} 项严重`;
+    dispatchQuietly({
+        kind: 'inspectionCrit',
+        level: 'crit',
+        title: `巡检（手动）：${head}`,
+        text: `${clusterName}：这一轮手动巡检${head}。\n${items}`,
+        clusterId: report.clusterId,
+        clusterName,
+        atMs: Date.now(),
+    });
 }
 
 // 一台集群同时只允许一次巡检在跑。手动连点两次与「定时正好撞上手动」都会把采样上限
@@ -172,10 +225,12 @@ async function runOnce(args: ExecuteInspectionArgs): Promise<{
     };
     // 环比写进导出的文件而不是只留在界面上：报告发出去之后，读到的人只有这一份文件，
     // 「积压比上次涨了 20 倍」这句话不能只在这台机器上看得到
-    const diff = diffAgainstPrevious(record, report);
+    const previous = getPreviousInspection(args.clusterId, report.generatedAt, record.id);
+    const diff = diffAgainstPrevious(record, report, previous);
     record.markdown = renderInspectionMarkdown(report, diff);
     insertInspection(record);
     const pruned = pruneInspections(args.clusterId, INSPECTION_HISTORY_KEEP);
+    dispatchManualInspection(args.source, args.clusterName, report, previous);
     log.info(
         `inspection ${args.clusterId} (${args.source}): crit=${report.totals.crit} warn=${report.totals.warn} ` +
             `sampled=${report.scope.topicsSampled} diff=${diff ? diff.changedCount : 'none'} pruned=${pruned}`,

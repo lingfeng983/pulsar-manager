@@ -1,6 +1,6 @@
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
-import {Alert, Input, List, Space, Tag, Typography, message} from 'antd';
-import {FileTextOutlined, SearchOutlined} from '@ant-design/icons';
+import {Alert, Button, Input, List, Space, Tag, Typography, message} from 'antd';
+import {FileTextOutlined, MenuFoldOutlined, MenuUnfoldOutlined, SearchOutlined} from '@ant-design/icons';
 import PageShell from '../components/common/PageShell';
 import StateBlock from '../components/common/StateBlock';
 import {KB_DOCS} from '../utils/doc-kb-source';
@@ -10,10 +10,15 @@ import {resolveAnchor, searchDocs, type DocSearchHit} from '../../shared/doc-kb'
 const SEARCH_TARGETS = KB_DOCS.map(doc => ({key: doc.key, title: doc.title, markdown: doc.markdown}));
 
 // 标题按层级缩进：03/05 一篇就有 40 多个标题，不缩进时二级和三级混成一列，
-// 想找回「1.2 副本与托管 Ledger」只能在长串同名文字里逐字看。
+// 想找回「1.2 副本与托管 Ledger」只能在长串同名文字里逐字看。20 像素是这一列
+// 字号下的最小可辨差值，再小就回到「看起来一样平」。
 function indent(depth: number): number {
-    return (depth - 2) * 12;
+    return 8 + (depth - 2) * 20;
 }
+
+const SIDE_MIN_WIDTH = 180;
+const SIDE_MAX_WIDTH = 460;
+const SIDE_DEFAULT_WIDTH = 280;
 
 /**
  * 内置文档中心：把 docs/01–08 变成能查的东西。
@@ -27,7 +32,38 @@ const DocCenter: React.FC = () => {
     const [query, setQuery] = useState('');
     const [hits, setHits] = useState<DocSearchHit[]>([]);
     const [pendingSlug, setPendingSlug] = useState('');
+    const [sideWidth, setSideWidth] = useState(SIDE_DEFAULT_WIDTH);
+    const [sideCollapsed, setSideCollapsed] = useState(false);
     const bodyRef = useRef<HTMLDivElement>(null);
+
+    // 拖动期间宽度只进 state，松手才结束监听：正文在 flex 里重排，逐帧改都便宜。
+    // 监听挂在 window 上而不是把 pointer capture 留在把手上——拖快了指针会跑出 6 像素的
+    // 把手，capture 能接住，但用户在把手外松手时也要正常结束，window 这一层更直白。
+    const startResize = useCallback(
+        (event: React.PointerEvent<HTMLDivElement>) => {
+            event.preventDefault();
+            const startX = event.clientX;
+            const startWidth = sideWidth;
+            document.body.classList.add('is-doc-resizing');
+            const onMove = (moveEvent: PointerEvent) => {
+                const next = Math.min(
+                    SIDE_MAX_WIDTH,
+                    Math.max(SIDE_MIN_WIDTH, startWidth + moveEvent.clientX - startX),
+                );
+                setSideWidth(next);
+            };
+            const stop = () => {
+                window.removeEventListener('pointermove', onMove);
+                window.removeEventListener('pointerup', stop);
+                window.removeEventListener('pointercancel', stop);
+                document.body.classList.remove('is-doc-resizing');
+            };
+            window.addEventListener('pointermove', onMove);
+            window.addEventListener('pointerup', stop);
+            window.addEventListener('pointercancel', stop);
+        },
+        [sideWidth],
+    );
 
     const doc = useMemo(() => KB_DOCS.find(item => item.key === activeKey) || null, [activeKey]);
 
@@ -134,35 +170,68 @@ const DocCenter: React.FC = () => {
             }
         >
             <div className="doc-kb-layout">
-                <nav className="doc-kb-side">
-                    {KB_DOCS.map(item => (
-                        <div key={item.key} className="doc-kb-item">
-                            <div
-                                className={`doc-kb-item-title${item.key === activeKey ? ' is-active' : ''}`}
-                                onClick={() => setActiveKey(item.key)}
-                            >
-                                <FileTextOutlined />
-                                <span>{item.title}</span>
+                {sideCollapsed ? (
+                    <div className="doc-kb-side-collapsed">
+                        <Button
+                            type="text"
+                            size="small"
+                            icon={<MenuUnfoldOutlined />}
+                            onClick={() => setSideCollapsed(false)}
+                            title="展开文档列表"
+                        />
+                        <span className="doc-kb-side-collapsed-label">文档目录</span>
+                    </div>
+                ) : (
+                    <>
+                        <nav className="doc-kb-side" style={{width: sideWidth}}>
+                            <div className="doc-kb-side-head">
+                                <span>文档目录</span>
+                                <Button
+                                    type="text"
+                                    size="small"
+                                    icon={<MenuFoldOutlined />}
+                                    onClick={() => setSideCollapsed(true)}
+                                    title="收起文档列表"
+                                />
                             </div>
-                            {item.key === activeKey ? (
-                                <ul className="doc-kb-toc">
-                                    {item.headings
-                                        .filter(heading => heading.depth >= 2 && heading.depth <= 3)
-                                        .map(heading => (
-                                            <li
-                                                key={heading.slug}
-                                                style={{paddingLeft: indent(heading.depth)}}
-                                                onClick={() => jumpTo(heading.slug)}
-                                                title={heading.text}
-                                            >
-                                                {heading.text}
-                                            </li>
-                                        ))}
-                                </ul>
-                            ) : null}
-                        </div>
-                    ))}
-                </nav>
+                            {KB_DOCS.map(item => (
+                                <div key={item.key} className="doc-kb-item">
+                                    <div
+                                        className={`doc-kb-item-title${item.key === activeKey ? ' is-active' : ''}`}
+                                        onClick={() => setActiveKey(item.key)}
+                                    >
+                                        <FileTextOutlined />
+                                        <span>{item.title}</span>
+                                    </div>
+                                    {item.key === activeKey ? (
+                                        <ul className="doc-kb-toc">
+                                            {item.headings
+                                                .filter(heading => heading.depth >= 2 && heading.depth <= 3)
+                                                .map(heading => (
+                                                    <li
+                                                        key={heading.slug}
+                                                        style={{paddingLeft: indent(heading.depth)}}
+                                                        onClick={() => jumpTo(heading.slug)}
+                                                        title={heading.text}
+                                                    >
+                                                        {heading.text}
+                                                    </li>
+                                                ))}
+                                        </ul>
+                                    ) : null}
+                                </div>
+                            ))}
+                        </nav>
+                        <div
+                            className="doc-kb-resizer"
+                            role="separator"
+                            aria-orientation="vertical"
+                            aria-label="拖动调整文档列表宽度，双击恢复默认"
+                            onPointerDown={startResize}
+                            onDoubleClick={() => setSideWidth(SIDE_DEFAULT_WIDTH)}
+                        />
+                    </>
+                )}
 
                 <div className="doc-kb-main">
                     {query && hits.length ? (

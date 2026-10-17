@@ -826,7 +826,7 @@ th:hover .react-resizable-handle {
 .doc-kb-layout {
     display: flex;
     align-items: flex-start;
-    gap: var(--spacing-xl);
+    gap: var(--spacing-sm);
 }
 
 .doc-kb-side {
@@ -836,6 +836,67 @@ th:hover .react-resizable-handle {
     overflow-y: auto;
     border-right: 1px solid var(--color-border);
     padding-right: var(--spacing-md);
+}
+
+.doc-kb-side-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 var(--spacing-xs) var(--spacing-xs) var(--spacing-md);
+    color: var(--color-text-secondary);
+    font-size: var(--font-size-xs);
+    letter-spacing: 1px;
+}
+
+/* 拖动条：6 像素太窄不好抓，8 像素加一条居中的细线；命中区比看得见的线宽。
+   双击恢复默认宽度，不用记住「拖坏了怎么办」。 */
+.doc-kb-resizer {
+    flex: none;
+    align-self: stretch;
+    position: relative;
+    width: 8px;
+    min-height: 160px;
+    cursor: col-resize;
+    touch-action: none;
+}
+
+.doc-kb-resizer::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 3px;
+    width: 2px;
+    border-radius: 1px;
+    background: var(--color-border);
+}
+
+.doc-kb-resizer:hover::after {
+    background: var(--color-primary);
+}
+
+body.is-doc-resizing {
+    cursor: col-resize;
+    user-select: none;
+}
+
+/* 收起后留一条窄边：完全消失的话，用户要重新找回这个页面的入口才知道去哪儿展开。 */
+.doc-kb-side-collapsed {
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--spacing-sm);
+    width: 32px;
+    padding: var(--spacing-sm) 0;
+    border-right: 1px solid var(--color-border);
+}
+
+.doc-kb-side-collapsed-label {
+    writing-mode: vertical-rl;
+    letter-spacing: 1px;
+    color: var(--color-text-secondary);
+    font-size: 11px;
 }
 
 .doc-kb-item-title {

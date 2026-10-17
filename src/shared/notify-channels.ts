@@ -69,6 +69,11 @@ export function validateNotifyUrl(raw: string | undefined | null): string | null
     if (url.length > 2048) {
         return '通知地址过长（上限 2048 字符）';
     }
+    // 界面能复制到的只有打码后的地址，而 "***" 恰好是一个合法主机名字符。不拦的话，
+    // 一次「复制过来粘回去」会把库里那份真地址覆盖掉——密文被写成别的信息，谁也找不回来
+    if (url.includes('***')) {
+        return '这里带着打码标记（***）：那是列表页显示用的样子，请填完整地址，否则库里那一份会被覆盖';
+    }
     if (/\s/.test(url)) {
         return '通知地址里不能有空格或换行';
     }
@@ -132,12 +137,16 @@ export function channelWantsEvent(channel: Pick<NotifyChannel, 'events' | 'minLe
  *
  * 返回要挡的那一条而不是「排队等会儿再发」：这是桌面应用，队列在进程退出时全丢，
  * 一个「稍后会补发」的承诺兑现不了，不如当场说明白「这条被限流挡下了」。
+ *
+ * 只按「比窗口下限新」筛，不再要求时间戳不超过 now：系统时钟被往回调时，先前那些戳记会跑到
+ * 未来去，如果按 `<= nowMs` 筛就等于把它们全当没发生，配额当场清零——那是限流最坏的失效方式。
+ * 宁可让这个人多等一会儿（那几条会在投递记录里写明被限流挡下），也不悄悄放开闸门。
  */
 export function isRateLimited(sentAtMs: number[], nowMs: number, perMinute: number): boolean {
     const floor = nowMs - NOTIFY_RATE_WINDOW_MS;
     let sent = 0;
     for (const at of sentAtMs) {
-        if (at > floor && at <= nowMs) {
+        if (at > floor) {
             sent += 1;
         }
     }
@@ -150,8 +159,13 @@ export function isRateLimited(sentAtMs: number[], nowMs: number, perMinute: numb
  */
 export interface NotifyChannelFacts {
     enabled: boolean;
-    /** null 表示地址能用；否则就是「这一条现在发不出去」的原因。 */
-    urlProblem: string | null;
+    /**
+     * null 表示这条渠道现在发得出去；否则就是发不出去的原因。
+     *
+     * 名字不叫 urlProblem 了：邮件渠道没有地址，它坏掉的样子是「服务器配置没了」「收件人是空的」，
+     * 但落到判定上是同一格——这条本来该发，却一条都发不出去。
+     */
+    targetProblem: string | null;
     events: NotifyEventKind[];
     minLevel: NotifyLevel;
     ratePerMinute: number;
@@ -162,41 +176,58 @@ export interface NotifyChannelFacts {
 export type NotifyDecision =
     | {action: 'send'}
     /**
-     * 这条事件不归这个渠道（没订阅、低于级别线、渠道关着、地址读不出来）。
+     * 这条事件不归这个渠道（没订阅、低于级别线、渠道关着）。
      *
      * 不记投递记录是刻意的：一次告警 × N 条渠道里大多数本来就不该收它，
      * 每一格都记一行，那张表就再也看不出「哪一条真出问题了」。
      */
     | {action: 'ignore'}
-    /** 该发却没发成：这一条必须留一行，并把是谁挡的写清楚。 */
-    | {action: 'skip'; reason: string};
+    /**
+     * 该发却没发成：这一条必须留一行，并把是谁挡的写清楚。
+     *
+     * `configProblem` 说的是挡下它的是这条渠道自己的配置（地址或邮件服务器读不出来、不合法，
+     * 收件人为空）。派发层据此把这句话同时写回渠道的 last_error：这种渠道在被人修好之前一条都收不到，
+     * 只在投递表里留行等于要用户自己去翻。限流不是渠道坏了，一次告警风暴能把连败计数刷到几十，
+     * 那会把一条健康渠道显示成故障，所以限流那一种不带这一格。
+     */
+    | {action: 'skip'; reason: string; configProblem: boolean};
 
 /**
- * 派发判定：发、不发、还是「本该发却被挡」。
+ * 一条渠道此刻到底发不发得出去。
  *
- * 手动测试（event.test）只看地址能不能用——点它要问的是「现在通不通」，
+ * 手动测试（event.test）只看渠道配的那一份地址/服务器能不能用——点它要问的是「现在通不通」，
  * 拿订阅、级别线、限流去拦一次测试，得到的会是「测试没发出去」这种没有信息量的结论。
  * 测试也不看渠道开关：「先把这条测通再打开」是最顺的手序，把人拦在开关前面只会让他
- * 先打开、发一条真事件出去试。地址不行仍要落成一条记录，否则「点了测试什么也没发生」
+ * 先打开、发一条真事件出去试。发不出去仍要落成一条记录，否则「点了测试什么也没发生」
  * 又没有下文，等于把这一层最该有的答案弄丢了。
+ *
+ * 真事件按「先判归不归我管，再判我发不发得出」排：订阅与级别线在前，配置坏在后。
+ * 反过来的话，一条没人订阅的坏渠道会为每个事件留一行，而那一行说的其实不是「本来该发」。
  */
 export function decideNotifyDelivery(facts: NotifyChannelFacts, event: NotifyEvent, nowMs: number): NotifyDecision {
     if (event.test) {
-        return facts.urlProblem ? {action: 'skip', reason: facts.urlProblem} : {action: 'send'};
+        return facts.targetProblem
+            ? {action: 'skip', reason: facts.targetProblem, configProblem: true}
+            : {action: 'send'};
     }
     if (!facts.enabled) {
-        return {action: 'ignore'};
-    }
-    if (facts.urlProblem) {
         return {action: 'ignore'};
     }
     if (!channelWantsEvent({events: facts.events, minLevel: facts.minLevel}, event)) {
         return {action: 'ignore'};
     }
+    if (facts.targetProblem) {
+        return {
+            action: 'skip',
+            reason: `${facts.targetProblem}（这条本来要发给它，一条都没出去）`,
+            configProblem: true,
+        };
+    }
     if (isRateLimited(facts.recentSendAtMs, nowMs, facts.ratePerMinute)) {
         return {
             action: 'skip',
             reason: `这一分钟的上限 ${facts.ratePerMinute} 条已经用完，这条被限流挡下（没有排队补发）`,
+            configProblem: false,
         };
     }
     return {action: 'send'};
@@ -265,8 +296,13 @@ export function truncateToBytes(text: string, maxBytes: number): string {
     return budget > 0 ? `${out}${suffix}` : out;
 }
 
-/** 一条通知的最终文本：标题、正文、来源与时间。渠道自己的格式在 payload 那层再包一次。 */
-export function renderNotifyText(event: NotifyEvent): string {
+/**
+ * 一条通知的最终文本：标题、正文、来源与时间。渠道自己的格式在 payload 那层再包一次。
+ *
+ * 字节预算由调用方给：群消息一屏读得完就行，邮件可以更宽，所以邮件传的是更小的
+ * `MAIL_BODY_MAX_BYTES`。默认值仍是群里那一个，改这里等于同时改五家机器人的正文长度。
+ */
+export function renderNotifyText(event: NotifyEvent, maxBytes: number = NOTIFY_TEXT_MAX_BYTES): string {
     const head = event.title.trim() || NOTIFY_EVENT_LABEL[event.kind] || '通知';
     const body = event.text.trim();
     const lines = [head];
@@ -277,7 +313,7 @@ export function renderNotifyText(event: NotifyEvent): string {
     const scope = event.clusterName ? `｜集群：${event.clusterName}` : '';
     lines.push(`${NOTIFY_EVENT_LABEL[event.kind]}｜${NOTIFY_LEVEL_LABEL[event.level]}${scope}`);
     lines.push(`时间：${formatNotifyTime(event.atMs)}`);
-    return truncateToBytes(lines.join('\n\n'), NOTIFY_TEXT_MAX_BYTES);
+    return truncateToBytes(lines.join('\n\n'), maxBytes);
 }
 
 /** 成功判定：2xx 才算成功。3xx 不算——见 services/notify-send.ts 里为什么不跟重定向。 */
@@ -341,11 +377,53 @@ export function classifyNotifyFailure(error: unknown, status?: number, location?
     return {category: 'unknown', message: '未知错误，没有可用的失败信息'};
 }
 
-/** 列表页显示用的地址：查询串里的 token 打码，其余留着——人得认得出这是哪一条。 */
+/** 打码后的路径段：留头 3 个字符，够认出是哪一条，不够拼回原 token。 */
+function maskPathSegment(segment: string): string {
+    return `${segment.slice(0, 3)}***`;
+}
+
+/** 这一段像不像一个凭据：全是 URL 安全字符、够长、没有扩展名那样的点。 */
+function looksLikeCredentialSegment(segment: string): boolean {
+    return segment.length >= 16 && !segment.includes('.') && /^[A-Za-z0-9_-]+$/.test(segment);
+}
+
+/**
+ * 锚点后面常见的接口动词。企微的地址是 `/cgi-bin/webhook/send?key=…`：`send` 是路由名，
+ * 真正的凭据在查询串里；按「锚点后面一律打码」会把这一段打成 `sen***`，列表页再也认不出
+ * 这是哪条接口（自测第一次跑就抓到了这个）。
+ */
+const NOTIFY_ROUTE_WORDS = new Set(['send', 'receive', 'push', 'post', 'update', 'create', 'delete', 'notify']);
+
+/**
+ * 列表页显示用的地址：凭据打码，其余留着——人得认得出这是哪一条。
+ *
+ * 查询串里的 token/key/secret/sign/password 是一类；**路径里的凭据是另一类，而且是这批里
+ * 最容易漏的一类**：飞书把 hook token 直接放在 `/bot/v2/hook/<token>` 上，Slack 的
+ * `/services/T…/B…/<24 位 key>` 同理会整串原样走到渲染层与日志里。列表页是可以截图发群的，
+ * 所以这里除了查询串也要管路径：`/hook/`、`/token/` 这类锚点后面的那一段（路由动词除外），
+ * 以及最后一段长得像凭据的（16 个字符以上、没有点），一律只留前三个字符。
+ * 误伤的代价只是列表页少看几个字（发送用的是解密出来的原文，不经过这里）。
+ */
 export function maskNotifyUrl(url: string): string {
     const [head, query] = url.split('?');
+    const segments = head.split('/');
+    for (let index = segments.length - 1; index >= 0; index -= 1) {
+        const segment = segments[index];
+        if (!segment) {
+            continue;
+        }
+        const anchor = index > 0 ? segments[index - 1].toLowerCase() : '';
+        const afterCredentialAnchor =
+            /^(hook|token|tokens|key|keys|secret|sign|webhook)$/.test(anchor) &&
+            !NOTIFY_ROUTE_WORDS.has(segment.toLowerCase());
+        if (afterCredentialAnchor || looksLikeCredentialSegment(segment)) {
+            segments[index] = maskPathSegment(segment);
+        }
+        break;
+    }
+    const path = segments.join('/');
     if (query === undefined) {
-        return url;
+        return path;
     }
     const masked = query
         .split('&')
@@ -356,15 +434,7 @@ export function maskNotifyUrl(url: string): string {
             return /token|key|secret|sig|password/i.test(key) ? `${key}=***` : part;
         })
         .join('&');
-    return masked ? `${head}?${masked}` : head;
-}
-
-/** 落库/读回时渠道上必须有的字段，缺一个就没法拼请求（老行或导入的配置可能缺）。 */
-export function isUsableNotifyChannel(channel: NotifyChannel | null | undefined): channel is NotifyChannel {
-    if (!channel) {
-        return false;
-    }
-    return !!channel.enabled && !!channel.url && validateNotifyUrl(channel.url) === null;
+    return masked ? `${path}?${masked}` : path;
 }
 
 /** 从对端响应体里取出来的那一句话（各家的字段名不同，取到哪个算哪个）。 */
@@ -406,14 +476,19 @@ export interface NotifyResponseInfo {
  * Slack 是 200 + ok:false。只看状态码的话，「机器人关键字没命中」「token 过期」
  * 这些最常见的配错会全部显示成成功，而用户什么都没收到。
  */
-export function classifyNotifyResponse(status: number, body: unknown): NotifyResponseInfo {
-    if (!isNotifySuccessStatus(status)) {
-        const failure = classifyNotifyFailure(new Error(`HTTP ${status}`), status);
-        return {ok: false, message: failure.message};
-    }
+export function classifyNotifyResponse(status: number, body: unknown, location?: string): NotifyResponseInfo {
     const data = parseMaybeJson(body);
+    const providerMessage = data ? pickProviderMessage(data) : null;
+    if (!isNotifySuccessStatus(status)) {
+        if (status >= 300 && status < 400) {
+            // 3xx 单独一句：不跟重定向是这里的决定，得说清是为了不把凭据交给另一个主机
+            return {ok: false, message: classifyNotifyFailure(undefined, status, location).message};
+        }
+        // 非 2xx 也带一句对端原文：Slack 的 403（`invalid_auth`、`not_authed`）、各家网关的 401
+        // 都把话说在正文里，只报一个状态码等于让人去猜——而猜的方向通常是「网络问题」
+        return {ok: false, message: `对端返回 ${status}${providerMessage ? `：${providerMessage}` : ''}`};
+    }
     if (data) {
-        const providerMessage = pickProviderMessage(data);
         // 钉钉 / 企微：errcode（企微也有 errcode=0 表示 ok）
         if (typeof data.errcode === 'number' && data.errcode !== 0) {
             return {
@@ -440,16 +515,24 @@ export const NOTIFY_KIND_LABEL: Record<NotifyChannelKind, string> = {
     feishu: '飞书机器人',
     wecom: '企业微信机器人',
     slack: 'Slack Incoming Webhook',
+    email: '邮件（SMTP）',
 };
 
 /**
- * 哪些渠道有「签名密钥」这一格可填：钉钉与飞书的机器人可以开加签，其余三家没有这个概念。
+ * 哪些渠道有「签名密钥」这一格可填：钉钉与飞书的机器人可以开加签，其余几家没有这个概念
+ * （邮件的密码属于那台 SMTP 服务器，在服务器配置里，不在渠道上）。
  *
  * 界面上按它决定要不要显示密钥输入框——把密钥填给企微或 Slack 不会报错，
- * 只会静静躺在库里没人用，而用户以为自己的地址已经被保护了。
+ * 只会静静躺在库里没人用，而用户以为自己的地址已经被保护了。派发层保存时也按它判：
+ * 类型从钉钉改成别的会把这一格清掉，否则那个密钥既不再被使用、又一直占着「已存密钥」的样子。
  * 顺带说一句钉钉的另一件事：它的机器人还可以配「自定义关键词」，正文没命中就是
  * errcode 310000，这一种失败在 classifyNotifyResponse 里会原样带出 errmsg。
  */
 export function notifyKindSupportsSecret(kind: NotifyChannelKind): boolean {
     return kind === 'dingtalk' || kind === 'feishu';
+}
+
+/** 哪些渠道走 HTTP webhook：邮件不走这一条路，它有 services/notify-mail.ts。 */
+export function notifyKindIsWebhook(kind: NotifyChannelKind): boolean {
+    return kind !== 'email';
 }

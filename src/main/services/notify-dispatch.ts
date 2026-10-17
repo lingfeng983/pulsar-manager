@@ -2,10 +2,15 @@
  * 通知派发：一条事件进来，按每个渠道的订阅、级别与限流决定发或不发，并把结论逐条落库。
  *
  * 这一层不 import ipc（那一层反过来 import 这里的读写入口），也不碰 broker。
- * 地址与密钥只在解析出「这一条要发」之后才解密，且只活在这一次调用里。
+ * 地址、密钥与邮件密码只在解析出「这一条要发」之后才解密，且只活在这一次调用里。
  *
- * 每一次决定都留一行投递记录，包括「没发」那几种：用户问「为什么没收到」时，
- * 答案要么在这张表里，要么就只能靠猜。
+ * 该发而没发成的每一次都留一行投递记录（限流、渠道自己配坏了）；不归这条渠道管的那些（没订阅、
+ * 低于级别线、渠道关着）不留——否则一次告警能在表里冲出 N 条噪声，把真出问题的那几条淹掉。
+ * 用户问「为什么没收到」时，答案要么在这张表里，要么就只能靠猜。
+ *
+ * 渠道有两条发送路径：HTTP webhook（钉钉/飞书/企微/Slack/通用 JSON）与邮件（SMTP）。
+ * 两条路共用同一套判定、同一条投递记录与同一个渠道上的连败计数，所以「订阅了告警的邮件渠道」
+ * 不需要任何额外的开关就能收到与群里那条一模一样的内容。
  */
 import {
     insertNotifyDelivery,
@@ -19,13 +24,16 @@ import {
 import {decrypt, encrypt} from './encryption';
 import {buildNotifyRequest} from './notify-payload';
 import {sendNotifyRequest} from './notify-send';
+import {resolveMailServer, sendMailMessage, type ResolvedMailServer} from './notify-mail';
 import {
     NOTIFY_RATE_WINDOW_MS,
     decideNotifyDelivery,
     isKnownNotifyEventKind,
     maskNotifyUrl,
+    notifyKindSupportsSecret,
     validateNotifyUrl,
 } from '../../shared/notify-channels';
+import {buildMailBody, buildMailSubject, mailRecipientsProblem, parseMailRecipients} from '../../shared/notify-mail';
 import type {
     NotifyChannel,
     NotifyChannelDraft,
@@ -58,16 +66,26 @@ function pushRecentSend(channelId: string, atMs: number): void {
     recentSends.set(channelId, kept);
 }
 
-/** 解密这件事不能抛穿出去：keyring 不可用的机器上，一个坏渠道不该让整页渠道列表打不开。 */
-function tryDecrypt(ciphertext: string | null): string | null {
+/**
+ * 解密这件事不能抛穿出去：keyring 不可用的机器上，一个坏渠道不该让整页渠道列表打不开。
+ *
+ * 但「这一格本来就是空的」与「有东西、只是读不出来」必须分开——把后者当成前者，
+ * 一条开了加签的渠道会去发未签名的请求，对端回一句签名校验失败，而界面上写着「没配密钥」。
+ */
+interface Decrypted {
+    value: string | null;
+    failed: boolean;
+}
+
+function tryDecrypt(ciphertext: string | null): Decrypted {
     if (!ciphertext) {
-        return null;
+        return {value: null, failed: false};
     }
     try {
-        return decrypt(ciphertext);
+        return {value: decrypt(ciphertext), failed: false};
     } catch (error) {
         log.warn(`notify secret decrypt failed: ${error instanceof Error ? error.message : String(error)}`);
-        return null;
+        return {value: null, failed: true};
     }
 }
 
@@ -91,8 +109,9 @@ function parseEvents(raw: string): NotifyEventKind[] {
 /**
  * 落库行 → 渠道。
  *
- * `url` 给的是打码后的地址（查询串里的 token 换成 ***），因此这一份可以直接进渲染层；
- * 明文地址只在 resolveTarget 里按需解出来一次。
+ * `url` 给的是打码后的地址（查询串与路径里的凭据只留前三个字符），因此这一份可以直接进渲染层；
+ * 明文地址只在 resolveTarget 里按需解出来一次。邮件渠道没有地址，`url` 是空串，
+ * 收件人按 shared/notify-mail 那套规则解析好再给（渲染层的表单要的就是这一份清单）。
  */
 export function toNotifyChannel(record: NotifyChannelRecord): NotifyChannel {
     const plainUrl = tryDecrypt(record.url_enc);
@@ -100,8 +119,10 @@ export function toNotifyChannel(record: NotifyChannelRecord): NotifyChannel {
         id: record.id,
         name: record.name,
         kind: record.kind as NotifyChannelKind,
-        url: plainUrl ? maskNotifyUrl(plainUrl) : '',
+        url: plainUrl.value ? maskNotifyUrl(plainUrl.value) : '',
         hasSecret: !!record.secret_enc,
+        mailProfileId: record.mail_profile_id,
+        recipients: parseMailRecipients(record.recipients).to,
         enabled: record.enabled === 1,
         events: parseEvents(record.events_json),
         minLevel: record.min_level as NotifyLevel,
@@ -115,32 +136,58 @@ export function toNotifyChannel(record: NotifyChannelRecord): NotifyChannel {
     };
 }
 
-/** 有 reason 就是这一条发不出去；url 为空同样发不出去，但那种情况 reason 里已经写了原因。 */
-interface Resolved {
-    url: string;
-    secret: string | null;
-    reason: string | null;
-}
-
-const BLOCKED = (reason: string): Resolved => ({url: '', secret: null, reason});
-
 /**
- * 这一条渠道现在到底发得出去吗：地址、开关与合法性一起判，判不过就带回一句原因。
+ * 这一条渠道现在到底发得出去吗：按类型各查各的，判不过就带回一句原因。
  *
- * 这里只回答「地址能不能用」，不管该不该发——「该不该」整条都在
+ * 这里只回答「发不发得出」，不管该不该发——「该不该」整条都在
  * shared/notify-channels.ts 的 decideNotifyDelivery 里判，好让那套规则能在没有数据库、
  * 没有网络的机器上被自测逐条证伪。
  */
+interface Resolved {
+    /** webhook 渠道：明文地址；邮件渠道为空串 */
+    url: string;
+    secret: string | null;
+    /** 邮件渠道：收件人清单（已解析去重）与那台服务器（已解出密码） */
+    to: string[];
+    server: ResolvedMailServer | null;
+    reason: string | null;
+}
+
+const BLOCKED = (reason: string): Resolved => ({
+    url: '',
+    secret: null,
+    to: [],
+    server: null,
+    reason,
+});
+
 function resolveTarget(record: NotifyChannelRecord): Resolved {
+    if (record.kind === 'email') {
+        const server = resolveMailServer(record.mail_profile_id);
+        if (server.problem) {
+            return {...BLOCKED(server.problem), server};
+        }
+        const recipients = mailRecipientsProblem(record.recipients);
+        if (recipients) {
+            return {...BLOCKED(recipients), server};
+        }
+        return {url: '', secret: null, to: parseMailRecipients(record.recipients).to, server, reason: null};
+    }
     const url = tryDecrypt(record.url_enc);
-    if (!url) {
+    if (!url.value) {
         return BLOCKED('地址读不出来：本机密钥库可能不可用，重新填一次地址即可恢复');
     }
-    const invalid = validateNotifyUrl(url);
+    const invalid = validateNotifyUrl(url.value);
     if (invalid) {
         return BLOCKED(`地址不合法：${invalid}`);
     }
-    return {url, secret: tryDecrypt(record.secret_enc), reason: null};
+    const secret = tryDecrypt(record.secret_enc);
+    if (secret.failed) {
+        // 这条渠道开了加签却读不出密钥：发出去必然被对端拒，而且原因会被写成「签名不对」，
+        // 改多少次地址都没用。所以这里当成「发不出去」处理，而不是「没有密钥」。
+        return BLOCKED('签名密钥读不出来：本机密钥库可能不可用，重新填一次密钥即可恢复');
+    }
+    return {url: url.value, secret: secret.value, to: [], server: null, reason: null};
 }
 
 function writeDelivery(args: {
@@ -164,13 +211,50 @@ function writeDelivery(args: {
     });
 }
 
+/** 一条渠道发完了：把结论落库并塞进返回值。这一层自己出的错也走同一条路。 */
+function recordOutcome(args: {
+    channelId: string;
+    channelName: string;
+    event: NotifyEvent;
+    ok: boolean;
+    skipped: boolean;
+    message: string;
+    atMs: number;
+    /** 渠道自己的配置坏了：写回 last_error；限流与网络失败不该污染那一格 */
+    configProblem: boolean;
+    deliveries: NotifyDispatchResult['deliveries'];
+}): void {
+    writeDelivery(args);
+    if (args.configProblem) {
+        markNotifyChannelResult(args.channelId, {
+            ok: false,
+            message: args.message,
+            at: new Date(args.atMs).toISOString(),
+        });
+    }
+    args.deliveries.push({
+        channelId: args.channelId,
+        channelName: args.channelName,
+        ok: args.ok,
+        skipped: args.skipped,
+        message: args.message,
+    });
+}
+
 /**
  * 把一条事件推给所有该收它的渠道。
  *
  * 判到哪一种结果全在 shared/notify-channels.ts 的 decideNotifyDelivery 里，这一层只做三件
  * 它独有的事：把库里的行变成判定要的那几格、真的发出去、把结论落库。
- * 「没订阅/低于级别线/渠道关着」是不归它管（ignore，不留一行），
- * 「这一分钟用完了」与「测试时地址不行」是本来该发却没发，必须留下来说清是谁挡的。
+ * 判到 send 的都真发一次，判到 skip 的都落一行并写明是谁挡的；ignore（没订阅、低于级别线、
+ * 渠道关着）不落行——那些不归这条渠道管，落下来只会把表冲满。skip 里凡是渠道自己配坏的
+ * （configProblem）额外把这句写回渠道的 last_error：一条 enabled、订阅也命中、配置却坏了的
+ * 渠道，光靠投递表要翻到「最近投递」才看得见，而它从此一条都收不到。
+ *
+ * 每台渠道各包一次 try/catch：一次告警要连着发 N 条，而其中任何一条都可能在这三步里出错——
+ * 最常见的是有人正好在这一刻删掉了它（外键那一句会直接抛）。不包的话整条循环当场断掉，
+ * 后面的渠道既没发也不留一行，而调用方只看得到一句 log.warn。那种「一半渠道静默消失」
+ * 是这一层最不该有的失败方式。
  */
 export async function dispatchNotifyEvent(
     event: NotifyEvent,
@@ -184,61 +268,114 @@ export async function dispatchNotifyEvent(
         if (onlyChannelId && item.id !== onlyChannelId) {
             continue;
         }
-        const channelName = item.name;
-        const target = resolveTarget(item);
-        const decision = decideNotifyDelivery(
-            {
-                enabled: item.enabled === 1,
-                urlProblem: target.reason,
-                events: parseEvents(item.events_json),
-                minLevel: item.min_level as NotifyLevel,
-                ratePerMinute: item.rate_per_minute,
-                recentSendAtMs: recentSends.get(item.id) ?? [],
-            },
-            event,
-            nowMs,
-        );
-        if (decision.action === 'ignore') {
-            continue;
+        try {
+            await dispatchOneChannel(item, event, nowMs, deliveries);
+        } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error);
+            log.warn(`notify dispatch threw for channel ${item.name}: ${reason}`);
+            deliveries.push({channelId: item.id, channelName: item.name, ok: false, skipped: false, message: reason});
+            // 这一行能不能落库要看它自己是不是抛错的原因，所以再试一次、失败就只留日志：
+            // 一张投递表少一行比整批渠道不发要好，但绝不能再把异常往外抛
+            try {
+                writeDelivery({
+                    channelId: item.id,
+                    channelName: item.name,
+                    event,
+                    ok: false,
+                    skipped: false,
+                    message: `派发这条渠道时出错了：${reason}`,
+                    atMs: nowMs,
+                });
+            } catch (innerError) {
+                const innerMessage = innerError instanceof Error ? innerError.message : String(innerError);
+                log.warn(`notify delivery row lost for ${item.name}: ${innerMessage}`);
+            }
         }
-        if (decision.action === 'skip') {
-            writeDelivery({
-                channelId: item.id,
-                channelName,
-                event,
-                ok: false,
-                skipped: true,
-                message: decision.reason,
-                atMs: nowMs,
-            });
-            deliveries.push({channelId: item.id, channelName, ok: false, skipped: true, message: decision.reason});
-            continue;
-        }
-
-        const request = buildNotifyRequest({
-            kind: item.kind as NotifyChannelKind,
-            url: target.url,
-            secret: target.secret,
-            event,
-            nowMs,
-        });
-        const outcome = await sendNotifyRequest(request, item.timeout_ms);
-        pushRecentSend(item.id, nowMs);
-        markNotifyChannelResult(item.id, {ok: outcome.ok, message: outcome.message, at: new Date(nowMs).toISOString()});
-        writeDelivery({
-            channelId: item.id,
-            channelName,
-            event,
-            ok: outcome.ok,
-            skipped: false,
-            message: outcome.message,
-            atMs: nowMs,
-        });
-        deliveries.push({channelId: item.id, channelName, ok: outcome.ok, skipped: false, message: outcome.message});
     }
 
     pruneNotifyDeliveries(NOTIFY_DELIVERY_KEEP);
     return {event: {kind: event.kind, title: event.title}, deliveries};
+}
+
+async function dispatchOneChannel(
+    item: NotifyChannelRecord,
+    event: NotifyEvent,
+    nowMs: number,
+    deliveries: NotifyDispatchResult['deliveries'],
+): Promise<void> {
+    const channelName = item.name;
+    const target = resolveTarget(item);
+    const decision = decideNotifyDelivery(
+        {
+            enabled: item.enabled === 1,
+            targetProblem: target.reason,
+            events: parseEvents(item.events_json),
+            minLevel: item.min_level as NotifyLevel,
+            ratePerMinute: item.rate_per_minute,
+            recentSendAtMs: recentSends.get(item.id) ?? [],
+        },
+        event,
+        nowMs,
+    );
+    if (decision.action === 'ignore') {
+        return;
+    }
+    if (decision.action === 'skip') {
+        recordOutcome({
+            channelId: item.id,
+            channelName,
+            event,
+            ok: false,
+            skipped: true,
+            // 渠道自己配坏的才写回 last_error：限流那种是这台应用主动收着发，不是这条渠道坏了，
+            // 写进去会把一次告警风暴显示成「连续失败 N 次」。
+            message: decision.reason,
+            atMs: nowMs,
+            configProblem: decision.configProblem,
+            deliveries,
+        });
+        return;
+    }
+
+    // 先把这一分钟的额度占掉，再发：判定读的是内存里的窗口，而告警引擎是按规则并发跑的，
+    // 两条同时进来时各自都看到「还有位置」，限流就成了摆设。失败也算占用——那一次请求真的
+    // 打到对端了，这比「只数成功」更接近限流要防的那件事。
+    pushRecentSend(item.id, nowMs);
+    const outcome =
+        item.kind === 'email'
+            ? await sendMailMessage({
+                  server: target.server ?? {
+                      record: null,
+                      password: null,
+                      problem: '这条邮件渠道没有可用的服务器配置',
+                  },
+                  to: target.to,
+                  subject: buildMailSubject(event),
+                  text: buildMailBody(event),
+                  timeoutMs: item.timeout_ms,
+              })
+            : await sendNotifyRequest(
+                  buildNotifyRequest({
+                      kind: item.kind as Exclude<NotifyChannelKind, 'email'>,
+                      url: target.url,
+                      secret: target.secret,
+                      event,
+                      nowMs,
+                  }),
+                  item.timeout_ms,
+              );
+    markNotifyChannelResult(item.id, {ok: outcome.ok, message: outcome.message, at: new Date(nowMs).toISOString()});
+    recordOutcome({
+        channelId: item.id,
+        channelName,
+        event,
+        ok: outcome.ok,
+        skipped: false,
+        message: outcome.message,
+        atMs: nowMs,
+        configProblem: false,
+        deliveries,
+    });
 }
 
 function toDelivery(row: NotifyDeliveryRecord): NotifyDelivery {
@@ -296,7 +433,14 @@ export function listRecentDeliveries(limit: number): NotifyDelivery[] {
  *
  * 地址与密钥都是「留空表示不改」：渲染层拿到的地址是打码的、密钥从来不回填，
  * 如果空串被当成新值写进去，一次只改名字的保存就会把地址清掉。
- * 加密失败直接往外抛（不降级成明文）：这个文件里落的是往值班群发任意消息的凭据。
+ * 加密失败直接往外抛（不降级成明文）：这个文件里落的是往值班群与值班邮箱发任意消息的凭据。
+ *
+ * 两条按类型做的清理：
+ * - 类型从钉钉/飞书改成别的，签名密钥跟着清掉。留着它不会让任何一条发出去，却会一直显示成
+ *   「这条渠道配了密钥」，而那正是 shared 里 notifyKindSupportsSecret 想避免的那个误会。
+ * - 邮件与非邮件之间切换时，另一边的配置不会被动到：从邮件改成 webhook，收件人清成空串、
+ *   地址仍按「留空=沿用」留着；改回邮件时那一份服务器与收件人还要人重填一次，因为表单里
+ *   根本没有回填那两格（它们只在 email 类型下显示）。
  */
 export function buildChannelRecord(
     draft: NotifyChannelDraft,
@@ -304,14 +448,19 @@ export function buildChannelRecord(
     id: string,
     at: string,
 ): NotifyChannelRecord {
-    const url = draft.url.trim();
+    const url = (draft.url ?? '').trim();
     const secret = draft.secret?.trim() ?? '';
+    const isEmail = draft.kind === 'email';
+    const keepsSecret = notifyKindSupportsSecret(draft.kind);
+    const profileId = isEmail ? draft.mailProfileId?.trim() : '';
     return {
         id,
         name: draft.name.trim(),
         kind: draft.kind,
         url_enc: url ? encrypt(url) : (existing?.url_enc ?? ''),
-        secret_enc: secret ? encrypt(secret) : (existing?.secret_enc ?? null),
+        secret_enc: keepsSecret ? (secret ? encrypt(secret) : (existing?.secret_enc ?? null)) : null,
+        mail_profile_id: profileId ? profileId : null,
+        recipients: isEmail ? (draft.recipients ?? '').trim() : '',
         enabled: (draft.enabled ?? existing?.enabled === 1) ? 1 : 0,
         events_json: JSON.stringify(draft.events ?? (existing ? parseEvents(existing.events_json) : [])),
         min_level: draft.minLevel ?? (existing ? (existing.min_level as NotifyLevel) : 'warn'),

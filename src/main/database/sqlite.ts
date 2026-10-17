@@ -11,7 +11,7 @@ let db: Database.Database | null = null;
 // schema 版本以 user_version 跟踪。改基线 DDL 时：升 SCHEMA_VERSION，
 // 并把该版本的增量 DDL 写进 migrate()——CREATE TABLE IF NOT EXISTS 对已存在的
 // 旧库什么都不做，没有这套机制，加列只会对新装用户生效，旧库静默落后。
-const SCHEMA_VERSION = 14;
+const SCHEMA_VERSION = 15;
 
 function migrate(database: Database.Database, from: number): void {
     // v2：refreshInterval 那行出厂值是 30000，而监控页的刷新间隔单位是秒，
@@ -94,6 +94,22 @@ function migrate(database: Database.Database, from: number): void {
     // 补齐，这里没有数据要修补——老库里这两张表本来不存在，也没有任何东西引用过它们，
     // 不存在「老行缺列」这种状态。留这一段是为了下次翻 user_version 不必回头猜 v14 做没做事
     // （与 v5 同一口径）。
+    // v15：邮件渠道。notify_mail_profiles 是新表（基线补齐就行），但 notify_channels 上多了
+    // mail_profile_id 与 recipients 两列——v14 的库已经有渠道行了，基线那句
+    // CREATE TABLE IF NOT EXISTS 对已存在的表什么都不做，不 ALTER 的话读渠道拿到 undefined、
+    // 写渠道直接 no such column；而新库基线已带这两列，不查表结构就 ALTER 又是 duplicate
+    // column 顶掉整个启动事务（与 v10/v12/v13 同一个坑）。
+    // recipients 用 NOT NULL DEFAULT ''：ALTER 给老行补的就是这个默认值，而不是要事后
+    // 逐行 UPDATE 一遍——非邮件渠道永远不该有收件人，空串正是「没有」的那个写法。
+    if (from < 15) {
+        const columns = database.prepare('PRAGMA table_info(notify_channels)').all() as {name: string}[];
+        if (!columns.some(column => column.name === 'mail_profile_id')) {
+            database.prepare('ALTER TABLE notify_channels ADD COLUMN mail_profile_id TEXT').run();
+        }
+        if (!columns.some(column => column.name === 'recipients')) {
+            database.prepare("ALTER TABLE notify_channels ADD COLUMN recipients TEXT NOT NULL DEFAULT ''").run();
+        }
+    }
 }
 // 每次启动都执行基线再补迁移：基线全是幂等语句，因此旧库缺的表和出厂设置行
 // 都会被补齐（只按 user_version 走迁移分支的话，迁移路径上的库永远拿不到
@@ -1442,15 +1458,101 @@ export function cleanupOrphanK8sForwards(): number {
     return result.changes;
 }
 
+// ========== 邮件服务器（SMTP）配置 ==========
+
+export interface MailProfileRecord {
+    id: string;
+    name: string;
+    host: string;
+    port: number;
+    security: string;
+    /** 用户名原文：它不是凭据（信头里本来就看得见），但出界时仍按长度打码。 */
+    username: string;
+    /** 密码只以密文经过这一层；渲染层拿到的是 hasPassword 这一个布尔值。 */
+    password_enc: string | null;
+    from_address: string;
+    from_name: string;
+    allow_self_signed: number;
+    created_at: string;
+    updated_at: string;
+}
+
+const MAIL_PROFILE_COLUMNS =
+    'id, name, host, port, security, username, password_enc, from_address, from_name, ' +
+    'allow_self_signed, created_at, updated_at';
+
+export function listMailProfiles(): MailProfileRecord[] {
+    const database = getDatabase();
+    return database
+        .prepare(`SELECT ${MAIL_PROFILE_COLUMNS} FROM notify_mail_profiles ORDER BY created_at, name`)
+        .all() as MailProfileRecord[];
+}
+
+export function getMailProfileById(id: string): MailProfileRecord | null {
+    const database = getDatabase();
+    const row = database.prepare(`SELECT ${MAIL_PROFILE_COLUMNS} FROM notify_mail_profiles WHERE id = ?`).get(id) as
+        MailProfileRecord | undefined;
+    return row ?? null;
+}
+
+export function insertMailProfile(record: MailProfileRecord): void {
+    const database = getDatabase();
+    database
+        .prepare(
+            `INSERT INTO notify_mail_profiles (${MAIL_PROFILE_COLUMNS})
+             VALUES (@id, @name, @host, @port, @security, @username, @password_enc, @from_address,
+                     @from_name, @allow_self_signed, @created_at, @updated_at)`,
+        )
+        .run(record);
+}
+
+/** 整行覆盖（不含 created_at）：与 notify_channels 同一口径，被别的窗口删掉的配置不复活。 */
+export function updateMailProfile(record: MailProfileRecord): number {
+    const database = getDatabase();
+    return database
+        .prepare(
+            `UPDATE notify_mail_profiles
+             SET name = @name, host = @host, port = @port, security = @security, username = @username,
+                 password_enc = @password_enc, from_address = @from_address, from_name = @from_name,
+                 allow_self_signed = @allow_self_signed, updated_at = @updated_at
+             WHERE id = @id`,
+        )
+        .run(record).changes;
+}
+
+/**
+ * 删掉一台服务器。
+ *
+ * 不级联删除渠道（notify_channels.mail_profile_id 故意没有外键）：正在用它的渠道会变成
+ * 「这台邮件服务器已经不在了」那一条 skip 记录，而不是从列表里消失。
+ */
+export function deleteMailProfile(id: string): number {
+    const database = getDatabase();
+    return database.prepare('DELETE FROM notify_mail_profiles WHERE id = ?').run(id).changes;
+}
+
+/** 还有几条邮件渠道指着这一台：删除前的提示要用它，「删了没事」与「有 3 条渠道会立刻发不出去」是两句话。 */
+export function countNotifyChannelsUsingMailProfile(id: string): number {
+    const database = getDatabase();
+    const row = database.prepare('SELECT COUNT(*) AS n FROM notify_channels WHERE mail_profile_id = ?').get(id) as {
+        n: number;
+    };
+    return row.n;
+}
+
 // ========== 外部通知渠道 ==========
 
 export interface NotifyChannelRecord {
     id: string;
     name: string;
     kind: string;
-    /** 完整地址的密文。这一列没有任何读取方能拿到明文——出界的地方只给打码后的地址。 */
+    /** 完整地址的密文。这一列没有任何读取方能拿到明文——出界的地方只给打码后的地址。邮件渠道为空串。 */
     url_enc: string;
     secret_enc: string | null;
+    /** 邮件渠道指向的 notify_mail_profiles.id；没有外键，删掉服务器时这里会变成一句投递记录里的原因。 */
+    mail_profile_id: string | null;
+    /** 邮件渠道的收件人原文（分隔符随意）；解析与校验在 shared/notify-mail.ts。 */
+    recipients: string;
     enabled: number;
     events_json: string;
     min_level: string;
@@ -1464,8 +1566,8 @@ export interface NotifyChannelRecord {
 }
 
 const NOTIFY_CHANNEL_COLUMNS =
-    'id, name, kind, url_enc, secret_enc, enabled, events_json, min_level, timeout_ms, ' +
-    'rate_per_minute, last_sent_at, last_error, fail_count, created_at, updated_at';
+    'id, name, kind, url_enc, secret_enc, mail_profile_id, recipients, enabled, events_json, min_level, ' +
+    'timeout_ms, rate_per_minute, last_sent_at, last_error, fail_count, created_at, updated_at';
 
 export function listNotifyChannels(): NotifyChannelRecord[] {
     const database = getDatabase();
@@ -1486,9 +1588,9 @@ export function insertNotifyChannel(record: NotifyChannelRecord): void {
     database
         .prepare(
             `INSERT INTO notify_channels (${NOTIFY_CHANNEL_COLUMNS})
-             VALUES (@id, @name, @kind, @url_enc, @secret_enc, @enabled, @events_json, @min_level,
-                     @timeout_ms, @rate_per_minute, @last_sent_at, @last_error, @fail_count,
-                     @created_at, @updated_at)`,
+             VALUES (@id, @name, @kind, @url_enc, @secret_enc, @mail_profile_id, @recipients, @enabled,
+                     @events_json, @min_level, @timeout_ms, @rate_per_minute, @last_sent_at, @last_error,
+                     @fail_count, @created_at, @updated_at)`,
         )
         .run(record);
 }
@@ -1505,6 +1607,7 @@ export function updateNotifyChannel(record: NotifyChannelRecord): number {
         .prepare(
             `UPDATE notify_channels
              SET name = @name, kind = @kind, url_enc = @url_enc, secret_enc = @secret_enc,
+                 mail_profile_id = @mail_profile_id, recipients = @recipients,
                  enabled = @enabled, events_json = @events_json, min_level = @min_level,
                  timeout_ms = @timeout_ms, rate_per_minute = @rate_per_minute, updated_at = @updated_at
              WHERE id = @id`,

@@ -3,10 +3,12 @@ import {
     Alert,
     Button,
     Checkbox,
+    Col,
     Form,
     Input,
     InputNumber,
     Modal,
+    Row,
     Select,
     Space,
     Switch,
@@ -16,7 +18,7 @@ import {
     Typography,
     message,
 } from 'antd';
-import {DeleteOutlined, PlusOutlined, ReloadOutlined, SendOutlined} from '@ant-design/icons';
+import {DeleteOutlined, MailOutlined, PlusOutlined, ReloadOutlined, SendOutlined} from '@ant-design/icons';
 import PageShell from '../components/common/PageShell';
 import StateBlock from '../components/common/StateBlock';
 import {
@@ -27,10 +29,24 @@ import {
     NOTIFY_LEVEL_LABEL,
     NOTIFY_LEVEL_RANK,
     NOTIFIABLE_EVENT_KINDS,
+    notifyKindIsWebhook,
     notifyKindSupportsSecret,
     validateNotifyUrl,
 } from '../../shared/notify-channels';
+import {
+    MAIL_DEFAULT_PORT,
+    MAIL_RECIPIENT_MAX,
+    MAIL_SECURITY_KINDS,
+    MAIL_SECURITY_LABEL,
+    mailRecipientsProblem,
+    parseMailRecipients,
+    validateMailAddress,
+    validateMailHost,
+    validateMailPort,
+} from '../../shared/notify-mail';
 import type {
+    MailProfile,
+    MailSecurity,
     NotifyChannel,
     NotifyChannelKind,
     NotifyDelivery,
@@ -44,18 +60,23 @@ interface Props {
     clusterId?: string;
 }
 
-/** 表单值：与 draft 的差别只在 url/secret 允许空串，空串的含义见 toDraft。 */
+/** 表单值：与 draft 的差别只在 url/secret 允许空串，空串的含义见 handleSave。 */
 interface ChannelForm {
     name: string;
     kind: NotifyChannelKind;
     url: string;
     secret?: string;
+    mailProfileId?: string;
+    recipients?: string;
     enabled: boolean;
     events: NotifyEventKind[];
     minLevel: NotifyLevel;
     timeoutMs: number;
     ratePerMinute: number;
 }
+
+/** 邮件的默认单次超时：SMTP 要过 DNS、握手、登录三段，webhook 那 5 秒对它是「必失败」。 */
+const MAIL_DEFAULT_TIMEOUT_MS = 15_000;
 
 /** 事件默认级别：界面上把级别标在订选项后面，免得用户订了一个永远过不了级别线的组合。 */
 const EVENT_DEFAULT_LEVEL: Record<NotifyEventKind, NotifyLevel> = {
@@ -78,6 +99,8 @@ function emptyForm(): ChannelForm {
         kind: 'generic',
         url: '',
         secret: '',
+        mailProfileId: undefined,
+        recipients: '',
         enabled: true,
         events: DEFAULT_EVENTS,
         minLevel: 'warn',
@@ -93,6 +116,9 @@ function formOf(channel: NotifyChannel): ChannelForm {
         // 地址不回显：列表里拿到的是打码后的串，填回去等于把打码串当新地址存下来
         url: '',
         secret: '',
+        mailProfileId: channel.mailProfileId ?? undefined,
+        // 收件人不是凭据，可以照原样回填（重新排成逗号分隔只是把库里的原文显示出来）
+        recipients: channel.recipients.join(', '),
         enabled: channel.enabled,
         events: channel.events,
         minLevel: channel.minLevel,
@@ -121,29 +147,39 @@ function describeResult(result: NotifyDispatchResult): {ok: boolean; text: strin
 const NotifyChannels: React.FC<Props> = () => {
     const [channels, setChannels] = useState<NotifyChannel[]>([]);
     const [deliveries, setDeliveries] = useState<NotifyDelivery[]>([]);
+    const [profiles, setProfiles] = useState<MailProfile[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [testingId, setTestingId] = useState<string | null>(null);
     const [modalOpen, setModalOpen] = useState(false);
+    const [mailModalOpen, setMailModalOpen] = useState(false);
     const [editing, setEditing] = useState<NotifyChannel | null>(null);
     const [saving, setSaving] = useState(false);
     const [form] = Form.useForm<ChannelForm>();
+
+    /** 服务器 id → 名字：列表那一格要显示人起的名，而不是一个 uuid。 */
+    const profileNames = useMemo(
+        () => Object.fromEntries(profiles.map(item => [item.id, item.name])) as Record<string, string>,
+        [profiles],
+    );
 
     const load = useCallback(async () => {
         setLoading(true);
         setError(null);
         try {
-            const [channelResponse, deliveryResponse] = await Promise.all([
+            const [channelResponse, deliveryResponse, mailResponse] = await Promise.all([
                 window.electronAPI.notify.channel.list(),
                 window.electronAPI.notify.delivery.list({limit: 100}),
+                window.electronAPI.notify.mail.list(),
             ]);
             if (!channelResponse.success) {
                 setError(channelResponse.error || '渠道读取失败');
                 return;
             }
             setChannels(channelResponse.data ?? []);
-            // 投递日志读失败不顶掉渠道列表：这一屏的主语是渠道，日志只是附带
+            // 投递记录与邮件服务器读失败都不顶掉渠道列表：这一屏的主语是渠道，其余是附带
             setDeliveries(deliveryResponse.success ? (deliveryResponse.data ?? []) : []);
+            setProfiles(mailResponse.success ? (mailResponse.data ?? []) : []);
         } catch (cause) {
             setError(cause instanceof Error ? cause.message : '通知配置读取失败');
         } finally {
@@ -157,18 +193,17 @@ const NotifyChannels: React.FC<Props> = () => {
 
     const openCreate = useCallback(() => {
         setEditing(null);
-        form.setFieldsValue(emptyForm());
         setModalOpen(true);
-    }, [form]);
+    }, []);
 
-    const openEdit = useCallback(
-        (channel: NotifyChannel) => {
-            setEditing(channel);
-            form.setFieldsValue(formOf(channel));
-            setModalOpen(true);
-        },
-        [form],
-    );
+    const openEdit = useCallback((channel: NotifyChannel) => {
+        setEditing(channel);
+        setModalOpen(true);
+    }, []);
+
+    // Modal 是 destroyOnClose，Form 每次打开都重新挂载。回填必须走 initialValues：
+    // 挂载时它会用默认值整个覆盖 store，所以在打开之前 setFieldsValue 写的值会被抹掉
+    // （表现就是「编辑」打开后表单空白、类型回到默认值）。
 
     const handleSave = useCallback(async () => {
         const values = await form.validateFields();
@@ -179,8 +214,9 @@ const NotifyChannels: React.FC<Props> = () => {
                 id: editing?.id,
                 // 空串在这里就退化成「不改」：地址与密钥都不回填，逼着用户重打一遍
                 // 只会让人拿记事本里那串旧地址重贴，反而更容易贴错
-                url: values.url.trim(),
+                url: (values.url ?? '').trim(),
                 secret: values.secret?.trim() ? values.secret.trim() : undefined,
+                recipients: values.recipients?.trim() ?? '',
             });
             if (!response.success || !response.data) {
                 message.error(response.error || '保存失败');
@@ -240,7 +276,10 @@ const NotifyChannels: React.FC<Props> = () => {
         (channel: NotifyChannel) => {
             Modal.confirm({
                 title: `删除「${channel.name}」？`,
-                content: '它的投递记录会一起删掉。地址与密钥只存在本机，删了就没地方能找回。',
+                content:
+                    channel.kind === 'email'
+                        ? '它的投递记录会一起删掉。那台邮件服务器与别的渠道都不受影响，收件人只是跟着这一条一起没了。'
+                        : '它的投递记录会一起删掉。地址与密钥只存在本机，删了就没地方能找回。',
                 okText: '删除',
                 okButtonProps: {danger: true},
                 cancelText: '取消',
@@ -261,6 +300,7 @@ const NotifyChannels: React.FC<Props> = () => {
     const kindWatched = Form.useWatch('kind', form);
     const eventsWatched = Form.useWatch('events', form);
     const levelWatched = Form.useWatch('minLevel', form);
+    const recipientsWatched = Form.useWatch('recipients', form);
 
     const channelColumns = useMemo(
         () => [
@@ -276,16 +316,29 @@ const NotifyChannels: React.FC<Props> = () => {
                 ),
             },
             {
-                title: '地址',
+                title: '发往',
                 dataIndex: 'url',
-                render: (_: unknown, channel: NotifyChannel) => (
-                    <Space direction="vertical" size={0}>
-                        <Typography.Text style={{wordBreak: 'break-all'}}>{channel.url}</Typography.Text>
-                        <Typography.Text type="secondary">
-                            {channel.hasSecret ? '已存签名密钥' : '未配置签名密钥'}
-                        </Typography.Text>
-                    </Space>
-                ),
+                render: (_: unknown, channel: NotifyChannel) =>
+                    channel.kind === 'email' ? (
+                        <Space direction="vertical" size={0}>
+                            <Typography.Text style={{wordBreak: 'break-all'}}>
+                                {channel.recipients.join('、') || '没有收件人'}
+                            </Typography.Text>
+                            <Typography.Text type="secondary">
+                                邮件·
+                                {channel.mailProfileId
+                                    ? (profileNames[channel.mailProfileId] ?? '服务器已不在')
+                                    : '没选服务器'}
+                            </Typography.Text>
+                        </Space>
+                    ) : (
+                        <Space direction="vertical" size={0}>
+                            <Typography.Text style={{wordBreak: 'break-all'}}>{channel.url}</Typography.Text>
+                            <Typography.Text type="secondary">
+                                {channel.hasSecret ? '已存签名密钥' : '未配置签名密钥'}
+                            </Typography.Text>
+                        </Space>
+                    ),
             },
             {
                 title: '订阅',
@@ -368,7 +421,7 @@ const NotifyChannels: React.FC<Props> = () => {
                 ),
             },
         ],
-        [handleDelete, handleTest, handleToggle, openEdit, testingId],
+        [handleDelete, handleTest, handleToggle, openEdit, profileNames, testingId],
     );
 
     const deliveryColumns = useMemo(
@@ -421,6 +474,9 @@ const NotifyChannels: React.FC<Props> = () => {
                     <Button icon={<ReloadOutlined />} onClick={() => void load()} loading={loading}>
                         刷新
                     </Button>
+                    <Button icon={<MailOutlined />} onClick={() => setMailModalOpen(true)}>
+                        邮件服务器
+                    </Button>
                     <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
                         添加渠道
                     </Button>
@@ -430,7 +486,7 @@ const NotifyChannels: React.FC<Props> = () => {
             <Alert
                 type="info"
                 showIcon
-                message="地址与签名密钥加密存在本机，列表里只显示打码后的地址"
+                message="地址、签名密钥与邮件密码加密存在本机，列表里只显示打码后的内容"
                 description={
                     <Space direction="vertical" size={2}>
                         <span>
@@ -438,6 +494,10 @@ const NotifyChannels: React.FC<Props> = () => {
                             应用退出后没有人补发，所以每次投递的结论都记在下面那张表里。
                         </span>
                         <span>「测试」只发这一条渠道，并绕开它的订阅、级别线与限流：它要回答的是「现在通不通」。</span>
+                        <span>
+                            邮件渠道发往一台 SMTP
+                            服务器：服务器（主机、账号、密码）单独配一次，多条渠道各带自己的收件人。
+                        </span>
                     </Space>
                 }
             />
@@ -477,7 +537,12 @@ const NotifyChannels: React.FC<Props> = () => {
                 width={640}
                 destroyOnClose
             >
-                <Form form={form} layout="vertical" initialValues={emptyForm()} preserve={false}>
+                <Form
+                    form={form}
+                    layout="vertical"
+                    initialValues={editing ? formOf(editing) : emptyForm()}
+                    preserve={false}
+                >
                     <Form.Item
                         name="name"
                         label="名称"
@@ -485,39 +550,106 @@ const NotifyChannels: React.FC<Props> = () => {
                     >
                         <Input placeholder="值班群机器人" maxLength={80} />
                     </Form.Item>
-                    <Form.Item name="kind" label="类型" rules={[{required: true}]}>
+                    <Form.Item name="kind" label="类型">
                         <Select
                             options={(Object.keys(NOTIFY_KIND_LABEL) as NotifyChannelKind[]).map(kind => ({
                                 value: kind,
                                 label: NOTIFY_KIND_LABEL[kind],
                             }))}
+                            onChange={value => {
+                                // 邮件要过 DNS、握手、登录三段，webhook 那 5 秒超时对它来说就是「必失败」；
+                                // 只在用户没动过这一格时换，改到过 20 秒的没必要被悄悄重置
+                                const current = form.getFieldValue('timeoutMs') as number;
+                                if (value === 'email' && current === NOTIFY_DEFAULT_TIMEOUT_MS) {
+                                    form.setFieldValue('timeoutMs', MAIL_DEFAULT_TIMEOUT_MS);
+                                } else if (value !== 'email' && current === MAIL_DEFAULT_TIMEOUT_MS) {
+                                    form.setFieldValue('timeoutMs', NOTIFY_DEFAULT_TIMEOUT_MS);
+                                }
+                            }}
                         />
                     </Form.Item>
-                    <Form.Item
-                        name="url"
-                        label="地址"
-                        extra={
-                            editing
-                                ? `留空表示沿用现在这条：${editing.url}`
-                                : '只收 http/https；地址里的 key 属于凭据，会加密落库'
-                        }
-                        rules={[
-                            {
-                                validator: (_rule, value: string) => {
-                                    const text = (value ?? '').trim();
-                                    if (!text) {
-                                        return editing
-                                            ? Promise.resolve()
-                                            : Promise.reject(new Error('新建渠道必须填写通知地址'));
-                                    }
-                                    const invalid = validateNotifyUrl(text);
-                                    return invalid ? Promise.reject(new Error(invalid)) : Promise.resolve();
+                    {notifyKindIsWebhook(kindWatched ?? 'generic') ? (
+                        <Form.Item
+                            name="url"
+                            label="地址"
+                            extra={
+                                editing
+                                    ? `留空表示沿用现在这条：${editing.url}`
+                                    : '只收 http/https；地址里的 key 属于凭据，会加密落库'
+                            }
+                            rules={[
+                                {
+                                    validator: (_rule, value: string) => {
+                                        const text = (value ?? '').trim();
+                                        if (!text) {
+                                            return editing
+                                                ? Promise.resolve()
+                                                : Promise.reject(new Error('新建渠道必须填写通知地址'));
+                                        }
+                                        const invalid = validateNotifyUrl(text);
+                                        return invalid ? Promise.reject(new Error(invalid)) : Promise.resolve();
+                                    },
                                 },
-                            },
-                        ]}
-                    >
-                        <Input placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/xxxx" />
-                    </Form.Item>
+                            ]}
+                        >
+                            <Input placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/xxxx" />
+                        </Form.Item>
+                    ) : (
+                        <>
+                            <Row gutter={12}>
+                                <Col span={14}>
+                                    <Form.Item
+                                        name="mailProfileId"
+                                        label="邮件服务器"
+                                        extra={
+                                            profiles.length
+                                                ? '一台服务器可以给多条邮件渠道用，差别只在收件人'
+                                                : '还没有邮件服务器，先在「邮件服务器」那一台配好'
+                                        }
+                                        rules={[{required: true, message: '选一台邮件服务器'}]}
+                                    >
+                                        <Select
+                                            placeholder="选择已配好的 SMTP"
+                                            options={profiles.map(item => ({
+                                                value: item.id,
+                                                label: `${item.name}（${item.host}:${item.port}）`,
+                                            }))}
+                                        />
+                                    </Form.Item>
+                                </Col>
+                                <Col span={10}>
+                                    <Form.Item label=" " colon={false}>
+                                        <Button icon={<MailOutlined />} onClick={() => setMailModalOpen(true)}>
+                                            管理邮件服务器
+                                        </Button>
+                                    </Form.Item>
+                                </Col>
+                            </Row>
+                            <Form.Item
+                                name="recipients"
+                                label="收件人"
+                                extra={`逗号、分号或换行分隔都行，最多 ${MAIL_RECIPIENT_MAX} 个${
+                                    recipientsWatched && recipientsWatched.trim()
+                                        ? `；现在解析出 ${parseMailRecipients(recipientsWatched).to.length} 个`
+                                        : ''
+                                }`}
+                                rules={[
+                                    {
+                                        validator: (_rule, value: string) => {
+                                            const problem = mailRecipientsProblem(value);
+                                            return problem ? Promise.reject(new Error(problem)) : Promise.resolve();
+                                        },
+                                    },
+                                ]}
+                            >
+                                <Input.TextArea
+                                    rows={3}
+                                    placeholder={'oncall@corp.com\ndba@corp.com'}
+                                    maxLength={4000}
+                                />
+                            </Form.Item>
+                        </>
+                    )}
                     {notifyKindSupportsSecret(kindWatched ?? 'generic') ? (
                         <Form.Item
                             name="secret"
@@ -558,7 +690,7 @@ const NotifyChannels: React.FC<Props> = () => {
                     <Form.Item
                         name="minLevel"
                         label="级别线"
-                        extra={`低于「${NOTIFY_LEVEL_LABEL[levelWatched ?? 'warn']}」的事件会被挡下并记一条「没发」`}
+                        extra={`低于「${NOTIFY_LEVEL_LABEL[levelWatched ?? 'warn']}」的事件不发，也不占投递记录`}
                     >
                         <Select
                             options={LEVEL_OPTIONS.map(level => ({
@@ -583,7 +715,437 @@ const NotifyChannels: React.FC<Props> = () => {
                     ) : null}
                 </Form>
             </Modal>
+            <MailProfilesModal
+                open={mailModalOpen}
+                onClose={() => setMailModalOpen(false)}
+                /** 关掉之后重新读一次渠道列表：删掉的服务器要在「发往」那一格里变成「服务器已不在」 */
+                onChanged={() => void load()}
+            />
         </PageShell>
+    );
+};
+
+/** 邮件服务器表单：密码与渠道密钥同一口径——不回填，留空表示沿用库里那一份。 */
+interface MailForm {
+    name: string;
+    host: string;
+    port: number;
+    security: MailSecurity;
+    username?: string;
+    password?: string;
+    fromAddress: string;
+    fromName?: string;
+    allowSelfSigned: boolean;
+}
+
+function emptyMailForm(): MailForm {
+    return {
+        name: '',
+        host: '',
+        port: MAIL_DEFAULT_PORT.starttls,
+        security: 'starttls',
+        username: '',
+        password: '',
+        fromAddress: '',
+        fromName: '',
+        allowSelfSigned: false,
+    };
+}
+
+function mailFormOf(profile: MailProfile): MailForm {
+    return {
+        ...emptyMailForm(),
+        name: profile.name,
+        host: profile.host,
+        port: profile.port,
+        security: profile.security,
+        username: '',
+        password: '',
+        fromAddress: profile.fromAddress,
+        fromName: profile.fromName,
+        allowSelfSigned: profile.allowSelfSigned,
+    };
+}
+
+const MailProfilesModal: React.FC<{open: boolean; onClose: () => void; onChanged: () => void}> = ({
+    open,
+    onClose,
+    onChanged,
+}) => {
+    const [profiles, setProfiles] = useState<MailProfile[]>([]);
+    const [loading, setLoading] = useState(false);
+    const [editing, setEditing] = useState<MailProfile | null>(null);
+    const [formOpen, setFormOpen] = useState(false);
+    const [saving, setSaving] = useState(false);
+    const [testingId, setTestingId] = useState<string | null>(null);
+    const [testTo, setTestTo] = useState('');
+    const [form] = Form.useForm<MailForm>();
+
+    const load = useCallback(async () => {
+        setLoading(true);
+        try {
+            const response = await window.electronAPI.notify.mail.list();
+            setProfiles(response.success ? (response.data ?? []) : []);
+        } finally {
+            setLoading(false);
+        }
+    }, []);
+
+    useEffect(() => {
+        if (open) {
+            void load();
+        }
+    }, [open, load]);
+
+    const handleSave = useCallback(async () => {
+        const values = await form.validateFields();
+        setSaving(true);
+        try {
+            const response = await window.electronAPI.notify.mail.save({
+                ...values,
+                id: editing?.id,
+                host: values.host.trim(),
+                name: values.name.trim(),
+                fromAddress: values.fromAddress.trim(),
+                // 与密码同一条口径：空用户名 = 沿用库里的账号（渲染层只有打码串，回填它等于写坏）
+                username: values.username?.trim() ? values.username.trim() : undefined,
+                password: values.password?.trim() ? values.password.trim() : undefined,
+            });
+            if (!response.success || !response.data) {
+                message.error(response.error || '保存失败');
+                return;
+            }
+            message.success(editing ? '邮件服务器已更新' : '邮件服务器已添加');
+            setFormOpen(false);
+            setEditing(null);
+            await load();
+            // 渠道那一屏也读这份列表（「发往」那一格要显示服务器名）
+            onChanged();
+        } catch (cause) {
+            message.error(cause instanceof Error ? cause.message : '保存失败');
+        } finally {
+            setSaving(false);
+        }
+    }, [editing, form, load, onChanged]);
+
+    const handleTest = useCallback(
+        async (profile: MailProfile) => {
+            const to = testTo.trim();
+            if (to) {
+                const invalid = validateMailAddress(to);
+                if (invalid) {
+                    message.error(`测试收件人：${invalid}`);
+                    return;
+                }
+            }
+            setTestingId(profile.id);
+            try {
+                const response = await window.electronAPI.notify.mail.test({id: profile.id, to: to || undefined});
+                if (!response.success || !response.data) {
+                    message.error(response.error || '测试失败');
+                    return;
+                }
+                if (response.data.ok) {
+                    message.success(response.data.message);
+                } else {
+                    message.warning(response.data.message);
+                }
+            } catch (cause) {
+                message.error(cause instanceof Error ? cause.message : '测试失败');
+            } finally {
+                setTestingId(null);
+            }
+        },
+        [testTo],
+    );
+
+    const handleDelete = useCallback(
+        (profile: MailProfile) => {
+            Modal.confirm({
+                title: `删除「${profile.name}」？`,
+                content:
+                    '用它的邮件渠道会立刻发不出去，并在投递记录里写明「这台邮件服务器已经不在了」——渠道本身不会被删。',
+                okText: '删除',
+                okButtonProps: {danger: true},
+                cancelText: '取消',
+                onOk: async () => {
+                    const response = await window.electronAPI.notify.mail.delete({id: profile.id});
+                    if (!response.success) {
+                        message.error(response.error || '删除失败');
+                        return;
+                    }
+                    message.success('邮件服务器已删除');
+                    await load();
+                    onChanged();
+                },
+            });
+        },
+        [load, onChanged],
+    );
+
+    const columns = useMemo(
+        () => [
+            {
+                title: '名称',
+                dataIndex: 'name',
+                width: 150,
+                render: (value: string) => <Typography.Text strong>{value}</Typography.Text>,
+            },
+            {
+                title: '服务器',
+                dataIndex: 'host',
+                width: 220,
+                render: (_: unknown, item: MailProfile) => (
+                    <Space direction="vertical" size={0}>
+                        <Typography.Text>{`${item.host}:${item.port}`}</Typography.Text>
+                        <Typography.Text type="secondary">
+                            {MAIL_SECURITY_LABEL[item.security]}
+                            {item.allowSelfSigned ? ' · 不校验证书' : ''}
+                        </Typography.Text>
+                    </Space>
+                ),
+            },
+            {
+                title: '登录',
+                dataIndex: 'username',
+                width: 160,
+                render: (value: string, item: MailProfile) => (
+                    <Typography.Text type={value ? undefined : 'secondary'}>
+                        {value ? `${value}${item.hasPassword ? ' · 已存密码' : ' · 没存密码'}` : '不登录'}
+                    </Typography.Text>
+                ),
+            },
+            {
+                title: '发件人',
+                dataIndex: 'fromAddress',
+                width: 200,
+                render: (value: string, item: MailProfile) => (
+                    <Space direction="vertical" size={0}>
+                        <Typography.Text style={{wordBreak: 'break-all'}}>{value}</Typography.Text>
+                        {item.fromName ? <Typography.Text type="secondary">{item.fromName}</Typography.Text> : null}
+                    </Space>
+                ),
+            },
+            {
+                title: '操作',
+                dataIndex: 'actions',
+                width: 210,
+                render: (_: unknown, item: MailProfile) => (
+                    <Space size={4}>
+                        <Button
+                            size="small"
+                            icon={<SendOutlined />}
+                            loading={testingId === item.id}
+                            onClick={() => void handleTest(item)}
+                        >
+                            测试
+                        </Button>
+                        <Button
+                            size="small"
+                            onClick={() => {
+                                setEditing(item);
+                                setFormOpen(true);
+                            }}
+                        >
+                            编辑
+                        </Button>
+                        <Button size="small" danger icon={<DeleteOutlined />} onClick={() => handleDelete(item)} />
+                    </Space>
+                ),
+            },
+        ],
+        [handleDelete, handleTest, testingId],
+    );
+
+    return (
+        <>
+            <Modal
+                title="邮件服务器（SMTP）"
+                open={open}
+                onCancel={onClose}
+                footer={<Button onClick={onClose}>关闭</Button>}
+                width={900}
+            >
+                <Alert
+                    type="info"
+                    showIcon
+                    style={{marginBottom: 12}}
+                    message="一台服务器可以给多条邮件渠道用，渠道之间只差收件人"
+                    description="密码加密存在本机，界面上只显示「已存密码」。删除服务器不会删掉用它的渠道，那些渠道会开始留一条「这台邮件服务器已经不在了」的投递记录。"
+                />
+                <Space style={{marginBottom: 12}} align="end">
+                    <Button
+                        type="primary"
+                        icon={<PlusOutlined />}
+                        onClick={() => {
+                            setEditing(null);
+                            setFormOpen(true);
+                        }}
+                    >
+                        添加服务器
+                    </Button>
+                    <Input
+                        style={{width: 260}}
+                        value={testTo}
+                        onChange={event => setTestTo(event.target.value)}
+                        placeholder="测试收件人（留空则发给自己的发件地址）"
+                        maxLength={254}
+                    />
+                    <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void load()} />
+                </Space>
+                <Table<MailProfile>
+                    rowKey="id"
+                    size="small"
+                    columns={columns}
+                    dataSource={profiles}
+                    pagination={false}
+                    loading={loading}
+                    locale={{emptyText: '还没有邮件服务器'}}
+                />
+            </Modal>
+            <Modal
+                title={editing ? `编辑「${editing.name}」` : '添加邮件服务器'}
+                open={formOpen}
+                onCancel={() => setFormOpen(false)}
+                onOk={() => void handleSave()}
+                okText="保存"
+                cancelText="取消"
+                confirmLoading={saving}
+                width={620}
+                destroyOnClose
+            >
+                <Form
+                    form={form}
+                    layout="vertical"
+                    initialValues={editing ? mailFormOf(editing) : emptyMailForm()}
+                    preserve={false}
+                >
+                    <Row gutter={12}>
+                        <Col span={12}>
+                            <Form.Item
+                                name="name"
+                                label="名称"
+                                rules={[{required: true, message: '给这台服务器起个名字'}]}
+                            >
+                                <Input placeholder="公司邮件网关" maxLength={80} />
+                            </Form.Item>
+                        </Col>
+                        <Col span={12}>
+                            <Form.Item
+                                name="host"
+                                label="服务器地址"
+                                extra="只填主机名，端口在下面那一格"
+                                rules={[
+                                    {
+                                        validator: (_rule, value: string) => {
+                                            const problem = validateMailHost(value);
+                                            return problem ? Promise.reject(new Error(problem)) : Promise.resolve();
+                                        },
+                                    },
+                                ]}
+                            >
+                                <Input placeholder="smtp.corp.com" maxLength={253} />
+                            </Form.Item>
+                        </Col>
+                    </Row>
+                    <Row gutter={12}>
+                        <Col span={8}>
+                            <Form.Item
+                                name="port"
+                                label="端口"
+                                rules={[
+                                    {
+                                        validator: (_rule, value: number) => {
+                                            const problem = validateMailPort(value);
+                                            return problem ? Promise.reject(new Error(problem)) : Promise.resolve();
+                                        },
+                                    },
+                                ]}
+                            >
+                                <InputNumber min={1} max={65535} style={{width: '100%'}} />
+                            </Form.Item>
+                        </Col>
+                        <Col span={16}>
+                            <Form.Item
+                                name="security"
+                                label="加密方式"
+                                extra="465 选 SSL/TLS，587 选 STARTTLS，25 选不加密"
+                            >
+                                <Select
+                                    options={MAIL_SECURITY_KINDS.map(kind => ({
+                                        value: kind,
+                                        label: `${MAIL_SECURITY_LABEL[kind]}（默认 ${MAIL_DEFAULT_PORT[kind]}）`,
+                                    }))}
+                                    onChange={value => {
+                                        // 端口没被改过才跟着换：用户手动填过 2525 之类的就别覆盖
+                                        const current = form.getFieldValue('port') as number;
+                                        const known = MAIL_SECURITY_KINDS.some(
+                                            kind => MAIL_DEFAULT_PORT[kind] === current,
+                                        );
+                                        if (known) {
+                                            form.setFieldValue('port', MAIL_DEFAULT_PORT[value as MailSecurity]);
+                                        }
+                                    }}
+                                />
+                            </Form.Item>
+                        </Col>
+                    </Row>
+                    <Row gutter={12}>
+                        <Col span={12}>
+                            <Form.Item
+                                name="username"
+                                label="用户名"
+                                extra={editing ? '留空表示沿用已存账号；要换账号就直接填新的' : '不要登录就留空'}
+                            >
+                                <Input placeholder={editing?.username || 'alert@corp.com'} maxLength={254} />
+                            </Form.Item>
+                        </Col>
+                        <Col span={12}>
+                            <Form.Item
+                                name="password"
+                                label="密码 / 授权码"
+                                extra={
+                                    editing ? '留空表示沿用已存的那一份' : '加密落库；有些服务商要填专门的应用授权码'
+                                }
+                            >
+                                <Input.Password maxLength={512} />
+                            </Form.Item>
+                        </Col>
+                    </Row>
+                    <Row gutter={12}>
+                        <Col span={14}>
+                            <Form.Item
+                                name="fromAddress"
+                                label="发件地址"
+                                rules={[
+                                    {
+                                        validator: (_rule, value: string) => {
+                                            const problem = validateMailAddress((value ?? '').trim());
+                                            return problem ? Promise.reject(new Error(problem)) : Promise.resolve();
+                                        },
+                                    },
+                                ]}
+                            >
+                                <Input placeholder="pulsar-alert@corp.com" maxLength={254} />
+                            </Form.Item>
+                        </Col>
+                        <Col span={10}>
+                            <Form.Item name="fromName" label="发件人显示名">
+                                <Input placeholder="Pulsar 告警" maxLength={120} />
+                            </Form.Item>
+                        </Col>
+                    </Row>
+                    <Form.Item
+                        name="allowSelfSigned"
+                        label="接受自签证书"
+                        valuePropName="checked"
+                        extra="只给内网邮件服务器用：勾了它这条连接不再校验服务端证书，也就挡不住中间人。"
+                    >
+                        <Switch />
+                    </Form.Item>
+                </Form>
+            </Modal>
+        </>
     );
 };
 

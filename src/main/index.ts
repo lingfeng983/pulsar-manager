@@ -122,13 +122,20 @@ function showMainWindow() {
 function createTray() {
     tray = new Tray(trayIcon);
     tray.setToolTip('Pulsar Manager');
-    tray.setContextMenu(
-        Menu.buildFromTemplate([
-            {label: '显示主窗口', click: () => showMainWindow()},
-            {type: 'separator'},
-            {label: '退出', click: () => app.quit()},
-        ]),
-    );
+    const menu = Menu.buildFromTemplate([
+        {label: '显示主窗口', click: () => showMainWindow()},
+        {type: 'separator'},
+        {label: '退出', click: () => app.quit()},
+    ]);
+    // 不在 Windows 上用 setContextMenu：那条路径下第一次右键会被系统吞掉（实测：
+    // 第一次右键毫无反应，第二次才弹出菜单），而右键事件在设了 context menu 之后
+    // 就不再抛给 JS，没有别的时机能补救。自己接管 right-click 再 popUpContextMenu，
+    // 每次右键都会立刻弹菜单。macOS 的菜单栏图标仍走系统默认（setContextMenu）。
+    if (process.platform === 'win32') {
+        tray.on('right-click', () => tray?.popUpContextMenu(menu));
+    } else {
+        tray.setContextMenu(menu);
+    }
     tray.on('double-click', () => showMainWindow());
 }
 
@@ -323,6 +330,7 @@ app.on('before-quit', () => {
 });
 
 let resourcesReleased = false;
+let resourcesReleasing = false;
 
 app.on('will-quit', event => {
     // 这三项收尾都是异步的，而它们绝不能跑到 client.close() 后面去：压测的
@@ -333,6 +341,12 @@ app.on('will-quit', event => {
         return;
     }
     event.preventDefault();
+    // 收尾跑起来之后用户还能再点一次「退出」：此时不能再起一份并发收尾
+    // （两轮 closeAll 会把同一批句柄关两遍），等第一轮结束直接退出。
+    if (resourcesReleasing) {
+        return;
+    }
+    resourcesReleasing = true;
     // 先停定时器：评估循环正等着 admin 请求时把隧道与原生客户端关掉，
     // 拿到的就是"半死资源"，而这条路径是有段错误先例的。
     stopAlertEngine();
@@ -355,7 +369,12 @@ app.on('will-quit', event => {
     })().finally(() => {
         resourcesReleased = true;
         cleanupDatabase();
-        app.quit();
+        // 不能在 will-quit 里再 app.quit()：第一次 preventDefault 之后 Electron 的
+        // defaultPrevented 仍为 true（electron#33643），第二次 quit 会被当成又一次
+        // 「已阻止」，进程就挂在这里——用户看到的是托盘「退出」点一次没反应、点
+        // 第二次才退（实测：第一次点完窗口和数据库都已收掉，进程却还在）。
+        // 资源已经全部释放，这里直接退出，不再走事件链。
+        app.exit(0);
     });
 });
 

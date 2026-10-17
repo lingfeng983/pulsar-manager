@@ -16,6 +16,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const {DatabaseSync} = require('node:sqlite');
 const K = require('../dist/src/shared/notify-channels.js');
+const M = require('../dist/src/shared/notify-mail.js');
 const P = require('../dist/src/main/services/notify-payload.js');
 const {SCHEMA_SQL} = require('../dist/src/main/database/schema.js');
 
@@ -77,7 +78,7 @@ function eventOf(overrides) {
 function factsOf(overrides) {
     return {
         enabled: true,
-        urlProblem: null,
+        targetProblem: null,
         events: ['alertFired', 'inspectionCrit'],
         minLevel: 'warn',
         ratePerMinute: 20,
@@ -111,6 +112,12 @@ check('带 @ 的地址按凭据风险拒绝，但只在 authority 段判', () =>
     contains(K.validateNotifyUrl('https://user:pass@hooks.slack.com/services/T/B/X'), '用户名密码', 'basic auth');
     // 路径里出现 @ 是合法的（Slack 的 webhook 路径就允许），不能因为一个字符整条拒掉
     eq(K.validateNotifyUrl('https://hooks.slack.com/services/EXAMPLE/EXAMPLE/EXAMPLE@here'), null, '路径含 @');
+});
+
+check('列表页复制回来的打码地址被拒绝，不会被当成新地址存下去', () => {
+    // "***" 本身是合法主机名字符：不拦的话，「复制列表里的打码串粘回表单」会把密文覆盖掉
+    contains(K.validateNotifyUrl('https://oapi.dingtalk.com/robot/send?access_token=***'), '打码标记', '查询串打码');
+    contains(K.validateNotifyUrl('https://open.feishu.cn/open-apis/bot/v2/hook/abc***'), '打码标记', '路径打码');
 });
 
 // ---------------------------------------------------------------- 超时与限流条数
@@ -152,24 +159,42 @@ check('级别的高低是序数而不是字符串：info<warn<crit', () => {
 
 // ---------------------------------------------------------------- 限流窗口
 
-check('限流按窗口内已发出的条数判，边界只算窗口内且不含未来', () => {
+check('限流按窗口内已发出的条数判，边界只算窗口内，未来的戳记也计入', () => {
     eq(K.isRateLimited([NOW - 1000], NOW, 1), true, '上限 1 且刚发过');
     eq(K.isRateLimited([NOW - 1000], NOW, 2), false, '还有一条额度');
     eq(K.isRateLimited([NOW - MINUTE], NOW, 1), false, '正好一分钟前的那条已出窗');
     eq(K.isRateLimited([NOW - (MINUTE - 1)], NOW, 1), true, '窗口内最后一毫秒');
-    eq(K.isRateLimited([NOW + 1000], NOW, 1), false, '时间戳在未来不计入');
+    eq(K.isRateLimited([NOW + 1000], NOW, 1), true, '时钟回拨后跑到未来的戳记仍然占额度');
     // 上限 0 由区间校验在外面挡住，这里说的是万一漏进来也不会变成「随便发」
     eq(K.isRateLimited([], NOW, 0), true, '上限 0 是一条都不发');
 });
 
 // ---------------------------------------------------------------- 派发判定：发、不归我、还是被挡
 
-check('干净的渠道判成 send，四种不该发的都判成 ignore 且不落记录', () => {
+check('干净的渠道判成 send，三种「不归它管」判成 ignore 且不落记录', () => {
     eq(K.decideNotifyDelivery(factsOf(), eventOf(), NOW).action, 'send', '正常');
     eq(K.decideNotifyDelivery(factsOf({enabled: false}), eventOf(), NOW).action, 'ignore', '渠道关着');
-    eq(K.decideNotifyDelivery(factsOf({urlProblem: '地址不合法：x'}), eventOf(), NOW).action, 'ignore', '地址坏');
     eq(K.decideNotifyDelivery(factsOf({events: []}), eventOf(), NOW).action, 'ignore', '没订阅');
     eq(K.decideNotifyDelivery(factsOf({minLevel: 'crit'}), eventOf({level: 'warn'}), NOW).action, 'ignore', '低于级别线');
+});
+
+check('订阅命中而地址坏了是 skip：一条本来该发却没发，必须落成渠道自己的问题', () => {
+    const broken = K.decideNotifyDelivery(factsOf({targetProblem: '地址不合法：主机名看着不完整'}), eventOf(), NOW);
+    eq(broken.action, 'skip', '落一行');
+    contains(broken.reason, '地址不合法', '原因原样带出');
+    contains(broken.reason, '本来要发给它', '说清这条本来该发');
+    eq(broken.configProblem, true, '派发层据此把原因写回渠道 last_error');
+    // 顺序的另一半：本来就不收这个事件的坏渠道仍旧什么都不落，否则表里全是「不归我管」的噪声
+    eq(
+        K.decideNotifyDelivery(factsOf({targetProblem: '地址不合法：x', events: []}), eventOf(), NOW).action,
+        'ignore',
+        '没订阅 + 地址坏',
+    );
+    eq(
+        K.decideNotifyDelivery(factsOf({targetProblem: '地址不合法：x', enabled: false}), eventOf(), NOW).action,
+        'ignore',
+        '渠道关着 + 地址坏',
+    );
 });
 
 check('限流用满是 skip，并写明是谁挡的、没有排队补发', () => {
@@ -181,6 +206,8 @@ check('限流用满是 skip，并写明是谁挡的、没有排队补发', () =>
     eq(decision.action, 'skip', '判定');
     contains(decision.reason, '3', '带上限条数');
     contains(decision.reason, '没有排队补发', '说明不会补发');
+    // 限流是这台应用主动收着发，不是这条渠道坏了：写成 configProblem 会把一次告警风暴显示成连败
+    eq(decision.configProblem, false, '不写回渠道');
 });
 
 check('窗口外的旧时间戳不会把这一条挡下', () => {
@@ -196,9 +223,10 @@ check('手动测试绕开订阅、级别线、开关与限流，但地址不行�
     const test = eventOf({kind: 'test', level: 'info', title: 'pulsar-manager 测试通知', clusterName: '', test: true});
     const busy = factsOf({enabled: false, events: [], minLevel: 'crit', ratePerMinute: 1, recentSendAtMs: [NOW - 1]});
     eq(K.decideNotifyDelivery(busy, test, NOW).action, 'send', '测试不看那四道');
-    const blocked = K.decideNotifyDelivery(factsOf({urlProblem: '地址读不出来：x'}), test, NOW);
+    const blocked = K.decideNotifyDelivery(factsOf({targetProblem: '地址读不出来：x'}), test, NOW);
     eq(blocked.action, 'skip', '地址读不出来要落一条');
     contains(blocked.reason, '地址读不出来', '原因原样带出');
+    eq(blocked.configProblem, true, '测试配坏的渠道也要写回 last_error');
 });
 
 // ---------------------------------------------------------------- 正文：字节上限与排版
@@ -274,6 +302,15 @@ check('钉钉/企微的 200+errcode、飞书的 200+code、Slack 的 200+ok:fals
     eq(K.classifyNotifyResponse(200, 'no json here').ok, true, '非 JSON 的 200 按送达');
 });
 
+check('非 2xx 也带出对端原文：Slack 的 403 不能只报一个状态码', () => {
+    const forbidden = K.classifyNotifyResponse(403, {ok: false, error: 'invalid_auth'});
+    eq(forbidden.ok, false, '403 不是成功');
+    contains(forbidden.message, '403', '带状态码');
+    contains(forbidden.message, 'invalid_auth', '带对端原文');
+    const gateway = K.classifyNotifyResponse(502, '<html>Bad Gateway</html>');
+    contains(gateway.message, '502', '非 JSON 也带状态码');
+});
+
 check('网络失败按签名分类成照着能做的句子', () => {
     eq(K.classifyNotifyFailure(new Error('timeout of 5000ms exceeded')).category, 'timeout', '超时');
     eq(K.classifyNotifyFailure(new Error('connect ETIMEDOUT 1.2.3.4:443')).category, 'timeout', '连接超时');
@@ -304,28 +341,176 @@ check('查询串里的 token/key/secret/sign/password 打码，其余参数留�
     eq(K.maskNotifyUrl('https://host/hook'), 'https://host/hook', '没有查询串原样');
 });
 
-check('isUsableNotifyChannel 把「配好了」定义成开关+地址+合法性三件事', () => {
-    const base = {
-        id: 'x',
-        name: 'n',
-        kind: 'generic',
-        url: 'https://hooks.example.com/hook',
-        hasSecret: false,
-        enabled: true,
-    };
-    eq(K.isUsableNotifyChannel(null), false, 'null');
-    eq(K.isUsableNotifyChannel({...base, enabled: false}), false, '关着');
-    eq(K.isUsableNotifyChannel({...base, url: ''}), false, '地址读不出来');
-    eq(K.isUsableNotifyChannel({...base, url: 'ftp://host/hook'}), false, '地址不合法');
-    eq(K.isUsableNotifyChannel({...base, enabled: true}), true, '三项都过');
+check('只有 webhook 类渠道走 HTTP；邮件是另一条路', () => {
+    eq(K.notifyKindIsWebhook('generic'), true, '通用');
+    eq(K.notifyKindIsWebhook('dingtalk'), true, '钉钉');
+    eq(K.notifyKindIsWebhook('feishu'), true, '飞书');
+    eq(K.notifyKindIsWebhook('wecom'), true, '企微');
+    eq(K.notifyKindIsWebhook('slack'), true, 'Slack');
+    eq(K.notifyKindIsWebhook('email'), false, '邮件不走 axios');
+    eq(K.NOTIFY_KIND_LABEL.email, '邮件（SMTP）', '邮件有中文显示名');
 });
 
-check('只有钉钉与飞书有「签名密钥」这一格可填', () => {
+check('路径里的凭据也打码：飞书 hook token 与 Slack 的 key 都不能原样到渲染层', () => {
+    eq(
+        K.maskNotifyUrl('https://open.feishu.cn/open-apis/bot/v2/hook/9f2c1a4e-7b3d-4c55-8e21-0a1b2c3d4e5f'),
+        'https://open.feishu.cn/open-apis/bot/v2/hook/9f2***',
+        '飞书 hook 段',
+    );
+    eq(
+        K.maskNotifyUrl('https://hooks.slack.com/services/EXAMPLE/EXAMPLE/EXAMPLE'),
+        'https://hooks.slack.com/services/EXAMPLE/EXAMPLE/EXAMPLE***',
+        'Slack 最后一段',
+    );
+    // 普通路径不该被误伤：段太短、带扩展名（像个文件名）都原样留着
+    eq(K.maskNotifyUrl('https://host/api/v2/send'), 'https://host/api/v2/send', '普通路径');
+    eq(K.maskNotifyUrl('https://host/files/report.json'), 'https://host/files/report.json', '带扩展名的段');
+    // 锚点后面是接口动词时不算凭据：企微真正要打码的 key 在查询串里
+    eq(
+        K.maskNotifyUrl('https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=ABC'),
+        'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=***',
+        'webhook/send 是路由不是凭据',
+    );
+    // 路径与查询串同时存在时两边都要打
+    eq(
+        K.maskNotifyUrl('https://host/hook/abcdefghijklmnop?token=SECRET&x=1'),
+        'https://host/hook/abc***?token=***&x=1',
+        '段落与查询串都打码',
+    );
+});
+
+check('只有钉钉与飞书有「签名密钥」这一格可填，邮件没有', () => {
     eq(K.notifyKindSupportsSecret('dingtalk'), true, '钉钉');
     eq(K.notifyKindSupportsSecret('feishu'), true, '飞书');
     eq(K.notifyKindSupportsSecret('wecom'), false, '企微');
     eq(K.notifyKindSupportsSecret('slack'), false, 'Slack');
     eq(K.notifyKindSupportsSecret('generic'), false, '通用');
+    eq(K.notifyKindSupportsSecret('email'), false, '邮件的密码在服务器配置里');
+});
+
+// ---------------------------------------------------------------- 邮件：服务器、收件人与失败分类
+
+check('SMTP 主机只收主机名：协议前缀、端口尾巴、用户名与无点主机都拒绝', () => {
+    eq(M.validateMailHost('smtp.example.com'), null, '正常');
+    eq(M.validateMailHost(' localhost '), null, '本机');
+    contains(M.validateMailHost(''), '不能为空', '空');
+    contains(M.validateMailHost(null), '不能为空', 'null');
+    contains(M.validateMailHost('smtp://smtp.example.com'), '前缀', '带协议');
+    contains(M.validateMailHost('smtp.example.com:465'), '端口', '带端口');
+    contains(M.validateMailHost('user@smtp.example.com'), '用户名', '带用户名');
+    contains(M.validateMailHost('smtp'), '不完整', '无点');
+    contains(M.validateMailHost('a b.com'), '空格', '空格');
+    eq(M.validateMailHost(`${'a'.repeat(249)}.com`), null, '253 字符');
+    contains(M.validateMailHost(`${'a'.repeat(250)}.com`), '过长', '254 字符');
+});
+
+check('端口是 1～65535 的整数，越界是拒绝而不是夹住', () => {
+    eq(M.validateMailPort(25), null, '25');
+    eq(M.validateMailPort(587), null, '587');
+    eq(M.validateMailPort(465), null, '465');
+    eq(M.validateMailPort(65535), null, '上边界');
+    contains(M.validateMailPort(0), '1～65535', '0');
+    contains(M.validateMailPort(65536), '1～65535', '超上限');
+    contains(M.validateMailPort(587.5), '整数', '小数');
+    contains(M.validateMailPort('587'), '整数', '字符串');
+    contains(M.validateMailPort(undefined), '整数', '缺省');
+});
+
+check('邮件地址挡住实际里最常见的配错：少 @、域名没点、双点、空格', () => {
+    eq(M.validateMailAddress('ops@corp.com'), null, '正常');
+    eq(M.validateMailAddress('ops+alerts@sub.corp.com'), null, '加号与子域');
+    eq(M.validateMailAddress(' OPS@corp.com '), null, '前后空白会被裁掉');
+    contains(M.validateMailAddress('ops.corp.com'), '@', '少 @');
+    contains(M.validateMailAddress('ops@localhost'), '缺少点', '本机域收不到信');
+    contains(M.validateMailAddress('ops@corp..com'), '域名', '连续的点');
+    contains(M.validateMailAddress('ops@.corp.com'), '域名', '以点开头');
+    contains(M.validateMailAddress('op s@corp.com'), '空格', '中间空格');
+    contains(M.validateMailAddress('a@b@corp.com'), '不像', '两个 @');
+    contains(M.validateMailAddress(`${'a'.repeat(60)}@${'b'.repeat(200)}.com`), '过长', '254 字符以上');
+});
+
+check('收件人清单：逗号/分号/空白/换行都认，按小写去重并保留第一次的写法', () => {
+    const parsed = M.parseMailRecipients('A@corp.com, b@corp.com; c@corp.com\nA@CORP.COM');
+    deepEq(parsed.to, ['A@corp.com', 'b@corp.com', 'c@corp.com'], '去重');
+    deepEq(parsed.invalid, [], '没有坏地址');
+    const mixed = M.parseMailRecipients('good@corp.com not-an-address');
+    deepEq(mixed.to, ['good@corp.com'], '好的那个留下');
+    deepEq(mixed.invalid, ['not-an-address'], '坏的那个单列');
+    eq(M.parseMailRecipients('').to.length, 0, '空串');
+    eq(M.parseMailRecipients(null).to.length, 0, 'null');
+});
+
+check('渠道的收件人这一格：空、坏地址、超过 20 个都给出具体那句话', () => {
+    eq(M.mailRecipientsProblem('ops@corp.com'), null, '一个就够');
+    contains(M.mailRecipientsProblem(''), '至少填一个', '空');
+    const bad = M.mailRecipientsProblem('nope');
+    contains(bad, '不像邮件地址', '坏地址');
+    contains(bad, 'nope', '把坏的那几个说出来');
+    const many = Array.from({length: M.MAIL_RECIPIENT_MAX + 1}, (_, index) => `u${index}@corp.com`).join(' ');
+    contains(M.mailRecipientsProblem(many), `最多 ${M.MAIL_RECIPIENT_MAX} 个`, '上限');
+});
+
+check('邮件渠道的三格事实折成一句原因，与地址坏掉落在同一格', () => {
+    eq(M.mailTargetProblem({profileProblem: null, recipients: ['a@corp.com']}), null, '能用');
+    contains(M.mailTargetProblem({profileProblem: '这台邮件服务器已经不在了', recipients: []}), '已经不在了', '服务器问题优先');
+    contains(M.mailTargetProblem({profileProblem: null, recipients: []}), '收件人是空的', '收件人为空');
+});
+
+check('邮件主题先写级别，空标题兜底，过长截到 200 字符', () => {
+    eq(M.buildMailSubject(eventOf()), '[pulsar-manager·严重] 告警：积压超阈值', '严重');
+    eq(M.buildMailSubject(eventOf({level: 'info'})), '[pulsar-manager·提示] 告警：积压超阈值', '提示');
+    eq(M.buildMailSubject(eventOf({title: '  '})), '[pulsar-manager·严重] Pulsar 通知', '空标题兜底');
+    const long = M.buildMailSubject(eventOf({title: '长'.repeat(500)}));
+    eq(long.length, M.MAIL_SUBJECT_MAX_CHARS, '截到上限');
+    eq(long.endsWith('…'), true, '带省略号');
+});
+
+check('邮件正文与群消息同一套排版，但字节预算更宽（16KB）', () => {
+    eq(M.buildMailBody(eventOf()), K.renderNotifyText(eventOf(), M.MAIL_BODY_MAX_BYTES), '与渲染一致');
+    const long = M.buildMailBody(eventOf({text: '积压'.repeat(20000)}));
+    eq(Buffer.byteLength(long, 'utf8') <= M.MAIL_BODY_MAX_BYTES, true, '不超字节');
+    eq(long.includes('\uFFFD'), false, '没有半截字符');
+    // 群消息 4KB 就截了；同样 5KB 的正文在邮件里应该完整保留
+    eq(M.buildMailBody(eventOf({text: 'x'.repeat(5000)})).includes('已截断'), false, '比群消息宽');
+});
+
+check('SMTP 失败按回话码分类，别只丢一句「发送失败」', () => {
+    eq(M.classifyMailFailure({code: 'EAUTH', message: 'Invalid login'}).category, 'auth', 'EAUTH');
+    eq(M.classifyMailFailure({message: '535 5.7.8 authentication failed'}).category, 'auth', '535');
+    eq(M.classifyMailFailure({message: '550 5.7.1 Relay access denied'}).category, 'relay', '550 relay');
+    eq(M.classifyMailFailure({message: '550 5.1.1 user unknown'}).category, 'recipient', '550 mailbox');
+    eq(M.classifyMailFailure({message: 'self-signed certificate in chain'}).category, 'tls', '自签');
+    eq(M.classifyMailFailure({message: 'getaddrinfo ENOTFOUND smtp.example.com'}).category, 'dns', 'DNS');
+    eq(M.classifyMailFailure({code: 'ECONNREFUSED', message: 'connect ECONNREFUSED'}).category, 'refused', '拒绝连接');
+    eq(M.classifyMailFailure({message: 'Connection timeout'}).category, 'timeout', '超时');
+    eq(M.classifyMailFailure({message: 'wrong version number'}).category, 'config', '加密方式不对');
+    eq(M.classifyMailFailure({message: '451 4.3.2 try again later'}).category, 'network', '临时错误');
+    eq(M.classifyMailFailure({message: 'something odd'}).category, 'network', '未命中');
+    eq(M.classifyMailFailure(null).category, 'unknown', '什么都没有');
+    contains(M.classifyMailFailure({code: 'EAUTH'}).message, '授权码', '说清该改哪一格');
+    contains(M.classifyMailFailure({message: 'self-signed certificate'}).message, '自签证书', '给出勾选项');
+});
+
+check('发件人显示串去掉名字里的尖括号与引号；用户名出界打码', () => {
+    eq(M.formatMailFrom('ops@corp.com', '值班'), '值班 <ops@corp.com>', '名字 + 地址');
+    eq(M.formatMailFrom('ops@corp.com', ''), 'ops@corp.com', '只要地址');
+    eq(M.formatMailFrom('ops@corp.com', '<>'), 'ops@corp.com', '名字被清空就只剩地址');
+    eq(M.formatMailFrom('ops@corp.com', '<evil> "x"'), 'evil x <ops@corp.com>', '不拼出假地址');
+    eq(M.maskMailUser('alice@corp.com'), 'ali***@corp.com', '邮件用户名留域名');
+    eq(M.maskMailUser('a@corp.com'), 'a***@corp.com', '短用户名');
+    eq(M.maskMailUser('ab'), '***', '两个字以内');
+    eq(M.maskMailUser('alice'), 'al***', '账号名不是邮件地址');
+    eq(M.maskMailUser(''), '', '空');
+});
+
+check('三种加密方式与默认端口只有一个出处', () => {
+    deepEq([...M.MAIL_SECURITY_KINDS], ['plain', 'starttls', 'tls'], '枚举');
+    eq(M.MAIL_DEFAULT_PORT.plain, 25, '明文');
+    eq(M.MAIL_DEFAULT_PORT.starttls, 587, 'STARTTLS');
+    eq(M.MAIL_DEFAULT_PORT.tls, 465, '隐式 TLS');
+    eq(M.isKnownMailSecurity('starttls'), true, '认识');
+    eq(M.isKnownMailSecurity('ssl'), false, '不认识');
+    eq(M.MAIL_SECURITY_LABEL.tls, 'SSL/TLS（隐式）', '界面文案');
 });
 
 // ---------------------------------------------------------------- payload 形状与签名
@@ -455,8 +640,8 @@ check('飞书没配密钥时不带 timestamp/sign；五家渠道的正文都不�
 // ---------------------------------------------------------------- 落库：两张表的形状与那几条语句
 
 const CHANNEL_COLUMNS =
-    'id, name, kind, url_enc, secret_enc, enabled, events_json, min_level, timeout_ms, ' +
-    'rate_per_minute, last_sent_at, last_error, fail_count, created_at, updated_at';
+    'id, name, kind, url_enc, secret_enc, mail_profile_id, recipients, enabled, events_json, min_level, ' +
+    'timeout_ms, rate_per_minute, last_sent_at, last_error, fail_count, created_at, updated_at';
 
 function channelRow(overrides) {
     return {
@@ -465,6 +650,8 @@ function channelRow(overrides) {
         kind: 'dingtalk',
         url_enc: 'gAAAAQ-cipher',
         secret_enc: null,
+        mail_profile_id: null,
+        recipients: '',
         enabled: 1,
         events_json: JSON.stringify(['alertFired']),
         min_level: 'warn',
@@ -473,6 +660,28 @@ function channelRow(overrides) {
         last_sent_at: null,
         last_error: null,
         fail_count: 0,
+        created_at: '2026-10-01T00:00:00.000Z',
+        updated_at: '2026-10-01T00:00:00.000Z',
+        ...overrides,
+    };
+}
+
+const MAIL_PROFILE_COLUMNS =
+    'id, name, host, port, security, username, password_enc, from_address, from_name, ' +
+    'allow_self_signed, created_at, updated_at';
+
+function mailProfileRow(overrides) {
+    return {
+        id: 'mp-1',
+        name: '公司 SMTP',
+        host: 'smtp.corp.com',
+        port: 587,
+        security: 'starttls',
+        username: 'alerts@corp.com',
+        password_enc: 'gAAAAQ-mail',
+        from_address: 'alerts@corp.com',
+        from_name: 'Pulsar',
+        allow_self_signed: 0,
         created_at: '2026-10-01T00:00:00.000Z',
         updated_at: '2026-10-01T00:00:00.000Z',
         ...overrides,
@@ -504,9 +713,19 @@ function insertChannel(database, row) {
     database
         .prepare(
             `INSERT INTO notify_channels (${CHANNEL_COLUMNS})
-             VALUES (@id, @name, @kind, @url_enc, @secret_enc, @enabled, @events_json, @min_level,
-                     @timeout_ms, @rate_per_minute, @last_sent_at, @last_error, @fail_count,
-                     @created_at, @updated_at)`,
+             VALUES (@id, @name, @kind, @url_enc, @secret_enc, @mail_profile_id, @recipients,
+                     @enabled, @events_json, @min_level, @timeout_ms, @rate_per_minute,
+                     @last_sent_at, @last_error, @fail_count, @created_at, @updated_at)`,
+        )
+        .run(row);
+}
+
+function insertMailProfile(database, row) {
+    database
+        .prepare(
+            `INSERT INTO notify_mail_profiles (${MAIL_PROFILE_COLUMNS})
+             VALUES (@id, @name, @host, @port, @security, @username, @password_enc, @from_address,
+                     @from_name, @allow_self_signed, @created_at, @updated_at)`,
         )
         .run(row);
 }
@@ -538,7 +757,35 @@ check('基线建出两张表，默认值就是服务层假设的那几个', () =
     eq(row.rate_per_minute, 20, '默认条数');
     eq(row.fail_count, 0, '默认连败 0');
     eq(row.secret_enc, null, '默认没有密钥');
+    eq(row.mail_profile_id, null, '默认不指向任何邮件服务器');
+    eq(row.recipients, '', '默认没有收件人');
     eq(row.last_error, null, '默认没有失败原因');
+    database.close();
+});
+
+check('邮件服务器表：默认 STARTTLS、不收自签证书，名字唯一', () => {
+    const database = openDatabase();
+    // 只填必填列，其余吃默认值
+    database
+        .prepare(
+            `INSERT INTO notify_mail_profiles (id, name, host, port, from_address, created_at, updated_at)
+             VALUES ('mp-min', '内网 SMTP', 'mail.corp.com', 25, 'a@corp.com', '2026-10-01', '2026-10-01')`,
+        )
+        .run();
+    const row = database.prepare('SELECT * FROM notify_mail_profiles WHERE id = ?').get('mp-min');
+    eq(row.security, 'starttls', '默认加密方式');
+    eq(row.username, '', '默认无用户名');
+    eq(row.password_enc, null, '默认无密码');
+    eq(row.from_name, '', '默认无显示名');
+    eq(row.allow_self_signed, 0, '默认校验证书');
+    insertMailProfile(database, mailProfileRow());
+    let duplicate = null;
+    try {
+        insertMailProfile(database, mailProfileRow({id: 'mp-2'}));
+    } catch (error) {
+        duplicate = error;
+    }
+    assert.ok(duplicate, '同名服务器应当被 UNIQUE 挡住');
     database.close();
 });
 
@@ -559,6 +806,7 @@ check('整行覆盖不碰 created_at，也不碰那四格运行结果', () => {
         .prepare(
             `UPDATE notify_channels
              SET name = @name, kind = @kind, url_enc = @url_enc, secret_enc = @secret_enc,
+                 mail_profile_id = @mail_profile_id, recipients = @recipients,
                  enabled = @enabled, events_json = @events_json, min_level = @min_level,
                  timeout_ms = @timeout_ms, rate_per_minute = @rate_per_minute, updated_at = @updated_at
              WHERE id = @id`,
@@ -569,9 +817,11 @@ check('整行覆盖不碰 created_at，也不碰那四格运行结果', () => {
             {
                 id: 'ch-1',
                 name: '改名了',
-                kind: 'dingtalk',
-                url_enc: 'gAAAAQ-cipher',
+                kind: 'email',
+                url_enc: '',
                 secret_enc: 'cipher-secret',
+                mail_profile_id: 'mp-1',
+                recipients: 'ops@corp.com',
                 enabled: 1,
                 events_json: JSON.stringify(['alertFired']),
                 min_level: 'warn',
@@ -582,6 +832,9 @@ check('整行覆盖不碰 created_at，也不碰那四格运行结果', () => {
         );
     const row = database.prepare('SELECT * FROM notify_channels WHERE id = ?').get('ch-1');
     eq(row.name, '改名了', '名字改了');
+    eq(row.kind, 'email', '类型改了');
+    eq(row.mail_profile_id, 'mp-1', '服务器指向改了');
+    eq(row.recipients, 'ops@corp.com', '收件人改了');
     eq(row.secret_enc, 'cipher-secret', '密钥补上了');
     eq(row.created_at, '2026-10-01T00:00:00.000Z', '创建时间没动');
     eq(row.last_sent_at, '2026-10-05T00:00:00.000Z', '最近成功时间没动');
@@ -721,6 +974,64 @@ check('CASCADE 靠 foreign_keys 开关：显式关掉就留孤行，所以主进
     off.close();
 });
 
+check('删邮件服务器不连带删渠道：mail_profile_id 刻意没有外键', () => {
+    const database = openDatabase();
+    insertMailProfile(database, mailProfileRow());
+    insertChannel(database, channelRow({kind: 'email', url_enc: '', mail_profile_id: 'mp-1', recipients: 'ops@corp.com'}));
+    database.prepare('DELETE FROM notify_mail_profiles WHERE id = ?').run('mp-1');
+    const row = database.prepare('SELECT * FROM notify_channels WHERE id = ?').get('ch-1');
+    assert.ok(row, '渠道还在');
+    eq(row.mail_profile_id, 'mp-1', '渠道仍指着那个已经不在了的服务器');
+    eq(row.recipients, 'ops@corp.com', '收件人没被动');
+    database.close();
+});
+
+check('v15 迁移：老库靠 PRAGMA 守卫补两列，新库基线已带时不会再 ALTER', () => {
+    // 模拟 v14 老库：从基线里抹掉这两列，基线重跑补不出来（CREATE TABLE IF NOT EXISTS）
+    const oldSchema = SCHEMA_SQL.replace(/^\s*mail_profile_id TEXT,\s*$/m, '').replace(
+        /^\s*recipients TEXT NOT NULL DEFAULT '',\s*$/m,
+        '',
+    );
+    const database = new DatabaseSync(':memory:');
+    database.exec('PRAGMA foreign_keys = ON');
+    database.exec(oldSchema);
+    let missing = null;
+    try {
+        database.prepare('SELECT mail_profile_id, recipients FROM notify_channels LIMIT 1').all();
+    } catch (error) {
+        missing = error;
+    }
+    assert.ok(missing, '抹掉两列之后查询应当 no such column');
+    const addMissing = () => {
+        const columns = database.prepare('PRAGMA table_info(notify_channels)').all().map(column => column.name);
+        if (!columns.includes('mail_profile_id')) {
+            database.prepare('ALTER TABLE notify_channels ADD COLUMN mail_profile_id TEXT').run();
+        }
+        if (!columns.includes('recipients')) {
+            database.prepare("ALTER TABLE notify_channels ADD COLUMN recipients TEXT NOT NULL DEFAULT ''").run();
+        }
+    };
+    addMissing();
+    eq(
+        database
+            .prepare('PRAGMA table_info(notify_channels)')
+            .all()
+            .filter(column => column.name === 'mail_profile_id' || column.name === 'recipients').length,
+        2,
+        '两列都补上了',
+    );
+    // 第二次跑（等价于新库上基线已带这两列）不能 duplicate column
+    addMissing();
+    database.close();
+
+    // 真正会执行的那段迁移必须带同样的守卫，不能裸 ALTER
+    const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'database', 'sqlite.ts'), 'utf8');
+    const block = source.slice(source.indexOf('if (from < 15)'), source.indexOf('// 每次启动都执行基线'));
+    contains(block, 'PRAGMA table_info(notify_channels)', '先查表结构');
+    contains(block, 'ADD COLUMN mail_profile_id', '补服务器列');
+    contains(block, 'ADD COLUMN recipients', '补收件人列');
+});
+
 check('基线 DDL 每次启动都重跑：再跑一遍不报错也不重复建表', () => {
     const database = openDatabase();
     insertChannel(database, channelRow());
@@ -731,7 +1042,7 @@ check('基线 DDL 每次启动都重跑：再跑一遍不报错也不重复建�
         .all()
         .map(row => row.name)
         .sort();
-    deepEq(names, ['notify_channels', 'notify_deliveries'], '两张表');
+    deepEq(names, ['notify_channels', 'notify_deliveries', 'notify_mail_profiles'], '三张表');
     database.close();
 });
 

@@ -277,6 +277,28 @@ CREATE TABLE IF NOT EXISTS inspection_schedules (
     FOREIGN KEY (cluster_id) REFERENCES clusters(id) ON DELETE CASCADE
 );
 
+-- 邮件服务器（SMTP）配置：一台服务器一行，多条邮件渠道共用它，各自只换收件人。
+-- 为什么单独一张表而不把主机账号塞进渠道行：一个团队通常只有一台能发信的 SMTP，
+-- 「值班群 A」「值班群 B」的差别只在收件人。塞进渠道行就等于把同一份密码抄 N 遍，
+-- 改一次密码要改 N 条，漏掉一条的那条渠道会在某天开始静默失败。
+-- password_enc 存密文（本机密钥库），出界只有 hasPassword；username 存原文但读取时打码。
+-- allow_self_signed 是给内网邮件服务器的：不校验服务端证书等于这条连接不防中间人，
+-- 所以它默认 0，且界面上要写明代价，而不是让人以为这只是个「连不上就勾一下」的开关。
+CREATE TABLE IF NOT EXISTS notify_mail_profiles (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    host TEXT NOT NULL,
+    port INTEGER NOT NULL,
+    security TEXT NOT NULL DEFAULT 'starttls',
+    username TEXT NOT NULL DEFAULT '',
+    password_enc TEXT,
+    from_address TEXT NOT NULL,
+    from_name TEXT NOT NULL DEFAULT '',
+    allow_self_signed INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 -- 外部通知渠道：一条渠道一行，全局（不属于某个集群），所以不按 cluster_id 建主键。
 -- url 与签名密钥存密文：这几家机器人的 key 直接写在 URL 查询串里，拿到 db 文件就等于
 -- 拿到「往值班群里发任意消息」的能力；界面读到的永远是打码后的地址。
@@ -284,12 +306,17 @@ CREATE TABLE IF NOT EXISTS inspection_schedules (
 -- 这两件事互相独立，合成一个开关就表达不出来。
 -- fail_count 与 last_error 落在渠道上：一条悄悄坏了两个星期的渠道，
 -- 在界面上和一条正常的长得一模一样，用户唯一的发现时机是那次没收到的告警。
+-- mail_profile_id 故意不建外键：删掉一台服务器不该连带删掉正在用它的几条渠道——
+-- 「渠道不见了」比「渠道指着已经没了的服务器」难查得多，后者会在投递记录里写成一句话。
 CREATE TABLE IF NOT EXISTS notify_channels (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     kind TEXT NOT NULL,
+    -- 邮件渠道没有地址，这一格存空串；服务器与收件人各走下面那两格
     url_enc TEXT NOT NULL,
     secret_enc TEXT,
+    mail_profile_id TEXT,
+    recipients TEXT NOT NULL DEFAULT '',
     enabled INTEGER NOT NULL DEFAULT 1,
     events_json TEXT NOT NULL,
     min_level TEXT NOT NULL DEFAULT 'warn',
@@ -302,8 +329,10 @@ CREATE TABLE IF NOT EXISTS notify_channels (
     updated_at TEXT NOT NULL
 );
 
--- 投递记录：每次决定（发出去、发失败、被规则挡下）都写一行。
--- 「被级别挡下」也要记：不然用户只会看到「没收到通知」，而这里其实发生过一次明确的拒绝。
+-- 投递记录：每次「发出去了 / 发失败了 / 本来该发却没发」写一行。
+-- 没订阅、低于级别线、渠道关着都不写：一次告警 × N 条渠道里大多数本来就不该收它，每格都记一行
+-- 会让这张表再也看不出「哪一条真出了问题」。规则整条在 shared/notify-channels.ts 的
+-- decideNotifyDelivery 里，改判定就改那里，别把这张表的口径写散。
 -- channel_name 是写入时的副本，改名不该改写已经发生的那些（与 alert_events 同一个理由）。
 -- 只留最近 N 条，由服务层裁剪：这张表是唯一会随告警频率一直长的表。
 CREATE TABLE IF NOT EXISTS notify_deliveries (
