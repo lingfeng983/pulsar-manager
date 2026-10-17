@@ -27,6 +27,9 @@ import type {
     NamespacePolicyClearParams,
     NamespacePolicyScopeParams,
     NamespacePolicySetParams,
+    NamespacePolicySyncApplyResult,
+    NamespacePolicySyncParams,
+    NamespacePolicySyncPlanResult,
     NamespacePolicyView,
     OperationLog,
     PeekParams,
@@ -488,6 +491,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
         get: (params: NamespacePolicyScopeParams) => ipcRenderer.invoke('namespace:policies:get', params),
         set: (params: NamespacePolicySetParams) => ipcRenderer.invoke('namespace:policy:set', params),
         clear: (params: NamespacePolicyClearParams) => ipcRenderer.invoke('namespace:policy:clear', params),
+        syncPlan: (params: NamespacePolicySyncParams) => ipcRenderer.invoke('namespace:policies:sync:plan', params),
+        syncApply: (params: NamespacePolicySyncParams) => ipcRenderer.invoke('namespace:policies:sync:apply', params),
     },
 
     // 拓扑
@@ -905,6 +910,8 @@ declare global {
                 get: (params: NamespacePolicyScopeParams) => Promise<APIResponse<NamespacePolicyView>>;
                 set: (params: NamespacePolicySetParams) => Promise<APIResponse<void>>;
                 clear: (params: NamespacePolicyClearParams) => Promise<APIResponse<void>>;
+                syncPlan: (params: NamespacePolicySyncParams) => Promise<APIResponse<NamespacePolicySyncPlanResult>>;
+                syncApply: (params: NamespacePolicySyncParams) => Promise<APIResponse<NamespacePolicySyncApplyResult>>;
             };
             topology: {
                 getClusterTopology: (

@@ -19,7 +19,8 @@ function namespaceBase(tenant: string, namespace: string): string {
 }
 
 const RETENTION_POLICIES = ['producer_request_hold', 'producer_exception', 'consumer_backlog_eviction'];
-const QUOTA_TYPES = ['destination_storage', 'message_age'];
+export const QUOTA_TYPES = ['destination_storage', 'message_age'];
+export {RETENTION_POLICIES};
 
 // broker 的 Policies 对象在键名上是混的：message_ttl_in_seconds 用下划线，
 // deduplicationEnabled 与 autoTopicCreationOverride 用驼峰，同一个对象里两种都有。
@@ -490,6 +491,94 @@ const FIELD_SPECS: Record<NamespacePolicyField, PolicyFieldSpec> = {
 // 2.x 的 kiloBitPerSec 形状不再支持（那个版本已 EOL）。
 export const POLICY_FIELDS = Object.keys(FIELD_SPECS) as NamespacePolicyField[];
 export const CLEARABLE_POLICY_FIELDS = POLICY_FIELDS.filter(field => FIELD_SPECS[field].clearable);
+
+export function isClearablePolicyField(field: NamespacePolicyField): boolean {
+    return FIELD_SPECS[field]?.clearable === true;
+}
+
+function rateValueOf(rate: NamespaceRateLimit | null, withPeriod: boolean): NamespaceRateValue | null {
+    if (!rate) {
+        return null;
+    }
+    // 限速必须整对象写回：少发一个键 broker 按 0 处理，等于把那个维度全禁。
+    // 老 broker 不返回 ratePeriodInSecond 时补 1——那正是它自己的默认周期。
+    const value: NamespaceRateValue = {msgPerPeriod: rate.msgPerPeriod, bytePerPeriod: rate.bytePerPeriod};
+    if (withPeriod) {
+        value.periodInSeconds = rate.periodInSeconds && rate.periodInSeconds > 0 ? rate.periodInSeconds : 1;
+    }
+    return value;
+}
+
+/**
+ * 把折叠视图还原成「这个字段再次写入时要传的值」，也就是 setPolicy 的入参形状；
+ * null 表示这一项在该命名空间上确实没设过。
+ *
+ * 读回来的形状与写进去的形状并不相同（限速读回来带 raw、写回去只要三个数字；
+ * 配额读回来是一个列表、写回去一次只写一条），所以比对必须比"写回去的值"，
+ * 否则读—比—写每一步都会重新发明一遍换算。
+ */
+export function policyValueOf(view: NamespacePolicyView, field: NamespacePolicyField): unknown {
+    switch (field) {
+        case 'messageTtlSeconds':
+            return view.messageTtlSeconds;
+        case 'subscriptionExpirationTimeMinutes':
+            return view.subscriptionExpirationTimeMinutes;
+        case 'deduplicationSnapshotIntervalSeconds':
+            return view.deduplicationSnapshotIntervalSeconds;
+        case 'retention':
+            // 只读出一半的保留策略不能写：POST /retention 是整体替换，
+            // 缺的那个数字补 0 会把「无限保留」变成「一条不留」。
+            if (view.retentionTimeInMinutes === null || view.retentionSizeInMB === null) {
+                return null;
+            }
+            return {timeInMinutes: view.retentionTimeInMinutes, sizeInMB: view.retentionSizeInMB};
+        case 'backlogQuota':
+            // 逐条比对由批量同步按 type 展开，这里整表返回
+            return view.backlogQuotas;
+        case 'deduplicationEnabled':
+            return view.deduplicationEnabled;
+        case 'maxProducersPerTopic':
+            return view.maxProducersPerTopic;
+        case 'maxConsumersPerTopic':
+            return view.maxConsumersPerTopic;
+        case 'maxConsumersPerSubscription':
+            return view.maxConsumersPerSubscription;
+        case 'maxUnackedMessagesPerConsumer':
+            return view.maxUnackedMessagesPerConsumer;
+        case 'maxUnackedMessagesPerSubscription':
+            return view.maxUnackedMessagesPerSubscription;
+        case 'maxSubscriptionsPerTopic':
+            return view.maxSubscriptionsPerTopic;
+        case 'maxTopicsPerNamespace':
+            return view.maxTopicsPerNamespace;
+        case 'compactionThreshold':
+            return view.compactionThreshold;
+        case 'schemaValidationEnforced':
+            return view.schemaValidationEnforced;
+        case 'allowAutoUpdateSchema':
+            return view.allowAutoUpdateSchema;
+        case 'encryptionRequired':
+            return view.encryptionRequired;
+        case 'schemaCompatibilityStrategy':
+            return view.schemaCompatibilityStrategy;
+        case 'schemaAutoUpdateStrategy':
+            return view.schemaAutoUpdateStrategy;
+        case 'dispatchRate':
+            return rateValueOf(view.dispatchRate, true);
+        case 'subscriptionDispatchRate':
+            return rateValueOf(view.subscriptionDispatchRate, true);
+        case 'replicatorDispatchRate':
+            return rateValueOf(view.replicatorDispatchRate, true);
+        case 'subscribeRate':
+            return rateValueOf(view.subscribeRate, true);
+        case 'publishRate':
+            return rateValueOf(view.publishRate, false);
+        case 'replicationClusters':
+            return view.replicationClusters;
+        default:
+            return undefined;
+    }
+}
 
 function buildRequest(field: NamespacePolicyField, value: unknown): PolicyRequest {
     const spec = FIELD_SPECS[field];

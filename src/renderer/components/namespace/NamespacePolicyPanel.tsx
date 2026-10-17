@@ -7,6 +7,7 @@ import IconButton from '../common/IconButton';
 import type {NamespaceBacklogQuota, NamespacePolicyField, NamespacePolicyView} from '../../types';
 import {NOT_SET, POLICY_GROUPS, PolicyRow, isClearable} from './policyMeta';
 import PolicyEditModal from './PolicyEditModal';
+import PolicySyncModal from './PolicySyncModal';
 
 interface NamespacePolicyPanelProps {
     clusterId: string;
@@ -66,6 +67,7 @@ const NamespacePolicyPanel: React.FC<NamespacePolicyPanelProps> = ({clusterId, t
     const [error, setError] = useState<string | null>(null);
     const [editing, setEditing] = useState<PolicyRow | null>(null);
     const [rawOpen, setRawOpen] = useState(false);
+    const [syncOpen, setSyncOpen] = useState(false);
     const [busy, setBusy] = useState<string | null>(null);
     const loadedRef = useRef(false);
     const requestIdRef = useRef(0);
@@ -155,6 +157,9 @@ const NamespacePolicyPanel: React.FC<NamespacePolicyPanelProps> = ({clusterId, t
                     <Space size={4}>
                         <Button size="small" onClick={() => setRawOpen(true)} disabled={!view}>
                             原始 JSON
+                        </Button>
+                        <Button size="small" disabled={!view} onClick={() => setSyncOpen(true)}>
+                            同步到其他命名空间
                         </Button>
                         <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => void load()}>
                             刷新
@@ -258,6 +263,15 @@ const NamespacePolicyPanel: React.FC<NamespacePolicyPanelProps> = ({clusterId, t
                     clusterOptions={clusterOptions}
                     onClose={() => setEditing(null)}
                     onSaved={load}
+                />
+            ) : null}
+
+            {syncOpen && view ? (
+                <PolicySyncModal
+                    clusterId={clusterId}
+                    source={{tenant, namespace}}
+                    onClose={() => setSyncOpen(false)}
+                    onApplied={() => void load()}
                 />
             ) : null}
 

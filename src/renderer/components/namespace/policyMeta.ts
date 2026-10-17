@@ -420,3 +420,16 @@ export const POLICY_GROUPS: {title: string; rows: PolicyRow[]}[] = [
 export function isClearable(view: NamespacePolicyView, field: NamespacePolicyField): boolean {
     return view.clearableFields.includes(field);
 }
+
+// 差异表按字段找回那一行的渲染器：同步预览要同时画出「目标当前值」与「同步后的值」，
+// 两边的文案都得由这一行自己出——在表里再抄一遍单位，早晚和面板上的对不上。
+export const POLICY_ROW_BY_FIELD: Map<NamespacePolicyField, PolicyRow> = new Map(
+    POLICY_GROUPS.flatMap(group => group.rows)
+        .filter(row => !!row.field)
+        .map(row => [row.field as NamespacePolicyField, row]),
+);
+
+// 单个字段的人话名字，供只拿到 field 的地方（差异表、结果表）兜底
+export function policyFieldLabel(field: NamespacePolicyField): string {
+    return POLICY_ROW_BY_FIELD.get(field)?.label ?? field;
+}

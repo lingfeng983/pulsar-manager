@@ -28,6 +28,7 @@ import {SERVICE_URL_PATTERN, WEB_URL_PATTERN} from '../services/app-config';
 import {PulsarAdminClient, clientManager} from '../services/pulsar-admin';
 import {condenseErrorText} from '../services/http-client';
 import {POLICY_FIELDS} from '../services/namespace-policy-api';
+import {NAMESPACE_SYNC_MAX_TARGETS} from '../services/namespace-policy-sync';
 import type {NamespacePolicyField} from '../../shared/types';
 import {sshTunnelManager, type TunnelEndpoints, type TunnelTargets} from '../services/ssh-tunnel';
 import {createLogger} from '../utils/logger';
@@ -543,6 +544,23 @@ export const NamespacePolicyClearSchema = NamespacePolicyScopeSchema.extend({
     field: NamespacePolicyFieldSchema,
     // 清除积压配额必须点名删哪一条；其余字段忽略这个键
     quotaType: z.string().trim().max(64).optional(),
+});
+
+// ========== 命名空间策略批量同步 ==========
+
+const NamespacePolicySyncScopeSchema = z.object({
+    tenant: TenantSchema,
+    namespace: NamespaceSchema,
+});
+
+// 目标数量与字段数量都在参数校验阶段就限住：一次同步的请求数是
+// 目标数 ×（6 次读 + 所选字段数的写），放到几百就是几百上千次 admin 请求，
+// 而这些请求全部共用同一个 broker 的请求队列。上限数字与主进程编排层同源。
+export const NamespacePolicySyncSchema = z.object({
+    clusterId: ClusterIdSchema,
+    source: NamespacePolicySyncScopeSchema,
+    targets: z.array(NamespacePolicySyncScopeSchema).min(1).max(NAMESPACE_SYNC_MAX_TARGETS),
+    fields: z.array(NamespacePolicyFieldSchema).min(1).max(POLICY_FIELDS.length),
 });
 
 // partitions = 0 表示非分区 topic：这两条路径在 Admin API 里是不同的端点，

@@ -1241,6 +1241,77 @@ export interface NamespacePolicyClearParams extends NamespacePolicyScopeParams {
     quotaType?: string;
 }
 
+// ========== 命名空间策略批量同步 ==========
+
+// 一次同步动作。skip 也要单独列出来：预览差异的价值就在于「哪些不会变、为什么不会变」，
+// 只列会改的项会让人误以为其余项被静默清掉了。
+export type NamespacePolicySyncAction = 'set' | 'clear' | 'skip';
+
+export interface NamespacePolicySyncDelta {
+    field: NamespacePolicyField;
+    action: NamespacePolicySyncAction;
+    // backlogQuota 一个端点下挂多条配额，逐条比对，所以差异也逐条
+    quotaType?: string;
+    // set 的载荷：形状与 namespace:policy:set 的 value 完全一致，执行阶段原样转发
+    value?: unknown;
+    // skip 必填：说明这一项为什么不动
+    reason?: string;
+}
+
+export interface NamespacePolicySyncScope {
+    tenant: string;
+    namespace: string;
+}
+
+export interface NamespacePolicySyncParams {
+    clusterId: string;
+    source: NamespacePolicySyncScope;
+    targets: NamespacePolicySyncScope[];
+    fields: NamespacePolicyField[];
+}
+
+// 一个目标命名空间的差异。error 非空表示这一份读不出来（老 broker 缺端点、
+// 权限不足、命名空间被并发删除都会走到这里），其余目标照常继续算。
+// view 是给界面算「当前值 → 同步后」两边文案用的，不带 raw：差异结论来自主进程，
+// 界面只负责把值翻译成人话，不负责判断要不要改。
+export interface NamespacePolicySyncTargetPlan {
+    tenant: string;
+    namespace: string;
+    error?: string;
+    view?: NamespacePolicyView;
+    deltas: NamespacePolicySyncDelta[];
+}
+
+export interface NamespacePolicySyncPlanResult {
+    source: NamespacePolicySyncScope;
+    sourceError?: string;
+    sourceView?: NamespacePolicyView;
+    targets: NamespacePolicySyncTargetPlan[];
+}
+
+export interface NamespacePolicySyncItemResult {
+    field: NamespacePolicyField;
+    action: NamespacePolicySyncAction;
+    quotaType?: string;
+    ok: boolean;
+    // skip 时是「为什么没动」，失败时是校验或 broker 的错误原文
+    message?: string;
+}
+
+export interface NamespacePolicySyncTargetResult {
+    tenant: string;
+    namespace: string;
+    // 整个目标失败（读不出策略）时记在这里，不伪装成某一项失败
+    error?: string;
+    items: NamespacePolicySyncItemResult[];
+}
+
+export interface NamespacePolicySyncApplyResult {
+    targets: NamespacePolicySyncTargetResult[];
+    succeeded: number;
+    failed: number;
+}
+
 export interface ExportedSshConfig {
     host: string;
     port: number;

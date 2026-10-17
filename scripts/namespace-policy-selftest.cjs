@@ -5,6 +5,12 @@
 const {
     NamespacePolicyAPI,
 } = require('../dist/src/main/services/namespace-policy-api.js');
+const {
+    NAMESPACE_SYNC_MAX_TARGETS,
+    applyNamespacePolicySync,
+    planNamespacePolicySync,
+    planPolicySync,
+} = require('../dist/src/main/services/namespace-policy-sync.js');
 const {Semaphore, NotFoundError} = require('../dist/src/main/services/http-client.js');
 
 let failures = 0;
@@ -73,6 +79,87 @@ function writeApi() {
     const http = okHttp();
     return {api: new NamespacePolicyAPI(http, new Semaphore(5)), http};
 }
+
+// ========== 批量同步用的假客户端与假视图 ==========
+
+// 折叠视图的骨架：全部字段按「未设置」起，用例只覆盖自己关心的那几个键。
+// 手写整份视图比从真实 Policies 折出来更容易加字段，也更难被折叠层的改动悄悄带跑。
+const BASE_VIEW = {
+    messageTtlSeconds: null,
+    subscriptionExpirationTimeMinutes: null,
+    retentionTimeInMinutes: null,
+    retentionSizeInMB: null,
+    deduplicationEnabled: null,
+    deduplicationSnapshotIntervalSeconds: null,
+    backlogQuotas: [],
+    maxProducersPerTopic: null,
+    maxConsumersPerTopic: null,
+    maxConsumersPerSubscription: null,
+    maxUnackedMessagesPerConsumer: null,
+    maxUnackedMessagesPerSubscription: null,
+    maxSubscriptionsPerTopic: null,
+    maxTopicsPerNamespace: null,
+    compactionThreshold: null,
+    schemaValidationEnforced: null,
+    schemaCompatibilityStrategy: null,
+    schemaAutoUpdateStrategy: null,
+    allowAutoUpdateSchema: null,
+    encryptionRequired: null,
+    subscriptionTypesEnabled: [],
+    subscriptionAuthMode: null,
+    replicationClusters: [],
+    allowedClusters: [],
+    resourceGroupName: null,
+    dispatchRate: null,
+    subscriptionDispatchRate: null,
+    subscribeRate: null,
+    publishRate: null,
+    replicatorDispatchRate: null,
+    clearableFields: [],
+    raw: {},
+};
+
+const view = extra => ({...BASE_VIEW, ...extra});
+
+// 记录每一次写入：批量同步最容易出的错是「写到了别的命名空间」和「该中止时继续写」，
+// 这两件事都只能从写入序列里看出来。
+function fakeClient(views, options = {}) {
+    const writes = [];
+    const fail = (kind, key, field) => {
+        const list = options[kind] || [];
+        return list.some(item => item.key === key && (item.field === undefined || item.field === field));
+    };
+    return {
+        writes,
+        async getPolicies(tenant, namespace) {
+            const key = `${tenant}/${namespace}`;
+            if (!views[key]) {
+                throw new Error(`读不到 ${key}`);
+            }
+            if (fail('failRead', key)) {
+                throw new Error(`读取失败：${key}`);
+            }
+            return views[key];
+        },
+        async setNamespacePolicy(tenant, namespace, field, value) {
+            const key = `${tenant}/${namespace}`;
+            if (fail('failWrite', key, field)) {
+                throw new Error(`broker 拒绝：${field}`);
+            }
+            writes.push({kind: 'set', key, field, value});
+        },
+        async clearNamespacePolicy(tenant, namespace, field, quotaType) {
+            const key = `${tenant}/${namespace}`;
+            if (fail('failWrite', key, field)) {
+                throw new Error(`broker 拒绝：${field}`);
+            }
+            writes.push({kind: 'clear', key, field, quotaType});
+        },
+    };
+}
+
+const scope = (tenant, namespace) => ({tenant, namespace});
+const KEYS = list => list.map(item => item.key);
 
 // 一份尽量像真实 broker 响应的 Policies：下划线与驼峰混用，
 // 0 与 null 都得有，retention 用 -1 表示无限。
@@ -375,6 +462,273 @@ const READ_ROUTES = {
         assert(view.clearableFields.includes('retention'), 'retention 应可清除');
         assert(!view.clearableFields.includes('encryptionRequired'), 'encryptionRequired 没有 DELETE 端点');
         assert(!view.clearableFields.includes('replicationClusters'), '复制集群没有清除端点');
+    });
+
+    // ========== 批量同步：差异计算 ==========
+
+    await check('值相同的字段不产生差异，数组按集合比较', async () => {
+        const source = view({
+            messageTtlSeconds: 60,
+            // 顺序不同不算差异：broker 把 replication_clusters 当集合用
+            replicationClusters: ['cluster-b', 'cluster-a'],
+            // 周期缺失时按 1 归一，否则每次预览都会报一条"要改"
+            dispatchRate: {msgPerPeriod: 1000, bytePerPeriod: -1, periodInSeconds: null, raw: {}},
+        });
+        const target = view({
+            messageTtlSeconds: 60,
+            replicationClusters: ['cluster-a', 'cluster-b'],
+            dispatchRate: {msgPerPeriod: 1000, bytePerPeriod: -1, periodInSeconds: 1, raw: {}},
+        });
+        const deltas = planPolicySync(source, target, [
+            'messageTtlSeconds',
+            'replicationClusters',
+            'dispatchRate',
+        ]);
+        assert(deltas.length === 0, `相同值不该有差异：${JSON.stringify(deltas)}`);
+    });
+
+    await check('发布限速没有周期字段，比对时不能凭空补一个', async () => {
+        const base = {msgPerPeriod: 100, bytePerPeriod: 2097152, raw: {}};
+        const deltas = planPolicySync(
+            view({publishRate: {...base, periodInSeconds: 30}}),
+            view({publishRate: {...base, periodInSeconds: 1}}),
+            ['publishRate'],
+        );
+        assert(deltas.length === 0, `publishRate 的周期在 broker 侧不存在：${JSON.stringify(deltas)}`);
+    });
+
+    await check('源未设置：能清除的清除，不能清除的说清原因', async () => {
+        const source = view();
+        const target = view({retentionTimeInMinutes: 60, retentionSizeInMB: 128, encryptionRequired: true});
+        const deltas = planPolicySync(source, target, ['retention', 'encryptionRequired']);
+        // 字段表顺序在前面的排在前面
+        assert(deltas.length === 2, `应各出一条，实际 ${JSON.stringify(deltas)}`);
+        assert(deltas[0].field === 'retention' && deltas[0].action === 'clear', `retention 应清除：${JSON.stringify(deltas[0])}`);
+        assert(deltas[1].field === 'encryptionRequired' && deltas[1].action === 'skip', `无 DELETE 端点应跳过：${JSON.stringify(deltas[1])}`);
+        assert(/没有清除端点/.test(deltas[1].reason || ''), `跳过要带原因，实际：${deltas[1].reason}`);
+    });
+
+    await check('差异顺序按字段表走，不受调用方传参顺序影响', async () => {
+        const source = view({messageTtlSeconds: 60, deduplicationEnabled: true});
+        const fields = ['deduplicationEnabled', 'messageTtlSeconds'];
+        const one = planPolicySync(source, view(), fields);
+        const other = planPolicySync(source, view(), [...fields].reverse());
+        assert(
+            JSON.stringify(one.map(item => item.field)) === JSON.stringify(['messageTtlSeconds', 'deduplicationEnabled']),
+            `字段顺序应稳定：${JSON.stringify(one.map(item => item.field))}`,
+        );
+        assert(JSON.stringify(one) === JSON.stringify(other), '同一份配置换个传参顺序，预览与日志就该对得上');
+    });
+
+    await check('积压配额逐条比对：源有目标无要写，目标多出要清', async () => {
+        const source = view({
+            backlogQuotas: [{type: 'message_age', limitSizeBytes: 0, limitTimeSeconds: 600, policy: 'consumer_backlog_eviction'}],
+        });
+        const target = view({
+            backlogQuotas: [{type: 'destination_storage', limitSizeBytes: 1024, limitTimeSeconds: 0, policy: 'producer_exception'}],
+        });
+        const deltas = planPolicySync(source, target, ['backlogQuota']);
+        assert(deltas.length === 2, `应一条 set 一条 clear，实际 ${JSON.stringify(deltas)}`);
+        assert(
+            deltas[0].action === 'set' && deltas[0].quotaType === 'message_age',
+            `源上的配额应写入：${JSON.stringify(deltas[0])}`,
+        );
+        assert(
+            deltas[0].value.limitTimeSeconds === 600 && deltas[0].value.type === 'message_age',
+            `写入值要能直接喂给 setPolicy：${JSON.stringify(deltas[0].value)}`,
+        );
+        assert(
+            deltas[1].action === 'clear' && deltas[1].quotaType === 'destination_storage',
+            `目标上多出的配额应清除（同步语义是等于源）：${JSON.stringify(deltas[1])}`,
+        );
+    });
+
+    await check('积压配额里我们不认识的枚举跳过写入，但清除照常', async () => {
+        // 写入前有本地校验，未知枚举必定被自己拦下；清除不校验枚举，
+        // 而且那本来就是 broker 自己报出来的类型，不该由我们判断它存不存在。
+        const source = view({
+            backlogQuotas: [{type: 'some_future_type', limitSizeBytes: 10, limitTimeSeconds: 0, policy: 'producer_request_hold'}],
+        });
+        const target = view({
+            backlogQuotas: [{type: 'another_future_type', limitSizeBytes: 20, limitTimeSeconds: 0, policy: 'producer_request_hold'}],
+        });
+        const deltas = planPolicySync(source, target, ['backlogQuota']);
+        assert(deltas.length === 2, `实际 ${JSON.stringify(deltas)}`);
+        assert(deltas[0].action === 'skip' && /枚举/.test(deltas[0].reason || ''), `未知类型应跳过并说明：${JSON.stringify(deltas[0])}`);
+        assert(deltas[1].action === 'clear' && deltas[1].quotaType === 'another_future_type', `未知类型仍应清除：${JSON.stringify(deltas[1])}`);
+
+        const badPolicy = view({
+            backlogQuotas: [{type: 'message_age', limitSizeBytes: 0, limitTimeSeconds: 60, policy: 'some_future_policy'}],
+        });
+        const more = planPolicySync(badPolicy, view(), ['backlogQuota']);
+        assert(more[0].action === 'skip' && /超限策略/.test(more[0].reason || ''), `未知策略应跳过：${JSON.stringify(more[0])}`);
+    });
+
+    await check('只读出一半的保留策略不参与同步', async () => {
+        // POST /retention 是整体替换，缺的那个数字补 0 会把无限保留变成一条不留
+        const deltas = planPolicySync(view({retentionTimeInMinutes: -1}), view({retentionSizeInMB: 512}), ['retention']);
+        assert(deltas.length === 0, `源上读不全就该什么都不做：${JSON.stringify(deltas)}`);
+    });
+
+    // ========== 批量同步：预览与执行 ==========
+
+    const SRC = scope('public', 'src');
+    const T1 = scope('public', 't1');
+    const T2 = scope('public', 't2');
+    const params = (targets, fields) => ({clusterId: 'c', source: SRC, targets, fields});
+    const FULL = view({
+        messageTtlSeconds: 60,
+        retentionTimeInMinutes: -1,
+        retentionSizeInMB: 512,
+        deduplicationEnabled: true,
+    });
+
+    await check('目标清单去重、剔除源本身、上限拦截', async () => {
+        const onlySource = fakeClient({'public/src': FULL});
+        let message = '';
+        try {
+            await planNamespacePolicySync(onlySource, params([scope('public', 'src')], ['messageTtlSeconds']));
+        } catch (error) {
+            message = error.message;
+        }
+        assert(/不能就是源本身/.test(message), `同步到自己身上应被拦下，实际：${message}`);
+        assert(onlySource.writes.length === 0, '拦下后不该有任何写入');
+
+        const dup = fakeClient({'public/src': FULL, 'public/t1': view()});
+        const plan = await planNamespacePolicySync(dup, params([T1, T1, scope('public', 'src')], ['messageTtlSeconds']));
+        assert(plan.targets.length === 1, `重复目标要去重，实际 ${plan.targets.length}`);
+
+        const many = Array.from({length: NAMESPACE_SYNC_MAX_TARGETS + 1}, (_, index) =>
+            scope('public', `n${index}`),
+        );
+        const capped = fakeClient({'public/src': FULL});
+        let capMessage = '';
+        try {
+            await applyNamespacePolicySync(capped, params(many, ['messageTtlSeconds']));
+        } catch (error) {
+            capMessage = error.message;
+        }
+        assert(/一次最多同步/.test(capMessage), `超出上限应拦下，实际：${capMessage}`);
+        assert(capped.writes.length === 0, '拦下后不该有任何写入');
+    });
+
+    await check('预览：源读不通返回结构化错误，不抛异常', async () => {
+        const client = fakeClient({'public/t1': view()});
+        const plan = await planNamespacePolicySync(client, params([T1], ['messageTtlSeconds']));
+        assert(/读不到 public\/src/.test(plan.sourceError || ''), `应带来源命名空间的读失败：${plan.sourceError}`);
+        assert(plan.targets.length === 0, '源读不通时不该给出任何目标差异');
+        assert(client.writes.length === 0, '预览不该有任何写入');
+    });
+
+    await check('预览：目标读不通只标错自己，不拖累别的目标', async () => {
+        const client = fakeClient({'public/src': FULL, 'public/t1': view(), 'public/t2': view()});
+        const plan = await planNamespacePolicySync(client, params([T1, scope('public', 'missing')], ['messageTtlSeconds']));
+        const failed = plan.targets.find(target => target.tenant === 'public' && target.namespace === 'missing');
+        assert(failed && /读不到/.test(failed.error || ''), `读不通的目标应带 error：${JSON.stringify(failed)}`);
+        assert(failed.deltas.length === 0, '读不通的目标不该给出差异');
+        const ok = plan.targets.find(target => target.namespace === 't1');
+        assert(ok.deltas.length === 1 && ok.deltas[0].action === 'set', `别的目标照常算差异：${JSON.stringify(ok)}`);
+    });
+
+    await check('预览回来的视图剥掉 raw，整份 Policies 不过 IPC', async () => {
+        const client = fakeClient({
+            'public/src': view({raw: {huge: 'x'}, dispatchRate: {msgPerPeriod: 1, bytePerPeriod: 1, periodInSeconds: 1, raw: {huge: 'y'}}}),
+            'public/t1': view({raw: {huge: 'z'}}),
+        });
+        const plan = await planNamespacePolicySync(client, params([T1], ['messageTtlSeconds']));
+        assert(Object.keys(plan.sourceView.raw).length === 0, '源视图的 raw 应被剥掉');
+        assert(Object.keys(plan.sourceView.dispatchRate.raw).length === 0, '限速的 raw 应被剥掉');
+        assert(Object.keys(plan.targets[0].view.raw).length === 0, '目标视图的 raw 应被剥掉');
+        assert(plan.sourceView.messageTtlSeconds === 1 || plan.sourceView.messageTtlSeconds === null, '折叠字段本身要留着');
+    });
+
+    await check('执行：写到正确的命名空间，失败即中止本目标', async () => {
+        const client = fakeClient(
+            {'public/src': FULL, 'public/t1': view(), 'public/t2': view({retentionTimeInMinutes: -1, retentionSizeInMB: 512})},
+            // t1 的第二项（retention）失败，第三项（deduplication）不该再发
+            {failWrite: [{key: 'public/t1', field: 'retention'}]},
+        );
+        const result = await applyNamespacePolicySync(client, params([T1, T2], ['messageTtlSeconds', 'retention', 'deduplicationEnabled']));
+        assert(
+            result.targets.every(target => ['public/t1', 'public/t2'].includes(`${target.tenant}/${target.namespace}`)),
+            `写到了别的命名空间：${JSON.stringify(result.targets.map(t => `${t.tenant}/${t.namespace}`))}`,
+        );
+        const t1 = result.targets.find(target => target.namespace === 't1');
+        assert(
+            t1.items.map(item => `${item.field}:${item.ok}`).join(',') === 'messageTtlSeconds:true,retention:false',
+            `失败项之后不该继续执行，也不该假装执行过：${JSON.stringify(t1.items)}`,
+        );
+        assert(/broker 拒绝/.test(t1.items[1].message || ''), `失败项要带上 broker 的话：${JSON.stringify(t1.items[1])}`);
+        const t2 = result.targets.find(target => target.namespace === 't2');
+        assert(t2.items.length === 2, `t2 的 retention 与源相同，不该有第三项：${JSON.stringify(t2.items)}`);
+        assert(
+            client.writes.filter(item => item.key === 'public/t2' && item.field === 'retention').length === 0,
+            '相同的值不该下发',
+        );
+        assert(client.writes.every(item => item.key !== 'public/src'), '源命名空间不该被写');
+        // 下发的是折叠视图还原出来的值，不是视图本身
+        const ttl = client.writes.find(item => item.key === 'public/t2' && item.field === 'messageTtlSeconds');
+        assert(ttl.kind === 'set' && ttl.value === 60, `TTL 应写成裸数字 60：${JSON.stringify(ttl)}`);
+        const dedup = client.writes.find(item => item.key === 'public/t2' && item.field === 'deduplicationEnabled');
+        assert(dedup.value === true, `去重应写成布尔 true：${JSON.stringify(dedup)}`);
+        // t1 成功 1 项、失败 1 项；t2 成功 2 项
+        assert(result.succeeded === 3 && result.failed === 1, `计数不对：成功 ${result.succeeded}，失败 ${result.failed}`);
+    });
+
+    await check('执行：跳过项如实列出且不进成败计数', async () => {
+        const client = fakeClient({
+            'public/src': view(),
+            'public/t1': view({encryptionRequired: true, messageTtlSeconds: 30}),
+        });
+        const result = await applyNamespacePolicySync(client, params([T1], ['encryptionRequired', 'messageTtlSeconds']));
+        const items = result.targets[0].items;
+        assert(items.length === 2, `跳过也要让用户看见：${JSON.stringify(items)}`);
+        const skipped = items.find(item => item.action === 'skip');
+        assert(skipped.field === 'encryptionRequired' && skipped.ok === true, `跳过不是失败：${JSON.stringify(skipped)}`);
+        assert(/没有清除端点/.test(skipped.message || ''), `跳过应带原因：${JSON.stringify(skipped)}`);
+        assert(result.succeeded === 1 && result.failed === 0, `跳过不该计入成败：${result.succeeded}/${result.failed}`);
+        assert(KEYS(client.writes).every(key => key === 'public/t1'), `写入落错地方：${KEYS(client.writes).join(',')}`);
+        // 另一项是 messageTtl：源没设过、目标设成 30，同步语义下这是「清除回默认」而不是「写成 0」
+        assert(client.writes.length === 1 && client.writes[0].kind === 'clear', `只该有一次清除调用：${JSON.stringify(client.writes)}`);
+        assert(client.writes[0].field === 'messageTtlSeconds', `清除的字段不对：${JSON.stringify(client.writes[0])}`);
+    });
+
+    await check('执行：清除走 clear，并带上配额类型', async () => {
+        const client = fakeClient({
+            'public/src': view(),
+            'public/t1': view({
+                backlogQuotas: [{type: 'message_age', limitSizeBytes: 0, limitTimeSeconds: 600, policy: 'consumer_backlog_eviction'}],
+            }),
+        });
+        const result = await applyNamespacePolicySync(client, params([T1], ['backlogQuota']));
+        assert(result.succeeded === 1 && result.failed === 0, JSON.stringify(result.targets[0].items));
+        const write = client.writes[0];
+        assert(write.kind === 'clear' && write.field === 'backlogQuota' && write.quotaType === 'message_age', `清除配额要点名类型：${JSON.stringify(write)}`);
+    });
+
+    await check('执行：目标读不通时一个字段都不动', async () => {
+        const client = fakeClient(
+            {'public/src': FULL, 'public/t1': view(), 'public/t2': view()},
+            {failRead: [{key: 'public/t2'}]},
+        );
+        const result = await applyNamespacePolicySync(client, params([T1, T2], ['messageTtlSeconds']));
+        const t2 = result.targets.find(target => target.namespace === 't2');
+        assert(/读取目标命名空间策略失败/.test(t2.error || ''), `读不通的目标应带 error：${t2.error}`);
+        assert(t2.items.length === 0, '读不通的目标不该有执行记录');
+        assert(KEYS(client.writes).every(key => key === 'public/t1'), `读不通还在写别的命名空间：${KEYS(client.writes).join(',')}`);
+        assert(result.succeeded === 1 && result.failed === 0, `计数不对：${result.succeeded}/${result.failed}`);
+    });
+
+    await check('执行：源读不通直接抛错（没有可比依据）', async () => {
+        const client = fakeClient({'public/t1': view()});
+        let message = '';
+        try {
+            await applyNamespacePolicySync(client, params([T1], ['messageTtlSeconds']));
+        } catch (error) {
+            message = error.message;
+        }
+        assert(/读取源命名空间 public\/src 失败/.test(message), `实际：${message}`);
+        assert(client.writes.length === 0, '源读不通时不该有任何写入');
     });
 
     console.log(failures === 0 ? 'ALL PASS' : `${failures} FAILED`);
