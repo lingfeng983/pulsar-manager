@@ -1,4 +1,4 @@
-import React, {useCallback, useEffect, useMemo, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {Alert, Button, InputNumber, Modal, Select, Space, Switch, Table, Tag, Typography, message} from 'antd';
 import type {ColumnsType} from 'antd/es/table';
 import {
@@ -179,6 +179,13 @@ const ClusterInspection: React.FC<Props> = ({clusterId: propClusterId}) => {
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
+    // 页签是常驻的，切集群时上一个集群的请求还在飞。历史、口径、巡检结果都带集群身份，
+    // 落地前必须核对「发起时那台」还是不是「现在这台」，否则慢一步的旧响应会把新集群的
+    // 屏幕覆盖成旧集群的报告。runToken 另外负责同一台集群上连续点两次「开始巡检」的场景。
+    const clusterIdRef = useRef(clusterId);
+    clusterIdRef.current = clusterId;
+    const runToken = useRef(0);
+
     useEffect(() => {
         if (!clusters.length) {
             void loadClusters();
@@ -204,6 +211,9 @@ const ClusterInspection: React.FC<Props> = ({clusterId: propClusterId}) => {
             return;
         }
         const response = await window.electronAPI.inspection.history({clusterId: targetClusterId});
+        if (clusterIdRef.current !== targetClusterId) {
+            return;
+        }
         setHistory(response.success && response.data ? response.data : []);
     }, []);
 
@@ -213,6 +223,9 @@ const ClusterInspection: React.FC<Props> = ({clusterId: propClusterId}) => {
             return;
         }
         const response = await window.electronAPI.inspection.schedule.get({clusterId: targetClusterId});
+        if (clusterIdRef.current !== targetClusterId) {
+            return;
+        }
         setSchedule(response.success ? (response.data ?? null) : null);
     }, []);
 
@@ -225,19 +238,28 @@ const ClusterInspection: React.FC<Props> = ({clusterId: propClusterId}) => {
         setReport(null);
         setMarkdown('');
         setDiff(null);
+        setError(null);
         setCaliberOpen(false);
         setScheduleOpen(false);
+        // 旧集群那次巡检还没回来的话，它的 loading 与结果都属于上一页，不能继续算在这台上
+        runToken.current += 1;
+        setLoading(false);
         if (!clusterId) {
             setProfile(null);
+            setMaxNamespaces(INSPECTION_DEFAULTS.maxNamespaces);
+            setMaxTopics(INSPECTION_DEFAULTS.maxTopics);
             return;
         }
         void window.electronAPI.inspection.profile.get({clusterId}).then(response => {
+            if (clusterIdRef.current !== clusterId) {
+                return;
+            }
             const next = response.success ? (response.data ?? null) : null;
             setProfile(next);
-            if (next) {
-                setMaxNamespaces(next.maxNamespaces);
-                setMaxTopics(next.maxTopics);
-            }
+            // 没存过口径的集群必须落回默认值：沿用上一台集群的上限会让表单显示 200，
+            // 实际这次巡检用的是上一台的 50，且用户以为自己看到的就是生效值。
+            setMaxNamespaces(next?.maxNamespaces ?? INSPECTION_DEFAULTS.maxNamespaces);
+            setMaxTopics(next?.maxTopics ?? INSPECTION_DEFAULTS.maxTopics);
         });
     }, [clusterId, loadHistory, loadSchedule]);
 
@@ -272,10 +294,15 @@ const ClusterInspection: React.FC<Props> = ({clusterId: propClusterId}) => {
         if (!clusterId) {
             return;
         }
+        const token = ++runToken.current;
+        const isCurrent = () => token === runToken.current && clusterIdRef.current === clusterId;
         setLoading(true);
         setError(null);
         try {
             const response = await window.electronAPI.inspection.run({clusterId, maxNamespaces, maxTopics});
+            if (!isCurrent()) {
+                return;
+            }
             if (response.success && response.data) {
                 setReport(response.data.report);
                 setMarkdown(response.data.markdown);
@@ -289,12 +316,17 @@ const ClusterInspection: React.FC<Props> = ({clusterId: propClusterId}) => {
                 setError(response.error || '巡检失败');
             }
         } catch (error) {
-            setReport(null);
-            setMarkdown('');
-            setDiff(null);
-            setError(error instanceof Error ? error.message : '巡检失败');
+            if (isCurrent()) {
+                setReport(null);
+                setMarkdown('');
+                setDiff(null);
+                setError(error instanceof Error ? error.message : '巡检失败');
+            }
         } finally {
-            setLoading(false);
+            // 被新一次巡检顶替时不能清 loading：新那次还在跑，清掉按钮就又能点了
+            if (token === runToken.current) {
+                setLoading(false);
+            }
         }
     }, [clusterId, maxNamespaces, maxTopics, loadHistory]);
 
@@ -414,7 +446,12 @@ const ClusterInspection: React.FC<Props> = ({clusterId: propClusterId}) => {
             okText: '清空',
             okButtonProps: {danger: true},
             onOk: async () => {
-                await window.electronAPI.inspection.clear({clusterId});
+                const response = await window.electronAPI.inspection.clear({clusterId});
+                if (!response.success) {
+                    // 清空失败还把列表抹掉，用户会以为已经删了；下次打开又冒出来
+                    message.error(response.error || '清空巡检历史失败');
+                    return;
+                }
                 setHistory([]);
             },
         });
@@ -785,7 +822,11 @@ const ClusterInspection: React.FC<Props> = ({clusterId: propClusterId}) => {
                             {schedule.lastRunAt ? schedule.lastRunAt.slice(0, 19).replace('T', ' ') : '还没跑过'}
                             {' · '}下次大约：
                             {(() => {
-                                const next = nextInspectionRunAt(schedule.lastRunAt, schedule.intervalMinutes);
+                                const next = nextInspectionRunAt(
+                                    schedule.lastRunAt,
+                                    schedule.intervalMinutes,
+                                    Date.now(),
+                                );
                                 return next ? new Date(next).toLocaleString() : '待首次';
                             })()}
                         </Typography.Text>

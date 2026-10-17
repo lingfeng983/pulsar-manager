@@ -226,7 +226,9 @@ const MessageListView: React.FC<MessageListViewProps> = ({
             dataSource={messages}
             columns={resizableColumns}
             components={components}
-            rowKey={(record, index) => `${record.messageId}-${index}`}
+            // messageId 在一条 topic 内唯一，是这里唯一稳定的行标识。拼上 index 的话，
+            // 新消息从头部插入会把所有旧行的 index 推后，整张表重挂（展开态与滚动位置都会丢）。
+            rowKey="messageId"
             pagination={false}
             size="small"
             scroll={{x: 'max-content'}}

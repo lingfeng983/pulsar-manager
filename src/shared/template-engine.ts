@@ -101,7 +101,14 @@ function createRng(seed?: number): Rng {
     return {
         next: unit,
         int(min: number, max: number): number {
-            return Math.ceil(min) + Math.floor(unit() * (Math.floor(max) - Math.ceil(min) + 1));
+            // 边界先向内取整：int(0.1, 0.2) 这种区间里没有任何整数，
+            // 按旧的 ceil(min)+floor(span) 会一路算出 1，直接越出用户写的上界。
+            const lo = Math.ceil(min);
+            const hi = Math.floor(max);
+            if (lo > hi) {
+                throw new Error(`int 的范围 ${min} ~ ${max} 里没有整数`);
+            }
+            return lo + Math.floor(unit() * (hi - lo + 1));
         },
         pick<T>(items: T[]): T {
             return items[Math.min(items.length - 1, Math.floor(unit() * items.length))];
@@ -126,6 +133,13 @@ function formatDate(ms: number, pattern: string): string {
         SSS: pad(date.getMilliseconds(), 3),
     };
     return pattern.replace(/YYYY|MM|DD|HH|mm|ss|SSS/g, token => tokens[token]);
+}
+
+// 纯日期按本地时区解释：Date.parse('2024-01-01') 是 UTC 午夜，而 formatDate
+// 用本地 getter，UTC 以西的时区会把这一天显示成前一天。
+function parseDateArg(raw: string): number {
+    const text = raw.replace(/'/g, '').trim();
+    return Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(text) ? `${text}T00:00:00` : text);
 }
 
 // ---------- 表达式求值 ----------
@@ -247,7 +261,10 @@ function evaluate(
                 throw new Error(`float 的范围反了：${min} > ${max}`);
             }
             const decimals = Math.max(0, Math.min(12, Math.round(toNumber(args[2], 2, 'float'))));
-            return Number((min + rng.next() * (max - min)).toFixed(decimals));
+            // toFixed 会四舍五入，结果可能比 max 大一点点（0~0.29 保留 1 位得到 0.3）。
+            // 报文里的区间通常就是业务允许范围，超出上界比少一位小数更难解释。
+            const rounded = Number((min + rng.next() * (max - min)).toFixed(decimals));
+            return Math.min(max, Math.max(min, rounded));
         }
         case 'bool':
             return rng.next() < 0.5;
@@ -291,8 +308,8 @@ function evaluate(
             return formatDate((options.now ?? Date.now()) + offset, pattern);
         }
         case 'date': {
-            const from = Date.parse((args[0] || '').replace(/'/g, ''));
-            const to = Date.parse((args[1] || '').replace(/'/g, ''));
+            const from = parseDateArg(args[0] || '');
+            const to = parseDateArg(args[1] || '');
             if (!Number.isFinite(from) || !Number.isFinite(to) || from > to) {
                 throw new Error(`date 的区间无效：${args[0] || '空'} ~ ${args[1] || '空'}`);
             }
@@ -598,8 +615,11 @@ export function validateTemplate(body: string, variables: TemplateVariable[]): V
                 // 校验阶段不真解析（否则每敲一个键预览就跳一次），所以 count 允许是
                 // 整数，也允许是"整体一个占位符"的字符串——是否解析成整数由解析阶段管。
                 const count = spec.count;
+                // 只认真正的数字字面量：Number() 会把 null/true/'' 都转成整数，
+                // 而负数与超大 count 会在展开时才变成海量消息。
                 const countOk =
-                    Number.isInteger(Number(count)) || (typeof count === 'string' && WHOLE_PLACEHOLDER.test(count));
+                    (typeof count === 'number' && Number.isInteger(count) && count >= 0 && count <= 10000) ||
+                    (typeof count === 'string' && WHOLE_PLACEHOLDER.test(count));
                 if (!countOk) {
                     return `${where || ''}$each 的 count 要是 0~10000 的整数或一个占位符`;
                 }

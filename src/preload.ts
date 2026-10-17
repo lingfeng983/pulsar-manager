@@ -654,8 +654,8 @@ declare global {
             cluster: {
                 list: () => Promise<APIResponse<ClusterConfig[]>>;
                 checkStatus: () => Promise<APIResponse<ClusterConfig[]>>;
-                add: (config: ClusterConfigDraft) => Promise<APIResponse<{id: string}>>;
-                update: (id: string, config: ClusterConfigDraft) => Promise<APIResponse<void>>;
+                add: (config: ClusterConfigDraft) => Promise<APIResponse<ClusterConfig>>;
+                update: (id: string, config: ClusterConfigDraft) => Promise<APIResponse<ClusterConfig>>;
                 delete: (id: string) => Promise<APIResponse<void>>;
                 testConnection: (
                     config: ClusterConfigDraft,

@@ -2,6 +2,7 @@ import net from 'node:net';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto';
 import {Client} from 'ssh2';
 import type {ConnectConfig} from 'ssh2';
 import {decrypt} from './encryption';
@@ -38,6 +39,10 @@ interface ActiveTunnel {
 
 function sameTargets(a: TunnelTargets, b: TunnelTargets): boolean {
     return a.remoteHost === b.remoteHost && a.adminPort === b.adminPort && a.brokerPort === b.brokerPort;
+}
+
+function hostKeyFingerprint(key: Buffer): string {
+    return `SHA256:${crypto.createHash('sha256').update(key).digest('base64')}`;
 }
 
 // 隧道记录里的凭据是 AES 密文，只有这里解密，且只用于建立 SSH 连接。
@@ -187,6 +192,8 @@ export class SshTunnelManager {
 
         const ssh = new Client();
         const listeners: net.Server[] = [];
+        // 握手回调里记下、握手成功后落库，所以声明必须在 Promise 之外
+        let observedFingerprint: string | null = null;
         try {
             await new Promise<void>((resolve, reject) => {
                 const fail = (error: unknown) => {
@@ -206,8 +213,33 @@ export class SshTunnelManager {
                 ssh.once('ready', onReady);
                 ssh.once('error', onError);
                 ssh.once('close', onClose);
-                ssh.connect(toConnectConfig(record));
+                const connectConfig = toConnectConfig(record);
+                // 首次连接采用 TOFU：记下主机公钥指纹，之后只接受同一把钥匙。
+                // 不校验的话，任何能劫持 host:port 的一方都能接管 SSH 握手并拿到
+                // 密码/私钥，再把隧道里的 Admin 流量全部解密。
+                connectConfig.hostVerifier = (key: Buffer) => {
+                    observedFingerprint = hostKeyFingerprint(key);
+                    if (!record.host_fingerprint) {
+                        return true;
+                    }
+                    if (record.host_fingerprint !== observedFingerprint) {
+                        log.error(
+                            `tunnel ${record.id} host key mismatch for ${record.host}: ` +
+                                `expected ${record.host_fingerprint}, got ${observedFingerprint}`,
+                        );
+                        return false;
+                    }
+                    return true;
+                };
+                ssh.connect(connectConfig);
             });
+
+            if (!record.host_fingerprint && observedFingerprint) {
+                // 握手成功才落库：失败的连接不应该把一把没验证过的钥匙变成信任锚。
+                // 连接用的 record 是调用方传进来的快照，下一次 ensure 会读到新值。
+                writeTunnel(record.id, {host_fingerprint: observedFingerprint});
+                log.info(`tunnel ${record.id} first trust for ${record.host}: ${observedFingerprint}`);
+            }
 
             const adminListener = await listenLocal(socket =>
                 forwardThrough(ssh, targets.remoteHost, targets.adminPort, socket),

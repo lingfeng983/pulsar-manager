@@ -12,6 +12,12 @@ export interface SchemaIssue {
 
 const MAX_ISSUES = 10;
 
+export interface SchemaValidationResult {
+    issues: SchemaIssue[];
+    // 超过 MAX_ISSUES 时为 true：此时 issues.length 只是显示上限，不是问题总数
+    truncated: boolean;
+}
+
 type JsonType = 'object' | 'array' | 'string' | 'number' | 'integer' | 'boolean' | 'null';
 
 const KNOWN_TYPES: JsonType[] = ['object', 'array', 'string', 'number', 'integer', 'boolean', 'null'];
@@ -77,16 +83,20 @@ function sortDeep(value: unknown): unknown {
  * 校验器遇到不认识的关键字一律跳过（不是放行整个节点，是不判这条规则），
  * 这样"校验器版本旧于 schema"最多是少判一项，而不是把合法报文判死。
  */
-export function validateJsonSchema(value: unknown, schema: unknown): SchemaIssue[] {
+export function validateJsonSchema(value: unknown, schema: unknown): SchemaValidationResult {
     const issues: SchemaIssue[] = [];
+    let truncated = false;
     const push = (path: string, message: string): void => {
         if (issues.length < MAX_ISSUES) {
             issues.push({path, message});
+        } else {
+            truncated = true;
         }
     };
 
     const walk = (node: unknown, rule: unknown, path: string): void => {
-        if (issues.length >= MAX_ISSUES || rule === true || rule === undefined) {
+        // 已经确认还有更多问题时就不必继续走：结论只需要「不止 10 处」
+        if (truncated || rule === true || rule === undefined) {
             return;
         }
         if (rule === false) {
@@ -148,7 +158,7 @@ export function validateJsonSchema(value: unknown, schema: unknown): SchemaIssue
     };
 
     walk(value, schema, '');
-    return issues;
+    return {issues, truncated};
 }
 
 /** schemaJson 列里存的原文 → 可用的 schema 值。保存与发送前都先过这道闸。 */
@@ -166,9 +176,13 @@ export function parseSchemaJson(raw: string): {ok: true; schema: unknown} | {ok:
 }
 
 /** 把校验结论压成一句能进失败列表/错误提示的话；界面不再逐条拼。 */
-export function formatSchemaIssues(issues: SchemaIssue[]): string {
+export function formatSchemaIssues(result: SchemaValidationResult): string {
+    const {issues, truncated} = result;
     const describe = (issue: SchemaIssue): string =>
         issue.path === '' ? `根对象：${issue.message}` : `${issue.path}：${issue.message}`;
     const shown = issues.slice(0, 3).map(describe).join('；');
+    if (truncated) {
+        return `schema 校验不通过：${shown}（仅显示前 ${issues.length} 处，还有更多）`;
+    }
     return issues.length > 3 ? `schema 校验不通过：${shown}（共 ${issues.length} 处）` : `schema 校验不通过：${shown}`;
 }

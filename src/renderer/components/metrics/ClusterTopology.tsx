@@ -209,9 +209,10 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId}) => {
         (
             data: ClusterTopologyPayload,
             withPartitions: boolean,
-        ): {nodes: TopologyGraphNode[]; edges: TopologyGraphEdge[]} => {
+        ): {nodes: TopologyGraphNode[]; edges: TopologyGraphEdge[]; truncated: boolean} => {
             const nodes: TopologyGraphNode[] = [];
             const edges: TopologyGraphEdge[] = [];
+            let truncated = false;
 
             data.brokers?.forEach(broker => {
                 nodes.push({id: broker.name, name: broker.name, type: 'broker', clusterId});
@@ -254,7 +255,7 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId}) => {
                 }
                 for (const partitionUri of topic.partitionNames) {
                     if (partitionCount >= MAX_PARTITION_NODES) {
-                        setTruncatedPartitions(true);
+                        truncated = true;
                         break;
                     }
                     partitionCount += 1;
@@ -273,7 +274,7 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId}) => {
                 }
             });
 
-            return {nodes, edges};
+            return {nodes, edges, truncated};
         },
         [clusterId],
     );
@@ -345,12 +346,14 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId}) => {
             }
 
             if (response.success && response.data) {
-                const {nodes, edges} = transformTopologyData(response.data, showPartitions);
+                const {nodes, edges, truncated} = transformTopologyData(response.data, showPartitions);
                 setRawNodes(nodes);
                 setRawEdges(edges);
                 setOwnershipSource(response.data.ownershipSource);
                 setPartialError(null);
-                setTruncatedPartitions(false);
+                // 截断标志必须来自这一次转换的结果：转换函数内部先置 true、
+                // 调用方紧接着又无条件置 false 的话，那条「仅展示前 N 个」永远不会出现
+                setTruncatedPartitions(truncated);
                 setStats({
                     clusters: 0,
                     brokers: nodes.filter(n => n.type === 'broker').length,

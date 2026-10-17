@@ -184,7 +184,10 @@ export function mailTargetProblem(facts: MailTargetFacts): string | null {
 export function buildMailSubject(event: NotifyEvent): string {
     const head = event.title.trim() || 'Pulsar 通知';
     const subject = `[pulsar-manager·${NOTIFY_LEVEL_LABEL[event.level]}] ${head}`;
-    return subject.length > MAIL_SUBJECT_MAX_CHARS ? `${subject.slice(0, MAIL_SUBJECT_MAX_CHARS - 1)}…` : subject;
+    // 按码点而不是 UTF-16 单元截断：标题里有 emoji 时，slice 可能正好劈开代理对，
+    // 收件箱里会显示成一个替换字符。
+    const chars = Array.from(subject);
+    return chars.length > MAIL_SUBJECT_MAX_CHARS ? `${chars.slice(0, MAIL_SUBJECT_MAX_CHARS - 1).join('')}…` : subject;
 }
 
 /** 正文：与群消息同一套排版（标题、正文、来源、时间），只是字节预算更宽。 */

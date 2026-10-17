@@ -144,8 +144,8 @@ function buildSchemaGate(template: MessageTemplateBody): ((text: string) => stri
         } catch {
             return 'schema 校验不通过：解析后的正文不是合法 JSON，无法对照 schema';
         }
-        const issues = validateJsonSchema(payload, schema);
-        return issues.length > 0 ? formatSchemaIssues(issues) : null;
+        const result = validateJsonSchema(payload, schema);
+        return result.issues.length > 0 ? formatSchemaIssues(result) : null;
     };
 }
 

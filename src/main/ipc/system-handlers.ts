@@ -13,6 +13,7 @@ import {
     ensureDbInitialized,
     formatError,
     registerRawHandler,
+    rememberPickedPackage,
     establishTunnel,
     establishK8sForward,
     sshTunnelManager,
@@ -258,6 +259,9 @@ export function registerSystemHandlers() {
                         `${Math.round(ARCHIVE_MAX_BYTES / 1024 / 1024)}MB：更大的包请先放到 worker 取到的地址`,
                 };
             }
+            // 记进白名单：worker:create 只接受这里返回过的路径，
+            // 渲染层不能自己拼一个路径让主进程去读
+            rememberPickedPackage(picked);
             return {success: true, data: {path: picked, name: basename(picked), size: stat.size}};
         } catch (error) {
             log.error('file:pickArchive failed', formatError(error));

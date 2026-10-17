@@ -93,6 +93,10 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
     // 中途推送就漏掉了（和消息浏览器同一个理由）。
     const sessionsRef = useRef<ProducerSessionInfo[]>([]);
     sessionsRef.current = sessions;
+    // 本页签实例的归属标识。同一 topic 可能同时开着两个页签，主进程的会话表
+    // 只按 cluster + topic 记录；没有这一格，A 页签会把 B 页签的连接认领过来，
+    // 关掉 A 时连带把 B 正在用的 producer 停掉。
+    const ownerId = useRef(`pw-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`).current;
 
     const templateBody = useMemo(
         () => ({
@@ -164,6 +168,10 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
                 } else {
                     setError(response.error || '重发失败');
                 }
+            } catch (resendError) {
+                // IPC 本身抛错（主进程崩溃、通道未注册）时没有 response 可判，
+                // 只留 finally 会让按钮转完一圈然后什么都不说。
+                setError(`重发失败：${resendError instanceof Error ? resendError.message : String(resendError)}`);
             } finally {
                 setResendingId(null);
             }
@@ -252,7 +260,9 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
                 if (cancelled || !response.success) {
                     return;
                 }
-                const mine = (response.data || []).filter(item => item.topicUri === topicUri);
+                const mine = (response.data || []).filter(
+                    item => item.topicUri === topicUri && item.ownerId === ownerId,
+                );
                 setSessions(current => {
                     const known = new Set(current.map(item => item.sessionId));
                     const added = mine.filter(item => !known.has(item.sessionId));
@@ -266,9 +276,10 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
         return () => {
             cancelled = true;
         };
-    }, [clusterId, topicUri]);
+    }, [clusterId, topicUri, ownerId]);
 
     // 关页签即断连接：主进程不会自己收，留着下次进来还是"已有会话"。
+    // 只停自己认领的这批——sessions 从认领到新建都带着 ownerId。
     useEffect(
         () => () => {
             for (const session of sessionsRef.current) {
@@ -335,6 +346,7 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
                 topic,
                 persistent,
                 options,
+                ownerId,
             });
             if (response.success && response.data) {
                 setSessions(current => [...current, response.data as ProducerSessionInfo]);
@@ -362,14 +374,25 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
     };
 
     const stopSession = async (sessionId: string) => {
-        setSessions(current => current.filter(item => item.sessionId !== sessionId));
+        // 先停主进程再摘卡片：失败时把卡片留着，用户还能再点一次。
+        // 反过来先摘的话，stop 失败后那条 producer 还连着，界面却没有任何入口
+        // 能再断开它（"幽灵连接"），只能靠关整个页签或重启应用。
         try {
             const response = await window.electronAPI.producer.stop(sessionId);
-            if (!response.success) {
-                message.warning(response.error || '断开失败');
+            if (response.success) {
+                setSessions(current => current.filter(item => item.sessionId !== sessionId));
+                // 终态统计帧随后还会到一帧，卡片没了就别再留着"上一轮 N 条"
+                setFlowStats(current => {
+                    const {[sessionId]: _gone, ...rest} = current;
+                    return rest;
+                });
+            } else {
+                message.warning(response.error || '断开失败，连接可能仍在，可再次点击断开');
             }
-        } catch {
-            // 会话此时多半已经自行结束（网络断、集群被删），界面已经移除就不再报错
+        } catch (error) {
+            message.error(
+                `断开失败，连接可能仍在，可再次点击断开：${error instanceof Error ? error.message : String(error)}`,
+            );
         }
     };
 

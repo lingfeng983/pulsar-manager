@@ -125,6 +125,20 @@ const AlertCenter: React.FC = () => {
         [visibleEvents],
     );
 
+    // 过滤条件一变，被隐藏的行不该继续算在「选中 N 条」里：否则点「删除选中」
+    // 会删掉屏幕上根本看不见的事件，而用户只核对过当前这一屏。
+    // 同一条 effect 也负责在刷新之后剔除已经恢复/消失的行。
+    useEffect(() => {
+        setSelected(current => {
+            if (current.length === 0) {
+                return current;
+            }
+            const selectable = new Set(selectableFiring.map(event => event.id));
+            const next = current.filter(id => selectable.has(id));
+            return next.length === current.length ? current : next;
+        });
+    }, [selectableFiring]);
+
     const openCreate = () => {
         setEditing(null);
         setModalOpen(true);

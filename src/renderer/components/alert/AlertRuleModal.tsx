@@ -1,4 +1,4 @@
-import React, {useCallback, useEffect, useMemo} from 'react';
+import React, {useCallback, useEffect, useMemo, useRef} from 'react';
 import {Alert, Col, Form, Input, InputNumber, Modal, Radio, Row, Select, Switch} from 'antd';
 import {
     ALERT_COMPARATORS,
@@ -140,11 +140,20 @@ const AlertRuleModal: React.FC<AlertRuleModalProps> = ({open, clusters, rule, sa
         error: string | null;
     }>({tenants: [], namespaces: [], topics: [], error: null});
 
-    // 每次打开都重算初值：上一次留下的选择不能带进这一条规则的表单
+    // 每次打开都重算初值：上一次留下的选择不能带进这一条规则的表单。
+    // 只认「打开」这一刻，不跟着 clusters 的引用变：集群状态轮询会每隔几秒
+    // 重建一次数组，跟着它重算就会把用户正在填的租户/命名空间清掉。
+    const initializedFor = useRef<string | null>(null);
     useEffect(() => {
         if (!open) {
+            initializedFor.current = null;
             return;
         }
+        const key = rule?.id ?? 'new';
+        if (initializedFor.current === key) {
+            return;
+        }
+        initializedFor.current = key;
         const next = initialForm(rule, clusters);
         form.setFieldsValue(next);
         // 编辑已有规则时先按行上的定位取一次候选，新建则等用户选集群
@@ -261,8 +270,13 @@ const AlertRuleModal: React.FC<AlertRuleModalProps> = ({open, clusters, rule, sa
                             // 换口径要重置定位：从 Topic 切回命名空间却留着 topic 名，
                             // 存进去就是"命名空间口径带着 topic"的坏规则
                             const next = event.target.value as AlertScope;
+                            // 集群口径没有存储量。这个指标在下拉里已经消失，但值还挂在
+                            // 表单里，不主动换掉的话点保存才会被主进程拒掉，用户只看到「保存失败」
+                            const currentMetric = form.getFieldValue('metric') as AlertMetricKey | undefined;
                             form.setFieldsValue({
                                 scope: next,
+                                metric:
+                                    next === 'cluster' && currentMetric === 'storageSize' ? 'backlog' : currentMetric,
                                 tenant: next === 'cluster' ? '' : (form.getFieldValue('tenant') ?? ''),
                                 namespace: next === 'cluster' ? '' : (form.getFieldValue('namespace') ?? ''),
                                 topic: '',

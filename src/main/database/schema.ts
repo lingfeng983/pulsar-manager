@@ -39,6 +39,9 @@ CREATE TABLE IF NOT EXISTS ssh_tunnels (
     remote_host TEXT,
     remote_admin_port INTEGER DEFAULT 8080,
     remote_broker_port INTEGER DEFAULT 6650,
+    -- 首次连接时记录的主机公钥指纹（SHA256:base64）。留空表示还没信任过，
+    -- 下一次连接会写入；已有值时指纹不一致就拒绝连接，防止中间人替换主机。
+    host_fingerprint TEXT,
     status TEXT DEFAULT 'disconnected',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL

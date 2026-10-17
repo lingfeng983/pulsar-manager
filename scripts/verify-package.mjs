@@ -42,8 +42,8 @@ const EXECUTABLES = {
     linux: ['pulsar-manager', 'Pulsar Manager'],
 };
 
-/** 从 app.asar 头部读出真实的 package.json 版本。 */
-function readAsarVersion(asarPath) {
+/** 从 app.asar 头部读出真实的 package.json 与文件清单。 */
+function readAsarInfo(asarPath) {
     const fd = fs.openSync(asarPath, 'r');
     try {
         const head = Buffer.alloc(16);
@@ -57,10 +57,25 @@ function readAsarVersion(asarPath) {
         if (!entry) return null;
         const pkgBuf = Buffer.alloc(entry.size);
         fs.readSync(fd, pkgBuf, 0, entry.size, 8 + headerSize + Number(entry.offset));
-        return JSON.parse(pkgBuf.toString('utf8')).version || null;
+        return {pkg: JSON.parse(pkgBuf.toString('utf8')), header};
     } finally {
         fs.closeSync(fd);
     }
+}
+
+/**
+ * 按 asar 头部的目录树确认某个文件真的被打进去了。
+ * 只看 package.json.version 是不够的：写到一半的 asar 可以带着正确的 package.json，
+ * 却没有 main 入口或 preload，装出来就是一点击就退出的空壳。
+ */
+function asarHasFile(header, relativePath) {
+    let node = header;
+    for (const segment of relativePath.split('/').filter(Boolean)) {
+        node = node?.files?.[segment];
+        if (!node) return false;
+    }
+    // 目录节点会带 files，文件节点带 size/offset
+    return typeof node.size === 'number' && !node.files;
 }
 
 const problems = [];
@@ -141,9 +156,27 @@ if (!unpackedDir) {
         fail('缺少 resources/app.asar');
     } else {
         try {
-            const packaged = readAsarVersion(asarPath);
-            if (packaged !== sourceVersion) {
-                fail(`app.asar 里是 ${packaged}，源码是 ${sourceVersion}——打进去的是上一代 dist`);
+            const info = readAsarInfo(asarPath);
+            if (!info) {
+                fail('app.asar 里没有 package.json');
+            } else {
+                const packaged = info.pkg.version;
+                if (packaged !== sourceVersion) {
+                    fail(`app.asar 里是 ${packaged}，源码是 ${sourceVersion}——打进去的是上一代 dist`);
+                }
+                const entry = typeof info.pkg.main === 'string' ? info.pkg.main.replace(/\\/g, '/') : '';
+                const requiredEntries = [
+                    entry,
+                    'dist/preload.js',
+                    // 渲染层入口：只有主进程与 preload、没有页面时窗口会白屏，
+                    // 而安装包本身看起来完全正常
+                    'dist/renderer/index.html',
+                ].filter(Boolean);
+                for (const relative of requiredEntries) {
+                    if (!asarHasFile(info.header, relative)) {
+                        fail(`app.asar 缺少入口文件 ${relative}——产物是被文件锁截断的半成品`);
+                    }
+                }
             }
         } catch (error) {
             fail(`app.asar 解析失败：${error.message}`);

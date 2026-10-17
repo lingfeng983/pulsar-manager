@@ -151,8 +151,9 @@ const BenchmarkModal: React.FC<BenchmarkModalProps> = ({open, onClose}) => {
         loadNamespaces(clusterId, tenant)
             .then(items => {
                 if (generation !== generationRef.current.namespaces) return;
-                // 命名空间可能带 "tenant/ns" 前缀，只显示末段并保持与加载参数一致
-                setNamespaces(items.map(item => item.split('/').pop() || item));
+                // 服务层已去掉 "tenant/" 前缀；命名空间本身可能是分层的 ("a/b")，
+                // 取末段会让压测落到错误的命名空间上。
+                setNamespaces(items);
             })
             .catch(error => {
                 if (generation !== generationRef.current.namespaces) return;

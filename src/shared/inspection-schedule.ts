@@ -72,8 +72,12 @@ export function isInspectionDue(args: {nowMs: number; lastRunAt: string | null; 
     return args.nowMs - last >= args.intervalMinutes * 60_000;
 }
 
-/** 下一次大约什么时候跑；没有上次运行时间时返回 null（界面说「待首次」而不是造一个时间）。 */
-export function nextInspectionRunAt(lastRunAt: string | null, intervalMinutes: number): number | null {
+/**
+ * 下一次大约什么时候跑；没有上次运行时间时返回 null（界面说「待首次」而不是造一个时间）。
+ * 传了 nowMs 时，已过期的那一轮按「现在」算——否则界面会把一个几小时前的时间
+ * 显示成「下次大约」。
+ */
+export function nextInspectionRunAt(lastRunAt: string | null, intervalMinutes: number, nowMs?: number): number | null {
     if (!lastRunAt) {
         return null;
     }
@@ -81,7 +85,8 @@ export function nextInspectionRunAt(lastRunAt: string | null, intervalMinutes: n
     if (!Number.isFinite(last)) {
         return null;
     }
-    return last + intervalMinutes * 60_000;
+    const next = last + intervalMinutes * 60_000;
+    return nowMs === undefined ? next : Math.max(next, nowMs);
 }
 
 /**

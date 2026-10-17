@@ -1,4 +1,4 @@
-import React, {useCallback, useEffect, useMemo, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {Alert, Button, Card, Modal, Select, Space, Switch, Table, Tag, Typography, message} from 'antd';
 import StateBlock from '../common/StateBlock';
 import {useClusterStore} from '../../store/cluster';
@@ -61,6 +61,14 @@ const TopicPolicyDiffModal: React.FC<TopicPolicyDiffModalProps> = ({clusterId, b
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [onlyDiff, setOnlyDiff] = useState(true);
+
+    // 换对端时让在飞的那次对比作废：表格标题换成新对端之后，旧响应落进来
+    // 会把「新对端的差异」显示成旧对端的内容，接下来的同步就照错的清单走了。
+    const diffToken = useRef(0);
+    useEffect(() => {
+        diffToken.current += 1;
+        setLoading(false);
+    }, [peerClusterId, peerTenant, peerNamespace, peerTopic]);
 
     useEffect(() => {
         if (clusters.length === 0) {
@@ -143,6 +151,8 @@ const TopicPolicyDiffModal: React.FC<TopicPolicyDiffModalProps> = ({clusterId, b
         if (!peer) {
             return;
         }
+        const token = ++diffToken.current;
+        const isCurrent = () => token === diffToken.current;
         setLoading(true);
         setError(null);
         setRows(null);
@@ -151,6 +161,9 @@ const TopicPolicyDiffModal: React.FC<TopicPolicyDiffModalProps> = ({clusterId, b
                 window.electronAPI.topicPolicy.get({clusterId, ...base}),
                 window.electronAPI.topicPolicy.get({clusterId: peerClusterId, ...peer}),
             ]);
+            if (!isCurrent()) {
+                return;
+            }
             if (!baseResponse.success || !baseResponse.data) {
                 setError(`读基准 topic 失败：${baseResponse.error || '未知原因'}`);
                 return;
@@ -160,8 +173,14 @@ const TopicPolicyDiffModal: React.FC<TopicPolicyDiffModalProps> = ({clusterId, b
                 return;
             }
             setRows(buildRows(baseResponse.data, peerResponse.data));
+        } catch (err) {
+            if (isCurrent()) {
+                setError(err instanceof Error ? err.message : String(err));
+            }
         } finally {
-            setLoading(false);
+            if (isCurrent()) {
+                setLoading(false);
+            }
         }
     }, [base, clusterId, peer, peerClusterId]);
 

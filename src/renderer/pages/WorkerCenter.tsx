@@ -1,4 +1,4 @@
-import React, {useCallback, useEffect, useMemo, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
     Alert,
     Button,
@@ -173,6 +173,13 @@ const WorkerCenter: React.FC<Props> = ({clusterId: propClusterId, tenant: propTe
     const [triggerTopic, setTriggerTopic] = useState('');
     const [triggerData, setTriggerData] = useState('');
 
+    // 页面常驻，切集群/命名空间时上一次列表请求可能还在飞。refresh 里会连打两三个 IPC，
+    // 慢一步的旧响应能把新作用域的表覆盖回去（标题写着 B、行里全是 A 的函数）。
+    // scopeRef 与 refreshToken 分别拦住「作用域变了」与「同一作用域又点了一次刷新」。
+    const scopeRef = useRef({clusterId, tenant, namespace, kind});
+    scopeRef.current = {clusterId, tenant, namespace, kind};
+    const refreshToken = useRef(0);
+
     useEffect(() => {
         if (!clusters.length) {
             void loadClusters();
@@ -251,7 +258,13 @@ const WorkerCenter: React.FC<Props> = ({clusterId: propClusterId, tenant: propTe
     const loadBuiltins = useCallback(async (targetCluster: string, targetKind: PulsarResourceKind) => {
         try {
             const response = await window.electronAPI.worker.listBuiltins(targetCluster, targetKind);
-            if (response.success && response.data) {
+            // 内置清单也是按集群 + 类型取的：换到别的命名空间不影响，换了集群就必须丢
+            if (
+                response.success &&
+                response.data &&
+                scopeRef.current.clusterId === targetCluster &&
+                scopeRef.current.kind === targetKind
+            ) {
                 setBuiltins(response.data);
             }
         } catch {
@@ -263,10 +276,21 @@ const WorkerCenter: React.FC<Props> = ({clusterId: propClusterId, tenant: propTe
         if (!clusterId || !tenant || !namespace) {
             return;
         }
+        const token = ++refreshToken.current;
+        const scope = {clusterId, tenant, namespace, kind};
+        const isCurrent = () =>
+            token === refreshToken.current &&
+            scopeRef.current.clusterId === scope.clusterId &&
+            scopeRef.current.tenant === scope.tenant &&
+            scopeRef.current.namespace === scope.namespace &&
+            scopeRef.current.kind === scope.kind;
         setLoading(true);
         setError(null);
         try {
             const stateResponse = await window.electronAPI.worker.getState(clusterId);
+            if (!isCurrent()) {
+                return;
+            }
             if (!stateResponse.success || !stateResponse.data) {
                 setError(stateResponse.error || '无法读取 Function Worker 状态');
                 setWorker(null);
@@ -284,6 +308,9 @@ const WorkerCenter: React.FC<Props> = ({clusterId: propClusterId, tenant: propTe
                 window.electronAPI.worker.listItems({clusterId, kind, tenant, namespace}),
                 loadBuiltins(clusterId, kind),
             ]);
+            if (!isCurrent()) {
+                return;
+            }
             if (itemsResponse.success) {
                 setItems(itemsResponse.data || []);
             } else {
@@ -291,9 +318,14 @@ const WorkerCenter: React.FC<Props> = ({clusterId: propClusterId, tenant: propTe
                 setItems([]);
             }
         } catch (err) {
-            setError((err as Error).message);
+            if (isCurrent()) {
+                setError((err as Error).message);
+            }
         } finally {
-            setLoading(false);
+            // 被新一次刷新顶替时不能清 loading：新那次还在飞
+            if (token === refreshToken.current) {
+                setLoading(false);
+            }
         }
     }, [clusterId, kind, namespace, tenant, loadBuiltins]);
 
@@ -316,7 +348,11 @@ const WorkerCenter: React.FC<Props> = ({clusterId: propClusterId, tenant: propTe
             if (!response.success || !response.data) {
                 return;
             }
-            setItems(list => list.map(entry => (itemKey(entry) === itemKey(item) ? response.data! : entry)));
+            if (scopeRef.current.clusterId !== clusterId) {
+                return;
+            }
+            const refreshed = response.data;
+            setItems(list => list.map(entry => (itemKey(entry) === itemKey(item) ? refreshed : entry)));
         },
         [clusterId],
     );

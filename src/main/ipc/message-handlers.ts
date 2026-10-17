@@ -1,4 +1,5 @@
 import {
+    buildConnectionConfig,
     ConsumeStartSchema,
     MessageSendSchema,
     PeekSchema,
@@ -74,11 +75,28 @@ export function registerMessageHandlers() {
     );
 
     // 偷看：一次性返回几条内容，不建会话、不确认、原订阅游标纹丝不动。
-    registerNativeHandler(
+    // 先确认订阅存在再挂临时消费者：native subscribe 对不存在的订阅会自动创建，
+    // 且建在 Earliest——用户只是看一眼，却在集群上留下一个从最早位置开始的订阅。
+    registerClientHandler(
         'messages:peek',
         PeekSchema,
         ([params]) => params,
-        (config, input: PeekParams) => nativeClientManager.peekMessages(input.clusterId, config, input),
+        async (client, input: PeekParams) => {
+            const subscriptions = await client.getSubscriptions(
+                input.tenant,
+                input.namespace,
+                input.topic,
+                input.persistent,
+            );
+            if (!subscriptions.includes(input.subscription)) {
+                throw new Error(`订阅 ${input.subscription} 不存在；偷看不会新建订阅，请先确认名称`);
+            }
+            const config = await buildConnectionConfig(input.clusterId);
+            if (!config) {
+                throw new Error('Cluster not found');
+            }
+            return nativeClientManager.peekMessages(input.clusterId, config, input);
+        },
     );
 
     // 停止只需要会话 id，不需要集群连接；会话可能早已因出错自行结束，所以回 stopped 而不是报错。

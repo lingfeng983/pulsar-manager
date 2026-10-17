@@ -43,13 +43,13 @@ export async function sendNotifyRequest(request: NotifyRequest, timeoutMs: numbe
         const location = typeof response.headers?.location === 'string' ? response.headers.location : undefined;
         // 3xx 与 4xx/5xx 走同一个分类入口：状态码到结论的规则只有一处（shared 里那份），
         // 在这里再写一遍 3xx 分支的话，改那一份的时候很容易漏掉这一处
-        const info = classifyNotifyResponse(response.status, response.data, location);
+        const info = classifyNotifyResponse(response.status, response.data, location, request.kind);
         return {ok: info.ok, message: info.message};
     } catch (error) {
         // axios 在非 2xx 且 validateStatus 放行之外仍会抛（网络层错误、超时、体过大）
         const response = axios.isAxiosError(error) ? error.response : undefined;
         if (response) {
-            const info = classifyNotifyResponse(response.status, response.data);
+            const info = classifyNotifyResponse(response.status, response.data, undefined, request.kind);
             return {ok: false, message: info.message};
         }
         const info = classifyNotifyFailure(error);

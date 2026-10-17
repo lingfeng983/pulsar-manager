@@ -68,7 +68,7 @@ export function stripInlineMarkdown(text: string): string {
         .replace(/(\*\*|__|~~|\*)/g, '');
 }
 
-const FENCE = /^ {0,3}(`{3,}|~{3,})/;
+const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 const ATX = /^ {0,3}(#{1,6})\s+(.*?)\s*#*\s*$/;
 
 /**
@@ -87,7 +87,8 @@ export function splitSections(markdown: string): DocSection[] {
     let current: DocHeading | null = null;
     let buffer: string[] = [];
     let inFence = false;
-    let fenceMarker = '';
+    let fenceChar = '';
+    let fenceLength = 0;
 
     const flush = () => {
         const text = buffer.join('\n').trim();
@@ -102,13 +103,20 @@ export function splitSections(markdown: string): DocSection[] {
         if (fence) {
             if (!inFence) {
                 inFence = true;
-                fenceMarker = fence[1][0];
-            } else if (fence[1][0] === fenceMarker) {
-                inFence = false;
-                fenceMarker = '';
+                fenceChar = fence[1][0];
+                fenceLength = fence[1].length;
+                buffer.push(line);
+                continue;
             }
-            buffer.push(line);
-            continue;
+            // 关闭围栏必须同字符、不短于开启那一串、且后面没有 info string：
+            // 四反引号块里常见的 ```js 只是内容，按「首字符相同」判会被提前关掉。
+            if (fence[1][0] === fenceChar && fence[1].length >= fenceLength && fence[2].trim() === '') {
+                inFence = false;
+                fenceChar = '';
+                fenceLength = 0;
+                buffer.push(line);
+                continue;
+            }
         }
         const heading = inFence ? null : line.match(ATX);
         if (heading) {

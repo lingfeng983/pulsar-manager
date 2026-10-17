@@ -82,12 +82,22 @@ if [ -n "$REMOTE_SHA" ] && [ "$REMOTE_SHA" != "$(git rev-parse HEAD)" ]; then
 fi
 
 # ---------- 1. 静态门 ----------
-echo "==> [1/4] 静态检查（类型 / 规范 / 格式）"
+echo "==> [1/4] 静态检查（类型 / 规范 / 格式 / 自测）"
 mkdir -p "$OUT_DIR"
 : > "$LOG"
 npx tsc -b --force >> "$LOG" 2>&1 || { tail -30 "$LOG"; die "类型检查失败（完整日志 $LOG）"; }
 npx eslint src >> "$LOG" 2>&1 || { tail -30 "$LOG"; die "eslint 失败（完整日志 $LOG）"; }
 npm run format:check >> "$LOG" 2>&1 || { tail -30 "$LOG"; die "格式检查失败，先跑 npm run format"; }
+# 自测与发版走同一套静态门：判定/折叠逻辑的回归不会让类型检查失败，
+# 发出去却会变成安装包里的错误结论。先构建一次主进程，逐个直接跑脚本，
+# 不经过 selftest:*（它们每个都会再 build:main 一遍）。
+npm run selftest >> "$LOG" 2>&1 || { tail -30 "$LOG"; die "模板引擎自测失败（完整日志 $LOG）"; }
+npm run build:main >> "$LOG" 2>&1 || { tail -30 "$LOG"; die "主进程构建失败（完整日志 $LOG）"; }
+for test in worker-api namespace-policy topic-policy k8s-forward inspection inspection-schedule inspection-summary doc-kb notify; do
+  echo "    自测 $test"
+  node "scripts/${test}-selftest.cjs" >> "$LOG" 2>&1 \
+    || { tail -40 "$LOG"; die "自测 $test 失败（完整日志 $LOG）"; }
+done
 
 # ---------- 2. 出包 ----------
 echo "==> [2/4] 构建 + electron-builder 打包（约 2-4 分钟，日志 $LOG）"
@@ -108,6 +118,9 @@ echo "    产物 $EXE（$((SIZE / 1048576)) MB）"
 echo "    sha256 $SHA"
 # Gitee 附件硬上限 100MB，留 5MB 余量提前拦截，别让上传阶段才发现
 [ "$SIZE" -le 99614720 ] || die "安装包 $((SIZE / 1048576)) MB 超过 Gitee 附件上限（95MB 门禁），检查是否有依赖被错误放回 dependencies"
+# 下限同样要卡：被文件锁截断、或构建中途退出留下的只有几 KB 的 exe
+# 也能通过「文件存在」检查，装上去才发现是空壳。正常的 Electron NSIS 包在 80MB 量级。
+[ "$SIZE" -ge 31457280 ] || die "安装包只有 $SIZE 字节（< 30MB），多半是打包被截断，检查输出目录是否被占用"
 
 # ---------- 3. 标签 ----------
 echo "==> [3/4] 标签 $TAG"
@@ -162,6 +175,11 @@ if [ -n "${3:-}" ] && [ -f "${3:-}" ]; then
   # 下载"的更新——更新通道发出去收不回来，所以在这里拦住。
   grep -Eq 'SHA256[：:] *`?[0-9a-fA-F]{64}' "$TMP/rel_body.txt" \
     || die "正文文件 $3 缺少「- SHA256：\`<64 位十六进制>\`」这一行（写 @SHA256@ 让脚本换成本次构建的值也行），应用内更新无法校验安装包（本次构建的 SHA256：${SHA}）"
+  # 只有「有一行 SHA256」不够：手抄的旧值或占位符替换出错同样能过 grep，
+  # 而客户端会拿这个错值去比对，结果是每个用户都下载成功却拒绝安装。
+  BODY_SHA="$(grep -Eo 'SHA256[：:] *`?[0-9a-fA-F]{64}' "$TMP/rel_body.txt" | head -1 | grep -Eo '[0-9a-fA-F]{64}' | tr 'A-F' 'a-f')"
+  [ "$BODY_SHA" = "$SHA" ] \
+    || die "正文里的 SHA256（${BODY_SHA:-未解析出}）与本次构建的（${SHA}）不一致：应用内更新会拒绝这个包"
 else
   cat > "$TMP/rel_body.txt" <<EOF
 Pulsar 管理工具 ${TAG}，Windows x64 安装包。

@@ -118,12 +118,13 @@ export function registerProducerHandlers() {
                     topic: input.topic,
                     persistent: input.persistent,
                     options: needOptions(input.options),
+                    // 页签归属随会话一起留在主进程：关掉一个页签只该断它自己那条
+                    ownerId: input.ownerId,
                 },
                 (event: SessionEndEvent) => sendToRenderer(MESSAGE_STREAM_CHANNELS.sessionEnd, event),
             );
         },
     );
-
     // 会话级操作（发送/flush/停止/列举）都只认 sessionId：连接参数在建会话时
     // 就定死了，那时候的 config 也已经交给原生 Client 持有，这里再去解一次集群
     // 只会多出"改了配置却发进旧连接"的错觉。
@@ -140,6 +141,7 @@ export function registerProducerHandlers() {
         // 只持有一批正文。全部解析失败时 items 为空，压根不碰 broker。
         const result = await nativeClientManager.sendThroughSession(
             sessionId,
+            {clusterId: input.clusterId, topicUri: topic},
             input.template as MessageTemplateBody,
             input.count,
             options,

@@ -51,7 +51,17 @@ export function registerConfigHandlers() {
             log.warn('config:update: invalid patch', formatError(parsed.error));
             throw new Error(describeInvalid(parsed.error));
         }
-        return writeAppSettings(parsed.data);
+        const existing = readAppSettings();
+        const settings = writeAppSettings(parsed.data);
+        // 只有告警相关的设置变了才重挂：轮询、日志这类设置同样走这个入口，
+        // 每次保存都重挂会把下一次评估从"原定时刻"重新推后。
+        if (
+            existing.alertEnabled !== settings.alertEnabled ||
+            existing.alertCheckSeconds !== settings.alertCheckSeconds
+        ) {
+            rescheduleAlertEngine();
+        }
+        return settings;
     });
 
     registerHandler('config:reset', async () => {
@@ -83,6 +93,10 @@ export function registerConfigHandlers() {
             throw new Error(`配置文件不符合格式要求：${describeInvalid(parsed.error)}`);
         }
         const result = applyConfigBundle(parsed.bundle);
+        // 导入包里可能带着告警开关与间隔（老导出文件里没有，那就保持当前值）。
+        // 这里无法像 update 那样按"值有没有变"判断（整包写入后再读一遍也看不出
+        // 是哪个键造成的），所以一律重挂一次：导入是低频操作，多一次重挂没有代价。
+        rescheduleAlertEngine();
         // 两种通道分开报：老导出文件里根本没有 k8s 这一项，只报一个"配置 N 个"
         // 会让人以为导入的东西和导出时不一致
         const summary = [

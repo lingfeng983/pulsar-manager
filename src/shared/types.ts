@@ -367,6 +367,9 @@ export interface ConsumeStartParams extends SubscriptionPathParams {
     nAckRedeliverTimeoutMs?: number;
     consumerName?: string;
     deadLetter?: DeadLetterConfig;
+    // 发起会话的界面实例标识：多个页签可能指向同一个 topic，
+    // 认领与卸载清理只能动自己名下的会话。
+    ownerId?: string;
 }
 
 // 手动确认的按序号选条。seqs 为空 = 处理登记表里的全部（界面上的「全部确认」按钮）；
@@ -518,6 +521,9 @@ export interface ProducerOptions {
 
 export interface ProducerStartParams extends TopicPathParams {
     options: ProducerOptions;
+    // 发起会话的界面实例标识：工作台可能有多个页签指着同一个 topic，
+    // 列表与关闭只能动自己名下的会话（见 ProducerWorkspace 的认领与卸载清理）。
+    ownerId?: string;
 }
 
 export interface ProducerSessionInfo {
@@ -527,6 +533,7 @@ export interface ProducerSessionInfo {
     producerName: string;
     connected: boolean;
     flowRunning: boolean;
+    ownerId?: string;
 }
 
 // 工作台自己统计的发送速率与延迟。名字不能叫 ProducerStats：那已经是 broker
@@ -659,6 +666,7 @@ export interface ConsumerSessionInfo {
     autoAck: boolean;
     received: number;
     pendingAcks: number;
+    ownerId?: string;
 }
 
 // ========== Topic 的 broker Schema 注册表 ==========

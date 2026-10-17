@@ -203,7 +203,9 @@ async function openTrustedStream(url: string): Promise<AxiosResponse<fs.ReadStre
         }
         const resp = await axios.get<fs.ReadStream>(current, {
             responseType: 'stream',
-            timeout: 0,
+            // 连接与响应头阶段也要有上限：timeout: 0 会让一个只接受 TCP、
+            // 迟迟不给响应头的对端把下载永远挂着。拿不到响应头就没有下面的空闲看门狗。
+            timeout: 30_000,
             maxRedirects: 0,
             validateStatus: () => true,
         });
@@ -274,6 +276,10 @@ export async function downloadUpdate(downloadUrl: string): Promise<string> {
     downloading = true;
     const dir = updatesDir();
     const {target, part} = packageTarget(dir, pending.fileName);
+    // 空闲看门狗：对端可以先把响应头给你，然后一个字节都不再发。没有这条，
+    // 进度条会停在某个百分比直到用户杀进程，且 downloading 一直为真、重试都进不来。
+    const IDLE_TIMEOUT_MS = 30_000;
+    let idleTimer: NodeJS.Timeout | null = null;
     try {
         fs.mkdirSync(dir, {recursive: true});
         const resp = await openTrustedStream(pending.publicUrl);
@@ -286,7 +292,17 @@ export async function downloadUpdate(downloadUrl: string): Promise<string> {
         const hasher = crypto.createHash('sha256');
         let received = 0;
         let lastEmit = 0;
+        const armIdleTimer = () => {
+            if (idleTimer) {
+                clearTimeout(idleTimer);
+            }
+            idleTimer = setTimeout(() => {
+                resp.data.destroy(new Error(`下载停滞超过 ${IDLE_TIMEOUT_MS / 1000} 秒，已中止`));
+            }, IDLE_TIMEOUT_MS);
+        };
+        armIdleTimer();
         resp.data.on('data', (chunk: Buffer) => {
+            armIdleTimer();
             received += chunk.length;
             hasher.update(chunk);
             if (received > MAX_DOWNLOAD_BYTES) {
@@ -323,6 +339,9 @@ export async function downloadUpdate(downloadUrl: string): Promise<string> {
         broadcastProgress({received: 0, total: 0, error: msg});
         throw error instanceof Error ? error : new Error(msg);
     } finally {
+        if (idleTimer) {
+            clearTimeout(idleTimer);
+        }
         downloading = false;
     }
 }

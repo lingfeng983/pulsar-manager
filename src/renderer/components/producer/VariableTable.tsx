@@ -38,7 +38,10 @@ const VariableTable: React.FC<VariableTableProps> = ({value, onChange, body}) =>
         <Space direction="vertical" size="small" style={{width: '100%'}}>
             <Table<TemplateVariable>
                 dataSource={value}
-                rowKey={(record, index) => `${index}-${record.name}`}
+                // 只用行号：变量名是输入框里的值，把它拼进 key 会让每次敲键都换一个
+                // key，React 于是重挂整行、输入框丢焦点（变量名根本打不完整）。
+                // 这张表不排序，行号在编辑期间是稳定的。
+                rowKey={(_, index) => String(index)}
                 pagination={false}
                 size="small"
                 columns={[

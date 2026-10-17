@@ -141,6 +141,15 @@ const DEFAULT_PORTS = {
  */
 export function resolveBaseUrl(config: PulsarAdminConfig): string {
     if (config.webServiceUrl) {
+        // 显式地址同样受 TLS 约束。此前这里直接返回，tls.enabled 只在下面
+        // serviceUrl 映射出来的地址上检查，于是「勾了 TLS + 填 http://」会
+        // 带着 Bearer 凭据明文出网——开关显示开启，实际没有任何加密。
+        if (config.tls?.enabled && !/^https:\/\//i.test(config.webServiceUrl)) {
+            throw new Error(
+                `TLS is enabled but webServiceUrl is not HTTPS ("${config.webServiceUrl}"). ` +
+                    'Use an https:// address or turn TLS off.',
+            );
+        }
         return config.webServiceUrl;
     }
     // ssl:// 是 SERVICE_URL_PATTERN 放行的第三种写法，同样要落到 https

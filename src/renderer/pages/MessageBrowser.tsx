@@ -1,4 +1,4 @@
-import React, {useState, useEffect, useCallback, useMemo, useRef, type ReactNode} from 'react';
+import React, {useState, useEffect, useCallback, useMemo, useRef, useContext, type ReactNode} from 'react';
 import {
     Card,
     Table,
@@ -33,7 +33,7 @@ import type {Message, MessageBatch, ProducerMessageOptions, SessionEndEvent} fro
 import {formatBytes} from '../utils/format';
 import dayjs from 'dayjs';
 import {downloadBlob} from '../utils/download';
-import {useCommand} from '../hooks/useKeybindings';
+import {useCommand, PaneActiveContext} from '../hooks/useKeybindings';
 import {useSettingsStore} from '../store/settings';
 import StateBlock from '../components/common/StateBlock';
 import ErrorBanner from '../components/common/ErrorBanner';
@@ -136,6 +136,11 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
 }) => {
     // 正文截断长度是配置中心里的应用设置，改完立刻对所有消息浏览器生效
     const truncateLength = useSettingsStore(state => state.settings.truncateLength);
+    // active 只说明内嵌页签是不是「消息」，TabWorkspace 把非当前主标签页
+    // display:none 保留挂载，因此还要看外层页签是否活跃。两者都为真才算用户
+    // 真的看得见这个列表——否则 autoAck 会在无人可见时把消息永久确认掉。
+    const paneActive = useContext(PaneActiveContext);
+    const visible = active && paneActive;
     const [mode, setMode] = useState<PanelMode>('send');
     const [messages, setMessages] = useState<Message[]>([]);
     const [sessionId, setSessionId] = useState<string | null>(null);
@@ -234,13 +239,13 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
         setError(null);
     }, [mode, clusterId, tenant, namespace, topic, persistent, stopActiveSession]);
 
-    // 切到别的内嵌页签（概览/订阅/配置）就把会话停掉：页签是 display:none 不是卸载，
-    // 不停的话它会一直在后台消费并把消息堆进这个看不见的列表。
+    // 切到别的内嵌页签或别的顶层标签页就把会话停掉：页签是 display:none 不是卸载，
+    // 不停的话它会一直在后台消费并把消息（autoAck 下）永久确认掉。
     useEffect(() => {
-        if (!active) {
+        if (!visible) {
             void stopActiveSession(false);
         }
-    }, [active, stopActiveSession]);
+    }, [visible, stopActiveSession]);
 
     // 组件卸载（关标签页）时主进程侧的 consumer/reader 必须一起关掉，
     // 否则它会一直占着订阅，下次开始消费会被"该订阅已有会话"拒绝。
@@ -252,7 +257,20 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
     );
 
     const appendBatch = useCallback((batch: MessageBatch) => {
-        setMessages(prev => trimMessageList([...batch.messages, ...prev], MAX_DISPLAY_COUNT, STREAM_MAX_BYTES));
+        // 流式会话重连时可能重投已经显示过的消息。按 messageId 去重后，
+        // 表格才能把 messageId 当稳定 key——否则为躲重复 key 拼上 index，
+        // 每来一批新消息都会让所有旧行的 index 后移，整张表重挂、展开状态全丢。
+        setMessages(prev => {
+            const seen = new Set(prev.map(item => item.messageId));
+            const fresh = batch.messages.filter(item => {
+                if (seen.has(item.messageId)) {
+                    return false;
+                }
+                seen.add(item.messageId);
+                return true;
+            });
+            return trimMessageList([...fresh, ...prev], MAX_DISPLAY_COUNT, STREAM_MAX_BYTES);
+        });
     }, []);
 
     const applySessionEnd = useCallback((event: SessionEndEvent) => {
@@ -1258,7 +1276,8 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                                 dataSource={messages}
                                 columns={resizableColumns}
                                 components={components}
-                                rowKey={(record, index) => `${record.messageId}-${index}`}
+                                // 稳定 key：见 appendBatch 的去重说明
+                                rowKey="messageId"
                                 pagination={false}
                                 size="small"
                                 scroll={{x: 'max-content'}}

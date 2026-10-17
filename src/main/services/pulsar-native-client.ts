@@ -171,6 +171,13 @@ const CLOSE_TIMEOUT_MS = 5000;
 // 连续发送被停后要等在途落地，最坏是 sendTimeout（默认 30s）+ 排空与关闭本身。
 // 这个预算只给 producer 会话：它等短了，就是在还有 send 在飞时去关原生对象。
 const PRODUCER_SETTLE_TIMEOUT_MS = 40_000;
+// 集群被删/改配置时等待压测收尾的预算。压测自己等的是 receive(2s)+close(5s)=7s，
+// 这里必须留出余量：预算短于它就会在压测还有 in-flight receive 时关原生 Client，
+// 那正是注释里记录过的段错误路径。15s 只用于「等它自己结束」，不是正常耗时。
+const HOLD_STOP_TIMEOUT_MS = 15_000;
+// 单批消息的字节上限。条数上限管不住大报文：50 条 × 几 MB 的 base64 会在一次
+// IPC 里序列化出几百 MB，主进程与渲染进程都可能被拖死。
+const BATCH_MAX_BYTES = 8 * 1024 * 1024;
 // Reader 的空轮询间隔：pulsar-client 1.18 的 readNext(timeout) 在超时真的到期时会段错误
 // （实测 readerIdle 两次必崩），所以 Reader 只能先 hasNext() 判断有货、再不带超时地读。
 const READER_POLL_MS = 250;
@@ -261,6 +268,8 @@ interface ProducerHandle {
     // flush/close 只能做一次：会话收尾与 runFlow 的 finally 都可能走到这里，
     // 第二次 close 同样是打在已销毁对象上。
     finalized?: boolean;
+    // 发起会话的界面实例标识：列表与关闭按它区分同 topic 的多个页签
+    ownerId?: string;
 }
 
 // 常驻 consumer 的会话侧状态。received 在这里而不是只留在界面：切页签、
@@ -284,6 +293,8 @@ interface ConsumerHandle {
     // seq → 原生 Message；确认/重投成功后从这里摘掉，pendingAcks 就是它的大小
     unacked: Map<number, NativeMessage>;
     nextAckSeq: number;
+    // 发起会话的界面实例标识：见 ProducerHandle.ownerId
+    ownerId?: string;
 }
 
 interface Session {
@@ -377,16 +388,17 @@ export class NativeClientManager {
     }
 
     // 等待该集群上全部在途一次性操作。必须带硬超时：发送卡住时不能把
-    // 「删除集群」也一起吊死。
-    private async drainShortLived(clusterId: string): Promise<void> {
+    // 「删除集群」也一起吊死。返回值告诉调用方这些操作是否真的落地——
+    // 超时后继续 client.close() 就是 use-after-free，宁可暂时漏掉一个 Client
+    // 也不能让原生层崩掉整个主进程。
+    private async drainShortLived(clusterId: string): Promise<boolean> {
         const registry = this.shortLived.get(clusterId);
         if (!registry || registry.size === 0) {
             this.shortLived.delete(clusterId);
-            return;
+            return true;
         }
-        await withHardTimeout(
+        const settled = await settledWithin(
             Promise.all([...registry]).then(() => undefined),
-            `cluster ${clusterId} still has in-flight native sends`,
             SETTLE_TIMEOUT_MS,
         );
         // 只在桶还是同一个、且确实排空时摘掉：集群 id 是 uuid，删除的集群留着空桶
@@ -394,6 +406,7 @@ export class NativeClientManager {
         if (this.shortLived.get(clusterId) === registry && registry.size === 0) {
             this.shortLived.delete(clusterId);
         }
+        return settled;
     }
 
     // 集群配置变更后必须重建客户端，否则会一直用旧的 serviceUrl / 凭据。
@@ -474,17 +487,23 @@ export class NativeClientManager {
         const holds = cached ? [...cached.holds] : [];
         // 压测之类挂在客户端上的长任务先作废、再等它自己关资源，最后才关原生 Client
         holds.forEach(hold => hold.onInvalidate());
-        await Promise.all([
-            ...targets.map(session => this.stopSession(session)),
-            ...holds.map(hold => withHardTimeout(hold.stop(), 'held run did not settle')),
-            // 一次性发送也跑在这份 Client 上，同一条 Promise.all 里等它们落地
+        await Promise.all(targets.map(session => this.stopSession(session)));
+        // stop 可能超时，必须知道它到底有没有落地；超时后关 Client 就是段错误。
+        const [holdSettled, shortLivedSettled] = await Promise.all([
+            Promise.all(holds.map(hold => settledWithin(hold.stop(), HOLD_STOP_TIMEOUT_MS))),
             this.drainShortLived(clusterId),
         ]);
         if (cached) {
-            await withHardTimeout(
-                cached.client.close().then(() => undefined),
-                `client ${clusterId} close failed`,
-            );
+            if (!shortLivedSettled || !holdSettled.every(Boolean)) {
+                // 这里刻意不 close：底层 native 对象可能还在被 in-flight 调用使用。
+                // 泄漏一个已经摘出缓存的 Client，比让整个主进程段错误可接受。
+                log.error(`client ${clusterId} not closed: in-flight native work did not settle in time`);
+            } else {
+                await withHardTimeout(
+                    cached.client.close().then(() => undefined),
+                    `client ${clusterId} close failed`,
+                );
+            }
         }
     }
 
@@ -510,16 +529,17 @@ export class NativeClientManager {
         const client = await this.getClient(clusterId, config);
         const work = (async (): Promise<{messageId: string}> => {
             const producer: Producer = await client.createProducer({topic});
-            // 逐条参数走工作台那同一份 applyOptions + toProducerMessage：单发与模板
-            // 分两套组装的话，"面板上勾了事件时间、broker 里那条却没有"就没人能发现。
-            const item: OutboundMessage = {
-                sourceIndex: 0,
-                body: params.message,
-                bytes: Buffer.byteLength(params.message, 'utf8'),
-                properties: params.properties,
-            };
-            applyOptions(item, params.options ?? {});
             try {
+                // applyOptions 会解析 from 字段里的 JSON，解析失败是用户输入错误，
+                // 但它发生在 producer 已经创建之后：必须在 try 内，否则 finally
+                // 不会执行，原生 producer 会一直挂着。
+                const item: OutboundMessage = {
+                    sourceIndex: 0,
+                    body: params.message,
+                    bytes: Buffer.byteLength(params.message, 'utf8'),
+                    properties: params.properties,
+                };
+                applyOptions(item, params.options ?? {});
                 const messageId = await producer.send(toProducerMessage(item));
                 return {messageId: messageId.toString()};
             } finally {
@@ -605,6 +625,7 @@ export class NativeClientManager {
         decorate?: (message: NativeMessage, rendered: Message) => void,
     ): Promise<void> {
         let buffer: Message[] = [];
+        let bufferBytes = 0;
         let delivered = 0;
         let lastFlush = Date.now();
 
@@ -614,6 +635,7 @@ export class NativeClientManager {
             }
             emit({sessionId: session.id, messages: buffer});
             buffer = [];
+            bufferBytes = 0;
             lastFlush = Date.now();
         };
 
@@ -633,8 +655,13 @@ export class NativeClientManager {
                     decorate(message, rendered);
                 }
                 buffer.push(rendered);
+                bufferBytes += Buffer.byteLength(rendered.data ?? '', 'utf8');
                 delivered += 1;
-                if (buffer.length >= BATCH_SIZE || Date.now() - lastFlush >= BATCH_FLUSH_MS) {
+                if (
+                    buffer.length >= BATCH_SIZE ||
+                    bufferBytes >= BATCH_MAX_BYTES ||
+                    Date.now() - lastFlush >= BATCH_FLUSH_MS
+                ) {
                     flush();
                 }
             }
@@ -700,7 +727,15 @@ export class NativeClientManager {
             'consumer',
             mode,
         );
-        const client = await this.getClient(clusterId, config);
+        let client: Client;
+        try {
+            client = await this.getClient(clusterId, config);
+        } catch (error) {
+            // 会话槽先于连接建立登记：连接失败不摘掉的话，32 个槽位会被
+            // 一串连不上的重试永久占满，用户只能重启应用。
+            this.sessions.delete(session.id);
+            throw error;
+        }
 
         let consumer: Consumer;
         try {
@@ -733,6 +768,9 @@ export class NativeClientManager {
         };
         if (params.consumerName) {
             handle.consumerName = params.consumerName;
+        }
+        if (params.ownerId) {
+            handle.ownerId = params.ownerId;
         }
         session.consumer = handle;
         session.close = async () => {
@@ -808,9 +846,15 @@ export class NativeClientManager {
             'reader',
             'parallel',
         );
-        const client = await this.getClient(clusterId, config);
+        let client: Client;
+        try {
+            client = await this.getClient(clusterId, config);
+        } catch (error) {
+            this.sessions.delete(session.id);
+            throw error;
+        }
 
-        let reader: Reader;
+        let reader: Reader | undefined;
         try {
             reader = await client.createReader({
                 topic,
@@ -821,6 +865,14 @@ export class NativeClientManager {
                 await reader.seekTimestamp(seekTimestamp);
             }
         } catch (error) {
+            // reader 已经创建后再失败（典型是 seek 时网络断了）也必须关掉，
+            // 否则原生对象留在缓存 Client 上，重连后仍占资源。
+            if (reader) {
+                await withHardTimeout(
+                    reader.close().then(() => undefined),
+                    'reader close after failed start',
+                );
+            }
             this.sessions.delete(session.id);
             throw error;
         }
@@ -1027,12 +1079,20 @@ export class NativeClientManager {
             topic: string;
             persistent: boolean;
             options: ProducerOptions;
+            // 发起会话的界面实例标识：列表与关闭按它区分同 topic 的多个页签
+            ownerId?: string;
         },
         onEnd: (event: SessionEndEvent) => void,
     ): Promise<ProducerSessionInfo> {
         const topic = topicFullName(params.tenant, params.namespace, params.topic, params.persistent);
         const session = this.reserveSession(clusterId, `${clusterId}|${topic}|producer`, 'producer', 'parallel');
-        const client = await this.getClient(clusterId, config);
+        let client: Client;
+        try {
+            client = await this.getClient(clusterId, config);
+        } catch (error) {
+            this.sessions.delete(session.id);
+            throw error;
+        }
 
         let producer: Producer;
         try {
@@ -1052,6 +1112,9 @@ export class NativeClientManager {
             options: params.options,
             flowRunning: false,
         };
+        if (params.ownerId) {
+            handle.ownerId = params.ownerId;
+        }
         session.producer = handle;
         // 顺序不能反两处：一是连续发送还在灌的时候先 close，等于把 send 打在已销毁的
         // 原生对象上（实测段错误），所以先停循环并排空在途；二是批量模式下最后一段
@@ -1108,11 +1171,20 @@ export class NativeClientManager {
 
     async sendThroughSession(
         sessionId: string,
+        expected: {clusterId: string; topicUri: string},
         template: MessageTemplateBody,
         count: number,
         options: ProducerMessageOptions,
     ): Promise<ProducerSendResult> {
         const handle = this.producerHandle(sessionId);
+        // 会话的 producer 是在建会话时按 cluster/topic 建好的；请求里再带一份坐标
+        // 只会制造"消息发到 A、审计/历史记到 B"的错位。对不上就拒绝，不猜。
+        if (handle.clusterId !== expected.clusterId || handle.topicUri !== expected.topicUri) {
+            throw new Error(
+                `会话 ${sessionId} 属于 ${handle.topicUri}（集群 ${handle.clusterId}），` +
+                    `与本次请求的 ${expected.topicUri}（集群 ${expected.clusterId}）不一致，请重新建立会话`,
+            );
+        }
         return this.sendChunks(handle.producer, {template, count, options}, () => !this.sessions.has(sessionId));
     }
 
@@ -1158,7 +1230,7 @@ export class NativeClientManager {
 
     // 会话快照。producerName 取原生返回的那个，界面显示的必须与 broker 侧一致。
     private producerInfo(sessionId: string, handle: ProducerHandle): ProducerSessionInfo {
-        return {
+        const info: ProducerSessionInfo = {
             sessionId,
             clusterId: handle.clusterId,
             topicUri: handle.topicUri,
@@ -1166,6 +1238,10 @@ export class NativeClientManager {
             connected: handle.producer.isConnected(),
             flowRunning: handle.flowRunning,
         };
+        if (handle.ownerId) {
+            info.ownerId = handle.ownerId;
+        }
+        return info;
     }
 
     // 速率按"上一次推送到现在"这段窗口算，不用整轮平均：用户中途改速率、
@@ -1217,6 +1293,9 @@ export class NativeClientManager {
     private async endFlow(handle: ProducerHandle): Promise<boolean> {
         const flow = handle.flow;
         if (!flow) {
+            // 上一轮已经由 runFlow 的 finally 摘掉；这里顺手清掉可能残留的排空标记，
+            // 否则一次超时会把这个会话永久锁在「上一轮还在排空」上。
+            handle.draining = false;
             return true;
         }
         flow.stopped = true;
@@ -1247,9 +1326,15 @@ export class NativeClientManager {
         }
         handle.finalized = true;
         // 批量模式下最后一段还压在原生队列里，先 close 就是把它丢掉，因此 flush 在前。
-        // flush 失败（连接已断/正在停）时 close 照做，否则留着一个关不掉的 producer。
-        await handle.producer.flush().catch(() => undefined);
-        await handle.producer.close().catch(() => undefined);
+        // flush 失败（连接已断/正在停）时 close 照做，否则留着一个关不掉的 producer；
+        // 但失败必须留下日志——否则「界面显示已发送、broker 没收到」没有任何线索。
+        await handle.producer.flush().catch(error => {
+            const detail = error instanceof Error ? error.message : String(error);
+            log.warn(`producer ${handle.producerName} flush failed before close`, detail);
+        });
+        await handle.producer.close().catch(error => {
+            log.warn(`producer ${handle.producerName} close failed`, error instanceof Error ? error.message : error);
+        });
     }
 
     async startFlow(
@@ -1370,6 +1455,9 @@ export class NativeClientManager {
             if (handle.flow === flow) {
                 handle.flow = undefined;
                 handle.flowRunning = false;
+                // 这一轮的 in-flight 已在上面 drain 完成；清掉排空标记，会话才能
+                // 再启动下一轮。endFlow 超时先返回时也会走到这里，它是唯一的收尾者。
+                handle.draining = false;
                 emit(this.flowStats(handle, flow, false, endError));
             }
             // 会话收尾因为没排空而把 close 押后时，由这里在落地之后补上。
@@ -1444,6 +1532,9 @@ export class NativeClientManager {
         };
         if (handle.consumerName) {
             info.consumerName = handle.consumerName;
+        }
+        if (handle.ownerId) {
+            info.ownerId = handle.ownerId;
         }
         return info;
     }

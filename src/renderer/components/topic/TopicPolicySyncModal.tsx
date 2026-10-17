@@ -391,6 +391,9 @@ const TopicPolicySyncModal: React.FC<TopicPolicySyncModalProps> = ({
                             value={targets}
                             showSearch
                             maxTagCount="responsive"
+                            // 与命名空间同步同一条规矩：上限在选的时候就拦住，
+                            // 不让用户填满一屏再被主进程的 zod 拒绝
+                            maxCount={MAX_TARGETS}
                             onChange={value => {
                                 setTargets(value);
                                 setPlan(null);

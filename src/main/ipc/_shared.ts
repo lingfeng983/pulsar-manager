@@ -221,6 +221,11 @@ export const ClusterConfigSchema = stripUnusedForwards(
         // 与其静默选一个，不如在这里拒绝。
         .refine(config => !(config.useSshTunnel && config.useK8sForward), {
             message: 'SSH 隧道与 K8s 端口转发只能启用其一（两者都会改写 Admin 与 Broker 地址）',
+        })
+        // 运行时 resolveBaseUrl 会拒绝这个组合；在保存/测试入口也拒绝一次，
+        // 用户才不会先把一份注定连不上的配置存进库。
+        .refine(config => !config.tlsEnabled || !config.webServiceUrl || /^https:\/\//i.test(config.webServiceUrl), {
+            message: '开启 TLS 时 webServiceUrl 必须使用 https://',
         }),
 );
 
@@ -247,6 +252,9 @@ export const ClusterTestSchema = stripUnusedForwards(
         })
         .refine(config => !(config.useSshTunnel && config.useK8sForward), {
             message: 'SSH 隧道与 K8s 端口转发只能启用其一（两者都会改写 Admin 与 Broker 地址）',
+        })
+        .refine(config => !config.tlsEnabled || !config.webServiceUrl || /^https:\/\//i.test(config.webServiceUrl), {
+            message: '开启 TLS 时 webServiceUrl 必须使用 https://',
         }),
 );
 
@@ -256,10 +264,17 @@ export const TenantSchema = z
     .min(1)
     .regex(/^[a-zA-Z0-9_-]+$/);
 
+// Pulsar 3.x 支持分层命名空间（"a/b"）：列表端点返回的就是去掉租户前缀后的
+// 整条路径。这里允许 "/" 但逐段校验字符集，并显式拒绝 "." 与 ".." 段——
+// @ 与空格同样不允许。这些值最终会被 seg() 编码进 Admin API 路径。
 export const NamespaceSchema = z
     .string()
     .min(1)
-    .regex(/^[a-zA-Z0-9._-]+$/);
+    .max(255)
+    .regex(/^[a-zA-Z0-9._-]+(?:\/[a-zA-Z0-9._-]+)*$/)
+    .refine(value => !value.split('/').some(part => part === '.' || part === '..'), {
+        message: '命名空间不能包含 . 或 .. 段',
+    });
 
 // Topic / Subscription 名称必须限制字符集：这些值会被拼进 Admin API 路径，
 // 允许 "/" 或 ".." 会导致请求落到非预期资源上。
@@ -539,6 +554,29 @@ export const FunctionTriggerSchema = RuntimeItemPathSchema.extend({
 // 按 topic 那套字符集限制只会把合法的选择拦死。
 const ArchiveSchema = z.string().trim().min(1).max(1024);
 
+// 对话框选过的路径清单。IPC 参数本身不可信：只校验"是个非空字符串"的话，
+// 渲染层（或被注入的页面脚本）可以让主进程读取任意本地文件并上传到 broker。
+// 只有系统文件对话框真正返回过的路径才允许进入 worker:create。
+// 保留最近 50 条：同一批包在多次创建里反复使用，不设上限则会随会话无限增长。
+const pickedPackagePaths = new Set<string>();
+const PICKED_PACKAGE_LIMIT = 50;
+
+export function rememberPickedPackage(filePath: string): void {
+    // 重新插入一次，让"刚选过的"排到队尾，避免被后续选择顶掉
+    pickedPackagePaths.delete(filePath);
+    pickedPackagePaths.add(filePath);
+    if (pickedPackagePaths.size > PICKED_PACKAGE_LIMIT) {
+        const oldest = pickedPackagePaths.values().next().value;
+        if (oldest !== undefined) {
+            pickedPackagePaths.delete(oldest);
+        }
+    }
+}
+
+export function isPickedPackage(filePath: string): boolean {
+    return pickedPackagePaths.has(filePath);
+}
+
 const RuntimeCreateBaseSchema = RuntimeNamespaceSchema.extend({
     name: TopicSchema,
     // GO 运行时 worker 不看入口类，JAVA/PYTHON 少了它 worker 自己拒——这里不重复设门槛
@@ -576,6 +614,13 @@ export const RuntimeCreateSchema = RuntimeCreateBaseSchema.superRefine((value, c
             code: z.ZodIssueCode.custom,
             path: ['archive'],
             message: value.archive ? '本地文件与包坐标只能二选一' : '要么给包坐标，要么选一个本地包',
+        });
+    }
+    if (value.localPackagePath && !isPickedPackage(value.localPackagePath)) {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['localPackagePath'],
+            message: '本地包必须先通过文件对话框选择，不能直接指定路径',
         });
     }
 });
@@ -802,6 +847,14 @@ export const ConsumeStartSchema = SubscriptionPathSchema.extend({
     initialPosition: InitialPositionSchema.default('Earliest'),
     autoAck: z.boolean().default(true),
     maxMessages: z.number().int().min(0).max(10000).default(500),
+    // 会话归属标识由界面实例生成，只用于「多页签指着同一 topic 时只认领/关闭自己那批」。
+    // 它不参与连接参数，也不是安全边界，所以只限长度与字符集。
+    ownerId: z
+        .string()
+        .min(1)
+        .max(64)
+        .regex(/^[A-Za-z0-9._:-]+$/)
+        .optional(),
 });
 
 // 消费者工作台的建会话参数：在旧的三态面板那几项之外，再放开原生确实支持的
@@ -822,18 +875,11 @@ const DeadLetterSchema = z.object({
 
 export const ConsumerStartSchema = ConsumeStartSchema.extend({
     receiverQueueSize: z.number().int().min(1).max(10000).optional(),
-    ackTimeoutMs: z
-        .number()
-        .int()
-        .min(1000)
-        .max(24 * 60 * 60 * 1000)
-        .optional(),
-    nAckRedeliverTimeoutMs: z
-        .number()
-        .int()
-        .min(100)
-        .max(60 * 60 * 1000)
-        .optional(),
+    // 两个超时的范围必须与 ConsumerConfigDraftSchema 逐字一致：同一项设置
+    // 在「存草稿」与「直接开会话」两条路径上取值不同，会出现草稿存得进去、
+    // 用草稿起会话却被拒（或反过来）的鬼故事。范围取界面表单的那一档。
+    ackTimeoutMs: z.number().int().min(1000).max(3_600_000).optional(),
+    nAckRedeliverTimeoutMs: z.number().int().min(1000).max(3_600_000).optional(),
     consumerName: z
         .string()
         .min(1)
@@ -1023,7 +1069,14 @@ export const ConsumerConfigDraftSchema = z.object({
     receiverQueueSize: z.number().int().min(1).max(10_000).optional(),
     ackTimeoutMs: z.number().int().min(1000).max(3_600_000).optional(),
     nAckRedeliverTimeoutMs: z.number().int().min(1000).max(3_600_000).optional(),
-    consumerName: z.string().min(1).max(255).optional(),
+    // 消费者名的字符集与建会话那一处共用：草稿里存下带空格/中文的名字，
+    // 用草稿起会话时才被拒，等于把同一份配置分成"存得进去、用不出来"两种状态。
+    consumerName: z
+        .string()
+        .min(1)
+        .max(255)
+        .regex(/^[a-zA-Z0-9._-]+$/)
+        .optional(),
     // 与建会话那一处共用同一份死信校验：草稿能存下自由文本、起会话时才被全路径正则
     // 拒掉，等于把同一份配置分成"存得进去、用不出来"两种状态。
     deadLetter: DeadLetterSchema.optional(),
@@ -1054,6 +1107,13 @@ export const SendHistoryGetSchema = z.object({
 
 export const ProducerStartSchema = TopicPathSchema.extend({
     options: ProducerOptionsSchema.default({}),
+    // 与 ConsumeStartSchema.ownerId 同一口径：会话归属，只用于页签级认领与清理。
+    ownerId: z
+        .string()
+        .min(1)
+        .max(64)
+        .regex(/^[A-Za-z0-9._:-]+$/)
+        .optional(),
 });
 
 // 模板正文只取 body/variables/properties 三项：发送方传的是"这次要发的报文"，
@@ -1351,6 +1411,11 @@ export function persistSshConfig(
         updates.passphrase = null;
     } else {
         updates.password = null;
+    }
+    // 换了主机就是换了一把钥匙：旧的指纹必须失效，否则新主机会被当成中间人拒绝，
+    // 而用户没有任何界面入口去改这一列。
+    if (existing.host !== ssh.host) {
+        updates.host_fingerprint = null;
     }
     updateSSHTunnel(existing.id, updates);
     return existing.id;

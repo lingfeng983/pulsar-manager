@@ -3,7 +3,6 @@ import {Button, type TableColumnsType} from 'antd';
 import {FolderOutlined, DatabaseOutlined, TagOutlined, ArrowRightOutlined} from '@ant-design/icons';
 import {useTabStore} from '../store/tabs';
 import {loadNamespaces} from '../hooks/resourceCache';
-import {shortName} from '../utils/format';
 import {namespaceTab} from '../utils/tabIds';
 import ResourceDetailPage, {type ResourceStat} from '../components/common/ResourceDetailPage';
 
@@ -42,7 +41,9 @@ const TenantDetail: React.FC<TenantDetailProps> = ({clusterId, tenant}) => {
                 return;
             }
 
-            setNamespaces(namespaceNames.map((ns: string) => ({name: shortName(ns)})));
+            // 服务层已经把 "tenant/" 前缀去掉，但命名空间本身可以是分层的
+            // ("a/b")：再取一次末段会让点击落到另一个命名空间上。
+            setNamespaces(namespaceNames.map((ns: string) => ({name: ns})));
 
             if (tenantResponse.success && tenantResponse.data) {
                 setTenantInfo(tenantResponse.data);

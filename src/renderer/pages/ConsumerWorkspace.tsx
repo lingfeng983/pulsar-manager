@@ -125,6 +125,10 @@ const ConsumerWorkspace: React.FC<ConsumerWorkspaceProps> = ({
 
     const sessionsRef = useRef<ConsumerSessionInfo[]>([]);
     sessionsRef.current = sessions;
+    // 本页签实例的归属标识。同一个 topic 可能开着多个页签，主进程的会话表
+    // 只按 cluster + topic 记录；不区分归属时，关掉一个页签会停掉另一个页签
+    // 正在用的 consumer（见认领与卸载清理）。
+    const ownerId = useRef(`cw-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`).current;
 
     const owns = useCallback((sessionId: string) => sessionsRef.current.some(item => item.sessionId === sessionId), []);
 
@@ -244,7 +248,9 @@ const ConsumerWorkspace: React.FC<ConsumerWorkspaceProps> = ({
                 if (cancelled || !response.success) {
                     return;
                 }
-                const mine = (response.data || []).filter(item => item.topicUri === topicUri);
+                const mine = (response.data || []).filter(
+                    item => item.topicUri === topicUri && item.ownerId === ownerId,
+                );
                 if (mine.length === 0) {
                     return;
                 }
@@ -279,10 +285,11 @@ const ConsumerWorkspace: React.FC<ConsumerWorkspaceProps> = ({
         return () => {
             cancelled = true;
         };
-    }, [clusterId, topicUri]);
+    }, [clusterId, topicUri, ownerId]);
 
     // 关页签即停会话。生产者那边留着连接只是多占一条 producer，这里留着却会继续吃订阅
     // 的投递并自动确认——界面已经不在了，消息却被一条条吞掉，必须停。
+    // 只停自己认领的这批：sessions 从认领到新建都带 ownerId。
     useEffect(
         () => () => {
             for (const session of sessionsRef.current) {
@@ -376,6 +383,7 @@ const ConsumerWorkspace: React.FC<ConsumerWorkspaceProps> = ({
                 persistent,
                 subscription: name,
                 ...draft,
+                ownerId,
             });
             if (response.success && response.data) {
                 const info = response.data;
@@ -423,19 +431,28 @@ const ConsumerWorkspace: React.FC<ConsumerWorkspaceProps> = ({
         setStopping(current => ({...current, [session.sessionId]: true}));
         try {
             const response = await window.electronAPI.consumer.stop(session.sessionId);
-            if (!response.success) {
-                message.warning(response.error || '停止失败');
+            if (response.success) {
+                // stopped:false 表示主进程那边已经没有这条会话（自己收满/出错结束了），
+                // 按已停止展示仍是真话；只有请求失败时不能这么写。
+                setEnded(current => ({...current, [session.sessionId]: 'stopped'}));
+                void refreshBacklog([session.subscription]);
+            } else {
+                // 失败时保持运行态：主进程的 consumer 可能还在吃消息，标成已停止
+                // 会让用户以为订阅已经释放，下次开同订阅 Exclusive 才撞上"已有会话"。
+                message.warning(response.error || '停止会话失败，会话可能仍在运行，可再次点击停止');
             }
-        } catch {
-            // 会话多半已经自己结束了（收满上限或出错），这里再报一次只会挡住列表
+        } catch (error) {
+            message.error(
+                `停止会话失败，会话可能仍在运行，可再次点击停止：${
+                    error instanceof Error ? error.message : String(error)
+                }`,
+            );
         } finally {
             setStopping(current => {
                 const {[session.sessionId]: _gone, ...rest} = current;
                 return rest;
             });
         }
-        setEnded(current => ({...current, [session.sessionId]: 'stopped'}));
-        void refreshBacklog([session.subscription]);
     };
 
     const applyConfig = (config: ConsumerSessionConfig) => {

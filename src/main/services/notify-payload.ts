@@ -10,6 +10,7 @@ import {renderNotifyText} from '../../shared/notify-channels';
 import type {NotifyChannelKind, NotifyEvent} from '../../shared/types';
 
 export interface NotifyRequest {
+    kind: Exclude<NotifyChannelKind, 'email'>;
     url: string;
     headers: Record<string, string>;
     body: unknown;
@@ -65,11 +66,11 @@ export function buildNotifyRequest(args: NotifyPayloadArgs): NotifyRequest {
                       sign: dingTalkSign(args.secret, args.nowMs),
                   })
                 : args.url;
-            return {url, headers, body};
+            return {kind: args.kind, url, headers, body};
         }
         case 'wecom': {
             // 企微的 markdown 正文按字节计上限，长文本已经在 renderNotifyText 里按字节截过
-            return {url: args.url, headers, body: {msgtype: 'markdown', markdown: {content: text}}};
+            return {kind: args.kind, url: args.url, headers, body: {msgtype: 'markdown', markdown: {content: text}}};
         }
         case 'feishu': {
             const body: Record<string, unknown> = {msg_type: 'text', content: {text}};
@@ -78,15 +79,16 @@ export function buildNotifyRequest(args: NotifyPayloadArgs): NotifyRequest {
                 body.timestamp = String(timestamp);
                 body.sign = feishuSign(args.secret, timestamp);
             }
-            return {url: args.url, headers, body};
+            return {kind: args.kind, url: args.url, headers, body};
         }
         case 'slack': {
-            return {url: args.url, headers, body: {text}};
+            return {kind: args.kind, url: args.url, headers, body: {text}};
         }
         case 'generic':
         default: {
             // 通用 JSON：留全字段，接自建服务的人自己挑；text 已经排好版，只想要一句话的取 text 就够
             return {
+                kind: args.kind,
                 url: args.url,
                 headers,
                 body: {

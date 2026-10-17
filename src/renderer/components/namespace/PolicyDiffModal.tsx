@@ -1,4 +1,4 @@
-import React, {useCallback, useEffect, useMemo, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {Alert, Button, Card, Modal, Select, Space, Switch, Table, Tag, Typography, message} from 'antd';
 import StateBlock from '../common/StateBlock';
 import {useClusterStore} from '../../store/cluster';
@@ -51,6 +51,14 @@ const PolicyDiffModal: React.FC<PolicyDiffModalProps> = ({clusterId, base, onClo
     const [error, setError] = useState<string | null>(null);
     const [onlyDiff, setOnlyDiff] = useState(true);
 
+    // 对比是两次读请求，用户完全可能在结果回来之前换掉对端。换选择器时让在飞的
+    // 那次作废，否则表格标题写着新对端、内容却是旧对端的策略，下一步同步会照错的差异走。
+    const diffToken = useRef(0);
+    useEffect(() => {
+        diffToken.current += 1;
+        setLoading(false);
+    }, [peerClusterId, peerTenant, peerNamespace]);
+
     useEffect(() => {
         if (clusters.length === 0) {
             void fetchClusters();
@@ -99,6 +107,8 @@ const PolicyDiffModal: React.FC<PolicyDiffModalProps> = ({clusterId, base, onClo
         if (!peerNamespace) {
             return;
         }
+        const token = ++diffToken.current;
+        const isCurrent = () => token === diffToken.current;
         setLoading(true);
         setError(null);
         setRows(null);
@@ -111,6 +121,9 @@ const PolicyDiffModal: React.FC<PolicyDiffModalProps> = ({clusterId, base, onClo
                     namespace: peerNamespace,
                 }),
             ]);
+            if (!isCurrent()) {
+                return;
+            }
             if (!baseResponse.success || !baseResponse.data) {
                 setError(`读基准命名空间失败：${baseResponse.error || '未知原因'}`);
                 return;
@@ -120,8 +133,14 @@ const PolicyDiffModal: React.FC<PolicyDiffModalProps> = ({clusterId, base, onClo
                 return;
             }
             setRows(buildRows(baseResponse.data, peerResponse.data));
+        } catch (err) {
+            if (isCurrent()) {
+                setError(err instanceof Error ? err.message : String(err));
+            }
         } finally {
-            setLoading(false);
+            if (isCurrent()) {
+                setLoading(false);
+            }
         }
     }, [base.namespace, base.tenant, clusterId, peerClusterId, peerNamespace, peerTenant]);
 

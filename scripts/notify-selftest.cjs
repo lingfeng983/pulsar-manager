@@ -300,6 +300,11 @@ check('钉钉/企微的 200+errcode、飞书的 200+code、Slack 的 200+ok:fals
     eq(slack.ok, false, 'Slack ok:false');
     contains(slack.message, 'invalid_auth', '带上 error');
     eq(K.classifyNotifyResponse(200, 'no json here').ok, true, '非 JSON 的 200 按送达');
+    // 通用 webhook 的响应体没有约定形状：{code:200} 是不少服务的成功写法，
+    // 按飞书/钉钉口径去读会把它判成失败
+    eq(K.classifyNotifyResponse(200, {code: 200}, undefined, 'generic').ok, true, '通用渠道 code:200');
+    eq(K.classifyNotifyResponse(200, {errcode: 200}, undefined, 'generic').ok, true, '通用渠道 errcode:200');
+    eq(K.classifyNotifyResponse(200, {ok: false}, undefined, 'generic').ok, true, '通用渠道不看 ok');
 });
 
 check('非 2xx 也带出对端原文：Slack 的 403 不能只报一个状态码', () => {
@@ -376,6 +381,13 @@ check('路径里的凭据也打码：飞书 hook token 与 Slack 的 key 都不�
         K.maskNotifyUrl('https://host/hook/abcdefghijklmnop?token=SECRET&x=1'),
         'https://host/hook/abc***?token=***&x=1',
         '段落与查询串都打码',
+    );
+    // 凭据段不在最后：/hook/<token>/send 这种路由同样要打，
+    // 只看最后一段（此前会 break）会让 token 原样出现在列表页
+    eq(
+        K.maskNotifyUrl('https://host/hook/abcdefghijklmnop/send'),
+        'https://host/hook/abc***/send',
+        '凭据段不在最后',
     );
 });
 

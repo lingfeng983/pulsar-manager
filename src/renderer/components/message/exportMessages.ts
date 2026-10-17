@@ -15,7 +15,12 @@ const stamp = (timestamp: number) => dayjs(timestamp).format('YYYY-MM-DD HH:mm:s
 
 // CSV 里含换行的正文必须整体加引号，内部的引号翻倍——这是 CSV 唯一的转义写法，
 // 少一步就会让一条多行 JSON 在表里裂成好几行。
-const csvCell = (value: string) => `"${value.replace(/"/g, '""')}"`;
+// 另外，Excel / LibreOffice 会把以 = + - @ 或制表符开头的单元格当公式执行；
+// 正文与属性都来自 broker，导出文件又是要发给同事的，前面补一个单引号把它变成文本。
+const csvCell = (value: string) => {
+    const guarded = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+    return `"${guarded.replace(/"/g, '""')}"`;
+};
 
 export function buildMessagesExport(messages: Message[], format: 'json' | 'csv'): MessagesExport {
     if (format === 'json') {
@@ -34,10 +39,10 @@ export function buildMessagesExport(messages: Message[], format: 'json' | 'csv')
     const headers = ['messageId', 'publishTime', 'producerName', 'redeliveryCount', 'properties', 'data'];
     const rows = messages.map(msg =>
         [
-            msg.messageId,
-            stamp(msg.publishTime),
-            msg.producerName,
-            String(msg.redeliveryCount ?? 0),
+            csvCell(msg.messageId ?? ''),
+            csvCell(stamp(msg.publishTime)),
+            csvCell(msg.producerName ?? ''),
+            csvCell(String(msg.redeliveryCount ?? 0)),
             csvCell(JSON.stringify(msg.properties || {})),
             csvCell(formatMessageData(msg.data)),
         ].join(','),

@@ -120,6 +120,23 @@ function labelColorOn(fill: string): string {
 // 中日韩全角字按一个字号宽算，拉丁字符约 0.62。
 const charRatio = (ch: string) => (ch.codePointAt(0)! > 0x2e7f ? 1 : 0.62);
 
+// ECharts 的 tooltip formatter 返回的是 HTML。节点名来自 broker（租户/命名空间/
+// topic 名都是用户可建的），不做转义就等于把 broker 上的字符串当 HTML 执行：
+// 生产 CSP 挡住内联脚本也挡不住 <img onerror> 之外的一切，dev 下更是完整 XSS。
+function escapeHtml(value: unknown): string {
+    return String(value ?? '').replace(
+        /[&<>"']/g,
+        ch =>
+            ({
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#39;',
+            })[ch]!,
+    );
+}
+
 /** 名字放不下时按像素宽度截断（含省略号），完整名称 tooltip 里有。 */
 function fitLabel(name: string, maxWidth: number, fontSize: number): string {
     const budget = maxWidth / fontSize;
@@ -251,18 +268,18 @@ export function buildTopologyOption(params: {
             textStyle: {color: palette.text, fontSize: Math.round(13 * fontScale)},
             formatter: (params: any) => {
                 if (params.dataType !== 'node') {
-                    return `${params.data?.source ?? ''} → ${params.data?.target ?? ''}`;
+                    return `${escapeHtml(params.data?.source)} → ${escapeHtml(params.data?.target)}`;
                 }
                 const node = nodeById.get(params.data?.id);
                 if (!node) {
                     return '';
                 }
                 const rows: string[] = [
-                    `<div style="font-weight:600;font-size:14px;margin-bottom:6px">${node.name}</div>`,
+                    `<div style="font-weight:600;font-size:14px;margin-bottom:6px">${escapeHtml(node.name)}</div>`,
                     `<div>类型: ${NODE_TYPE_LABELS[node.type]}</div>`,
                 ];
                 if (node.clusterName) {
-                    rows.push(`<div>集群: ${node.clusterName}</div>`);
+                    rows.push(`<div>集群: ${escapeHtml(node.clusterName)}</div>`);
                 }
                 if (node.status) {
                     const online = node.status === 'connected';
@@ -270,13 +287,13 @@ export function buildTopologyOption(params: {
                     rows.push(`<div>状态: ${dot} ${online ? '在线' : '离线'}</div>`);
                 }
                 if (node.tenant) {
-                    rows.push(`<div>租户: ${node.tenant}</div>`);
+                    rows.push(`<div>租户: ${escapeHtml(node.tenant)}</div>`);
                 }
                 if (node.namespace) {
-                    rows.push(`<div>命名空间: ${node.namespace}</div>`);
+                    rows.push(`<div>命名空间: ${escapeHtml(node.namespace)}</div>`);
                 }
                 if (node.topicPath) {
-                    rows.push(`<div style="color:${palette.label}">${node.topicPath}</div>`);
+                    rows.push(`<div style="color:${palette.label}">${escapeHtml(node.topicPath)}</div>`);
                 }
                 if (node.count !== undefined) {
                     // 同一个 count 字段在不同节点上含义不同：集群/Broker 是关联 Topic 个数，

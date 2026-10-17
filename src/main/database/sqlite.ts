@@ -11,7 +11,7 @@ let db: Database.Database | null = null;
 // schema 版本以 user_version 跟踪。改基线 DDL 时：升 SCHEMA_VERSION，
 // 并把该版本的增量 DDL 写进 migrate()——CREATE TABLE IF NOT EXISTS 对已存在的
 // 旧库什么都不做，没有这套机制，加列只会对新装用户生效，旧库静默落后。
-const SCHEMA_VERSION = 15;
+const SCHEMA_VERSION = 16;
 
 function migrate(database: Database.Database, from: number): void {
     // v2：refreshInterval 那行出厂值是 30000，而监控页的刷新间隔单位是秒，
@@ -108,6 +108,15 @@ function migrate(database: Database.Database, from: number): void {
         }
         if (!columns.some(column => column.name === 'recipients')) {
             database.prepare("ALTER TABLE notify_channels ADD COLUMN recipients TEXT NOT NULL DEFAULT ''").run();
+        }
+    }
+    // v16：SSH 主机密钥指纹。新库基线已带这一列；老库必须 ALTER，否则连接时
+    // 读写这一列会 no such column，而新库直接 ALTER 又会 duplicate column
+    // 顶掉整个启动事务（与 v6/v7/v10/v12/v13/v15 同一个坑）。
+    if (from < 16) {
+        const columns = database.prepare('PRAGMA table_info(ssh_tunnels)').all() as {name: string}[];
+        if (!columns.some(column => column.name === 'host_fingerprint')) {
+            database.prepare('ALTER TABLE ssh_tunnels ADD COLUMN host_fingerprint TEXT').run();
         }
     }
 }
@@ -330,6 +339,7 @@ export interface SSHTunnelRecord {
     remote_host?: string;
     remote_admin_port: number;
     remote_broker_port: number;
+    host_fingerprint?: string;
     status: string;
     created_at: string;
     updated_at: string;
@@ -354,14 +364,14 @@ export function insertSSHTunnel(tunnel: Omit<SSHTunnelRecord, 'created_at' | 'up
     INSERT INTO ssh_tunnels (
       id, host, port, username, auth_type, password, private_key, passphrase,
       local_admin_port, local_broker_port, remote_host, remote_admin_port,
-      remote_broker_port, status, created_at, updated_at
+      remote_broker_port, host_fingerprint, status, created_at, updated_at
     ) VALUES (
       @id, @host, @port, @username, @auth_type, @password, @private_key, @passphrase,
       @local_admin_port, @local_broker_port, @remote_host, @remote_admin_port,
-      @remote_broker_port, @status, @created_at, @updated_at
+      @remote_broker_port, @host_fingerprint, @status, @created_at, @updated_at
     )
   `);
-    stmt.run({...tunnel, created_at: now, updated_at: now});
+    stmt.run({...tunnel, host_fingerprint: tunnel.host_fingerprint ?? null, created_at: now, updated_at: now});
 }
 
 const SSH_TUNNEL_ALLOWED_FIELDS = new Set([
@@ -377,6 +387,7 @@ const SSH_TUNNEL_ALLOWED_FIELDS = new Set([
     'remote_host',
     'remote_admin_port',
     'remote_broker_port',
+    'host_fingerprint',
     'status',
 ]);
 

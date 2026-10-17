@@ -325,6 +325,9 @@ const PolicySyncModal: React.FC<PolicySyncModalProps> = ({
                             value={targets}
                             showSearch
                             maxTagCount="responsive"
+                            // 上限不能只写在标题上：主进程会拒第 21 个，但用户点完预览才看到报错，
+                            // 前面勾的分不清是哪一个超了
+                            maxCount={MAX_TARGETS}
                             onChange={value => {
                                 setTargets(value);
                                 setPlan(null);

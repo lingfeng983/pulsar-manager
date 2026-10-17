@@ -172,6 +172,10 @@ export function registerInspectionHandlers() {
 
     registerHandler('inspection:profile:save', async (params: unknown) => {
         const input = ProfileSchema.parse(params) as InspectionProfileDraft;
+        if (!getClusterById(input.clusterId)) {
+            // 外键也会挡，但「FOREIGN KEY constraint failed」没人读得懂
+            throw new Error('集群不存在，请先在集群配置里添加');
+        }
         // 校验顺序是「先判口径合不合法，再落库」：resolveThresholds 会拒掉
         // 严重线低于关注线这类每个字段都合规、合起来让分级反过来的组合
         const thresholds = resolveThresholds(input.thresholds);

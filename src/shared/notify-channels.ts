@@ -416,10 +416,11 @@ export function maskNotifyUrl(url: string): string {
         const afterCredentialAnchor =
             /^(hook|token|tokens|key|keys|secret|sign|webhook)$/.test(anchor) &&
             !NOTIFY_ROUTE_WORDS.has(segment.toLowerCase());
-        if (afterCredentialAnchor || looksLikeCredentialSegment(segment)) {
+        // 不能在这里 break：凭据段不一定在最后（/hook/<token>/send 这种路由很常见），
+        // 只看最后一段会让前面带锚点的凭据原样走到渲染层。
+        if (afterCredentialAnchor || (index === segments.length - 1 && looksLikeCredentialSegment(segment))) {
             segments[index] = maskPathSegment(segment);
         }
-        break;
     }
     const path = segments.join('/');
     if (query === undefined) {
@@ -476,7 +477,12 @@ export interface NotifyResponseInfo {
  * Slack 是 200 + ok:false。只看状态码的话，「机器人关键字没命中」「token 过期」
  * 这些最常见的配错会全部显示成成功，而用户什么都没收到。
  */
-export function classifyNotifyResponse(status: number, body: unknown, location?: string): NotifyResponseInfo {
+export function classifyNotifyResponse(
+    status: number,
+    body: unknown,
+    location?: string,
+    kind?: NotifyChannelKind,
+): NotifyResponseInfo {
     const data = parseMaybeJson(body);
     const providerMessage = data ? pickProviderMessage(data) : null;
     if (!isNotifySuccessStatus(status)) {
@@ -488,7 +494,10 @@ export function classifyNotifyResponse(status: number, body: unknown, location?:
         // 都把话说在正文里，只报一个状态码等于让人去猜——而猜的方向通常是「网络问题」
         return {ok: false, message: `对端返回 ${status}${providerMessage ? `：${providerMessage}` : ''}`};
     }
-    if (data) {
+    // 上面那些字段只对各自的厂商有意义。通用 webhook 没有约定形状，
+    // 常见服务会回 {code:200} / {errcode:200} 表示成功——按厂商口径去读
+    // 会把它们全判成「对端拒绝」。通用渠道只看 HTTP 状态。
+    if (data && kind !== 'generic') {
         // 钉钉 / 企微：errcode（企微也有 errcode=0 表示 ok）
         if (typeof data.errcode === 'number' && data.errcode !== 0) {
             return {

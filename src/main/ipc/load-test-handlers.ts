@@ -1,10 +1,11 @@
 import {
     LoadTestStartSchema,
     LoadTestStopSchema,
+    buildConnectionConfig,
     formatError,
     insertOperationLog,
+    registerClientHandler,
     registerHandler,
-    registerNativeHandler,
 } from './_shared';
 import {loadTestManager} from '../services/load-test';
 import {sendToRenderer} from './stream';
@@ -22,11 +23,34 @@ function describeRun(params: LoadTestParams): string {
 }
 
 export function registerLoadTestHandlers() {
-    registerNativeHandler(
+    // 用 client handler 而不是 native handler：退订会把订阅连同它的积压一起删掉，
+    // 所以开跑前必须先问 admin「这个订阅是不是本来就存在」。
+    registerClientHandler(
         'benchmark:start',
         LoadTestStartSchema,
         ([params]) => params,
-        async (config, input: LoadTestParams) => {
+        async (client, input: LoadTestParams) => {
+            if (input.consumeBacklog && input.unsubscribeAfterRun) {
+                const subscriptions = await client.getSubscriptions(
+                    input.tenant,
+                    input.namespace,
+                    input.topic,
+                    input.persistent,
+                );
+                // 订阅名是用户填的，撞上已有订阅完全可能。此时 unsubscribe 删掉的
+                // 不只是本轮，而是别人正在用的订阅和它积压的历史消息——压测不该
+                // 变成一次不可撤销的数据删除。
+                if (subscriptions.includes(input.subscription)) {
+                    throw new Error(
+                        `订阅 ${input.subscription} 在本轮开始前已存在；` +
+                            '「结束后清理订阅」会连同它已有的积压一起删除，请换一个订阅名或取消清理',
+                    );
+                }
+            }
+            const config = await buildConnectionConfig(input.clusterId);
+            if (!config) {
+                throw new Error('Cluster not found');
+            }
             // 进度用流式通道推送：start 建好生产者就立刻返回 runId，用户才能中途停止
             const result = await loadTestManager.start(input, config, (progress: LoadTestProgress) =>
                 sendToRenderer(LOAD_TEST_CHANNEL, progress),

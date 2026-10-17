@@ -1,4 +1,4 @@
-import React, {useCallback, useEffect, useMemo, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
     Alert,
     AutoComplete,
@@ -121,11 +121,20 @@ const RuntimeCreateModal: React.FC<Props> = ({
         [builtins],
     );
 
+    // Modal 的 children 不会因 open=false 卸载，表单值会留到下一次打开：
+    // 上一次选的本地包、填的参数会静默带进新的一次创建。只在「打开」这一刻清空。
+    const wasOpen = useRef(false);
     useEffect(() => {
         if (!open) {
+            wasOpen.current = false;
             return;
         }
-        setLocalError(null);
+        if (!wasOpen.current) {
+            wasOpen.current = true;
+            form.resetFields();
+            setPicked(null);
+            setLocalError(null);
+        }
         let cancelled = false;
         // topic 候选只为减少手打，取不到就当没有：创建表单不该被一次列表失败卡住
         if (clusterId && tenant && namespace) {
@@ -144,7 +153,7 @@ const RuntimeCreateModal: React.FC<Props> = ({
         return () => {
             cancelled = true;
         };
-    }, [open, clusterId, tenant, namespace]);
+    }, [open, clusterId, tenant, namespace, form]);
 
     // 选内置项只代填类名：包坐标由内置清单自己带，猜一个 function://xxx 出来
     // 会创建一个「提交成功但 worker 取不到包」的函数，那比让人手填更难查。
