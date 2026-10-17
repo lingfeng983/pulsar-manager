@@ -50,6 +50,8 @@ import type {
     SessionEndEvent,
     SSHConfig,
     SSHTunnel,
+    K8sForward,
+    K8sForwardConfig,
     SubscriptionPathParams,
     WorkbenchCopyParams,
     WorkbenchScopeParams,
@@ -525,6 +527,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
         disconnect: (tunnelId: string) => ipcRenderer.invoke('ssh:disconnect', tunnelId),
     },
 
+    // K8s 端口转发
+    k8s: {
+        list: () => ipcRenderer.invoke('k8s:list'),
+        connect: (config: K8sForwardConfig) => ipcRenderer.invoke('k8s:connect', config),
+        disconnect: (forwardId: string) => ipcRenderer.invoke('k8s:disconnect', forwardId),
+    },
+
     // 主题
     theme: {
         set: (theme: string) => ipcRenderer.invoke('theme:set', theme),
@@ -600,7 +609,9 @@ declare global {
                 delete: (id: string) => Promise<APIResponse<void>>;
                 testConnection: (
                     config: ClusterConfigDraft,
-                ) => Promise<APIResponse<{connected: boolean; version?: string; sshConfigId?: string}>>;
+                ) => Promise<
+                    APIResponse<{connected: boolean; version?: string; sshConfigId?: string; k8sConfigId?: string}>
+                >;
             };
             resources: {
                 getTenants: (clusterId: string) => Promise<APIResponse<Tenant[]>>;
@@ -954,6 +965,13 @@ declare global {
                     config: SSHConfig,
                 ) => Promise<APIResponse<{tunnelId: string; localPort: number; localBrokerPort: number}>>;
                 disconnect: (tunnelId: string) => Promise<APIResponse<void>>;
+            };
+            k8s: {
+                list: () => Promise<APIResponse<K8sForward[]>>;
+                connect: (
+                    config: K8sForwardConfig,
+                ) => Promise<APIResponse<{forwardId: string; localAdminPort: number; localBrokerPort: number}>>;
+                disconnect: (forwardId: string) => Promise<APIResponse<void>>;
             };
             theme: {
                 set: (theme: string) => Promise<APIResponse<void>>;

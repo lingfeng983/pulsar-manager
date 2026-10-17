@@ -6,6 +6,8 @@ export type {
     ClusterConfigDraft,
     SSHConfig,
     SSHTunnel,
+    K8sForward,
+    K8sForwardConfig,
     Tenant,
     Namespace,
     Topic,

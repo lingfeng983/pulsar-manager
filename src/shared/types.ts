@@ -38,6 +38,9 @@ export interface ClusterConfig {
     useSshTunnel?: boolean;
     sshConfigId?: string;
     ssh?: SSHTunnelSummary;
+    useK8sForward?: boolean;
+    k8sConfigId?: string;
+    k8s?: K8sForwardSummary;
     adminApiTimeout?: number;
     status?: 'connected' | 'disconnected' | 'warning';
     version?: string;
@@ -89,6 +92,52 @@ export interface SSHTunnel {
     localAdminPort?: number;
     localBrokerPort?: number;
     remoteHost?: string;
+    remoteAdminPort?: number;
+    remoteBrokerPort?: number;
+}
+
+// K8s 端口转发（kubectl port-forward）。与 SSH 隧道的区别只在"怎么把本地端口接到远端"：
+// 这里不填跳板机与凭据，而是填 kubeconfig 里已有的上下文 + 命名空间 + 资源名，
+// 认证完全交给 kubectl 自己。
+export interface K8sForwardConfig {
+    // 已落库的转发行 id；不带表示新建。测试通过后渲染层回填，避免留孤儿配置。
+    id?: string;
+    namespace: string;
+    // kubectl 的资源标识，形如 service/pulsar-broker、statefulset/pulsar-broker、pod/xxx
+    resource: string;
+    context?: string;
+    kubeconfigPath?: string;
+    // kubectl 可执行文件；留空按 PATH 里的 kubectl
+    kubectlPath?: string;
+    // 转发到的远端端口。留空时按集群自身的 Admin / Broker 地址端口解析
+    remoteAdminPort?: number;
+    remoteBrokerPort?: number;
+}
+
+// 随集群列表下发的转发摘要。这里没有凭据字段——kubeconfig 才是凭据所在，
+// 本表只存它的路径字符串，所以路径可以下发（表单要回填），而内容绝不读进库。
+export interface K8sForwardSummary {
+    namespace: string;
+    resource: string;
+    context?: string;
+    kubeconfigPath?: string;
+    kubectlPath?: string;
+    remoteAdminPort?: number;
+    remoteBrokerPort?: number;
+    // 当前是否已有活的本地转发（kubectl 进程还在）
+    forwardActive?: boolean;
+}
+
+export interface K8sForward {
+    id: string;
+    namespace: string;
+    resource: string;
+    context?: string;
+    kubeconfigPath?: string;
+    kubectlPath?: string;
+    status?: 'connected' | 'disconnected' | 'error';
+    localAdminPort?: number;
+    localBrokerPort?: number;
     remoteAdminPort?: number;
     remoteBrokerPort?: number;
 }
@@ -1474,6 +1523,19 @@ export interface ExportedSshConfig {
     remoteBrokerPort?: number | null;
 }
 
+// 导出文件里的 K8s 转发条目。与 SSH 那条同一个尺度：这里没有一个字节是凭据——
+// 凭据在 kubeconfig 那个文件里，本条目只有它的"路径"与命名空间/资源名。
+// 换台机器导入时这个路径大概率不存在，用户仍要在集群表单里确认一次。
+export interface ExportedK8sForwardConfig {
+    namespace: string;
+    resource: string;
+    context?: string | null;
+    kubeconfigPath?: string | null;
+    kubectlPath?: string | null;
+    remoteAdminPort?: number | null;
+    remoteBrokerPort?: number | null;
+}
+
 // 导出文件里的集群条目：刻意没有 authParams / 密码 / 私钥，
 // 明文导出文件不该携带凭据，导入后需用户在集群表单里补一次。
 export interface ExportedClusterConfig {
@@ -1484,6 +1546,7 @@ export interface ExportedClusterConfig {
     tlsEnabled: boolean;
     adminApiTimeout: number;
     ssh?: ExportedSshConfig | null;
+    k8s?: ExportedK8sForwardConfig | null;
 }
 
 export interface ExportedShortcutConfig {
@@ -1506,6 +1569,9 @@ export interface ConfigImportResult {
     clustersImported: number;
     clustersSkipped: string[];
     tunnelsImported: number;
+    // 老导出文件里没有 k8s 这一项，所以只有真的带进来了才计数；
+    // 与 tunnelsImported 分开报，用户才知道导入的到底是哪种通道
+    forwardsImported: number;
     shortcutsApplied: boolean;
 }
 

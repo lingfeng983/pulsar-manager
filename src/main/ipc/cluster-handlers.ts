@@ -4,11 +4,14 @@ import {
     getAllClusters,
     getAllSSHTunnels,
     getSSHTunnelById,
+    getAllK8sForwards,
+    getK8sForwardById,
     getClusterById,
     insertCluster,
     updateCluster,
     deleteCluster,
     deleteSSHTunnel,
+    deleteK8sForward,
     insertOperationLog,
     runInTransaction,
     PulsarAdminClient,
@@ -17,6 +20,7 @@ import {
     ClusterTestSchema,
     ClusterIdSchema,
     SshInlineSchema,
+    K8sInlineSchema,
     encrypt,
     encryptSensitiveFields,
     normalizeCluster,
@@ -29,9 +33,14 @@ import {
     persistSshConfig,
     reuseSshConfig,
     establishTunnel,
+    persistK8sConfig,
+    reuseK8sConfig,
+    establishK8sForward,
     rewriteUrl,
     tunnelVerifyHost,
+    forwardVerifyHost,
     sshTunnelManager,
+    k8sForwardManager,
 } from './_shared';
 import {createLogger} from '../utils/logger';
 import {nativeClientManager} from '../services/pulsar-native-client';
@@ -71,17 +80,57 @@ function resolveTunnelId(
     throw new Error('SSH 隧道需要主机与用户名');
 }
 
+// K8s 转发落库的三种情形，与上面 SSH 完全对称。
+function resolveK8sConfigId(
+    config: {
+        useK8sForward?: boolean | null;
+        k8s?: z.infer<typeof K8sInlineSchema> | null;
+        k8sConfigId?: string | null;
+    },
+    ownerClusterId: string | null,
+): string | null {
+    if (!config.useK8sForward) {
+        return null;
+    }
+    if (config.k8s) {
+        return persistK8sConfig(config.k8s, config.k8sConfigId, ownerClusterId);
+    }
+    if (config.k8sConfigId) {
+        return reuseK8sConfig(config.k8sConfigId, ownerClusterId);
+    }
+    throw new Error('K8s 端口转发需要命名空间与资源名');
+}
+
 // 测试连接与真实请求共用同一套地址解析：勾选隧道时先建隧道，再把地址换成
 // 本地转发端点，否则"测试通过但保存后连不上"永远对不上号。
-async function resolveTestTarget(
-    input: ClusterDraft,
-): Promise<{serviceUrl: string; webServiceUrl?: string; tlsVerifyHost?: string; sshConfigId?: string}> {
+async function resolveTestTarget(input: ClusterDraft): Promise<{
+    serviceUrl: string;
+    webServiceUrl?: string;
+    tlsVerifyHost?: string;
+    sshConfigId?: string;
+    k8sConfigId?: string;
+}> {
     const base = {
         serviceUrl: input.serviceUrl,
         webServiceUrl: input.webServiceUrl || undefined,
         tlsVerifyHost: undefined as string | undefined,
         sshConfigId: undefined as string | undefined,
+        k8sConfigId: undefined as string | undefined,
     };
+    if (input.useK8sForward) {
+        const resolved = await establishK8sForward(
+            {service_url: input.serviceUrl, web_service_url: input.webServiceUrl},
+            {k8sConfigId: input.k8sConfigId, k8s: input.k8s, ownerClusterId: input.id},
+        );
+        return {
+            serviceUrl: rewriteUrl(input.serviceUrl, resolved.endpoints.localBrokerPort),
+            webServiceUrl: input.webServiceUrl
+                ? rewriteUrl(input.webServiceUrl, resolved.endpoints.localAdminPort)
+                : `${input.tlsEnabled ? 'https' : 'http'}://127.0.0.1:${resolved.endpoints.localAdminPort}`,
+            tlsVerifyHost: forwardVerifyHost({service_url: input.serviceUrl, web_service_url: input.webServiceUrl}),
+            k8sConfigId: resolved.forwardId,
+        };
+    }
     if (!input.useSshTunnel) {
         return base;
     }
@@ -102,20 +151,23 @@ async function resolveTestTarget(
     };
 }
 
-// 只为这次测试建立的隧道：用户点完"测试连接"就取消弹窗的话，本地监听端口和
-// SSH 长连接会一直留着（下一次启动还得换端口）。没有任何已保存集群引用它时才拆，
-// 正在被集群使用的转发不能动——真实请求虽然会按需重建，但没必要为此掐断在线链路。
-async function releaseTestOnlyTunnel(tunnelId?: string): Promise<void> {
-    if (!tunnelId) {
-        return;
+// 只为这次测试建立的转发：用户点完"测试连接"就取消弹窗的话，本地端口和
+// SSH 长连接 / kubectl 进程会一直留着（下一次启动还得换端口）。没有任何已保存集群引用
+// 它时才拆，正在被集群使用的转发不能动——真实请求虽然会按需重建，但没必要为此掐断在线链路。
+async function releaseTestOnlyForward(target: {sshConfigId?: string; k8sConfigId?: string}): Promise<void> {
+    if (target.sshConfigId && !getAllClusters().some(cluster => cluster.ssh_config_id === target.sshConfigId)) {
+        try {
+            await sshTunnelManager.disconnect(target.sshConfigId);
+        } catch (error) {
+            log.warn('test tunnel cleanup failed', error instanceof Error ? error.message : String(error));
+        }
     }
-    if (getAllClusters().some(cluster => cluster.ssh_config_id === tunnelId)) {
-        return;
-    }
-    try {
-        await sshTunnelManager.disconnect(tunnelId);
-    } catch (error) {
-        log.warn('test tunnel cleanup failed', error instanceof Error ? error.message : String(error));
+    if (target.k8sConfigId && !getAllClusters().some(cluster => cluster.k8s_config_id === target.k8sConfigId)) {
+        try {
+            await k8sForwardManager.disconnect(target.k8sConfigId);
+        } catch (error) {
+            log.warn('test forward cleanup failed', error instanceof Error ? error.message : String(error));
+        }
     }
 }
 
@@ -123,12 +175,19 @@ export function registerClusterHandlers() {
     registerRawHandler('cluster:list', async () => {
         try {
             ensureDbInitialized();
-            // 一次取全部隧道再按 id 匹配，避免每个集群查一次
+            // 一次取全部隧道/转发再按 id 匹配，避免每个集群查一次
             const tunnels = new Map(getAllSSHTunnels().map(tunnel => [tunnel.id, tunnel]));
+            const forwards = new Map(getAllK8sForwards().map(forward => [forward.id, forward]));
             const clusters = getAllClusters();
             return {
                 success: true,
-                data: clusters.map(cluster => normalizeCluster(cluster, tunnels.get(cluster.ssh_config_id || ''))),
+                data: clusters.map(cluster =>
+                    normalizeCluster(
+                        cluster,
+                        tunnels.get(cluster.ssh_config_id || ''),
+                        forwards.get(cluster.k8s_config_id || ''),
+                    ),
+                ),
             };
         } catch (error) {
             log.error('cluster:list failed', formatError(error));
@@ -174,10 +233,15 @@ export function registerClusterHandlers() {
                 }),
             );
             const tunnels = new Map(getAllSSHTunnels().map(tunnel => [tunnel.id, tunnel]));
+            const forwards = new Map(getAllK8sForwards().map(forward => [forward.id, forward]));
             return {
                 success: true,
                 data: getAllClusters().map(cluster =>
-                    normalizeCluster(cluster, tunnels.get(cluster.ssh_config_id || '')),
+                    normalizeCluster(
+                        cluster,
+                        tunnels.get(cluster.ssh_config_id || ''),
+                        forwards.get(cluster.k8s_config_id || ''),
+                    ),
                 ),
             };
         } catch (error) {
@@ -194,6 +258,7 @@ export function registerClusterHandlers() {
             const id = uuidv4();
             const encrypted = encryptSensitiveFields(validated);
             const sshConfigId = resolveTunnelId(validated, id);
+            const k8sConfigId = resolveK8sConfigId(validated, id);
 
             // 集群记录、隧道记录与操作日志必须一起提交，避免出现只写了一半的状态
             runInTransaction(() => {
@@ -208,6 +273,8 @@ export function registerClusterHandlers() {
                     tls_trust_certs: encrypted.tlsTrustCerts,
                     use_ssh_tunnel: encrypted.useSshTunnel ? 1 : 0,
                     ssh_config_id: sshConfigId,
+                    use_k8s_forward: encrypted.useK8sForward ? 1 : 0,
+                    k8s_config_id: k8sConfigId,
                     admin_api_timeout: encrypted.adminApiTimeout || 5000,
                     status: 'disconnected',
                 });
@@ -225,7 +292,11 @@ export function registerClusterHandlers() {
             // 不回传凭据，只回传渲染进程需要的字段
             return {
                 success: true,
-                data: normalizeCluster(getClusterById(id), sshConfigId ? getSSHTunnelById(sshConfigId) : undefined),
+                data: normalizeCluster(
+                    getClusterById(id),
+                    sshConfigId ? getSSHTunnelById(sshConfigId) : undefined,
+                    k8sConfigId ? getK8sForwardById(k8sConfigId) : undefined,
+                ),
             };
         } catch (error) {
             log.error('cluster:add failed', formatError(error));
@@ -255,6 +326,16 @@ export function registerClusterHandlers() {
                       id,
                   )
                 : existing.ssh_config_id;
+            const k8sConfigId = validated.useK8sForward
+                ? resolveK8sConfigId(
+                      {
+                          useK8sForward: true,
+                          k8s: validated.k8s,
+                          k8sConfigId: validated.k8sConfigId || existing.k8s_config_id,
+                      },
+                      id,
+                  )
+                : existing.k8s_config_id;
 
             // 凭据不会下发到渲染进程，所以表单提交空值意味着"保持不变"，
             // 只有真的填了新值才覆盖。
@@ -272,6 +353,8 @@ export function registerClusterHandlers() {
                     tls_trust_certs: tlsTrustCerts,
                     use_ssh_tunnel: validated.useSshTunnel ? 1 : 0,
                     ssh_config_id: sshConfigId,
+                    use_k8s_forward: validated.useK8sForward ? 1 : 0,
+                    k8s_config_id: k8sConfigId,
                     admin_api_timeout: validated.adminApiTimeout || 5000,
                 });
 
@@ -299,10 +382,21 @@ export function registerClusterHandlers() {
             if (sshConfigId && sshConfigId !== previousTunnelId) {
                 void sshTunnelManager.invalidate(sshConfigId);
             }
+            const previousForwardId = existing.k8s_config_id;
+            if (previousForwardId) {
+                void k8sForwardManager.invalidate(previousForwardId);
+            }
+            if (k8sConfigId && k8sConfigId !== previousForwardId) {
+                void k8sForwardManager.invalidate(k8sConfigId);
+            }
 
             return {
                 success: true,
-                data: normalizeCluster(getClusterById(id), sshConfigId ? getSSHTunnelById(sshConfigId) : undefined),
+                data: normalizeCluster(
+                    getClusterById(id),
+                    sshConfigId ? getSSHTunnelById(sshConfigId) : undefined,
+                    k8sConfigId ? getK8sForwardById(k8sConfigId) : undefined,
+                ),
             };
         } catch (error) {
             log.error('cluster:update failed', formatError(error));
@@ -324,6 +418,9 @@ export function registerClusterHandlers() {
                     if (cluster.ssh_config_id) {
                         deleteSSHTunnel(cluster.ssh_config_id);
                     }
+                    if (cluster.k8s_config_id) {
+                        deleteK8sForward(cluster.k8s_config_id);
+                    }
                     insertOperationLog({
                         cluster_id: null,
                         action: 'delete',
@@ -340,6 +437,9 @@ export function registerClusterHandlers() {
             void nativeClientManager.removeCluster(id);
             if (cluster?.ssh_config_id) {
                 void sshTunnelManager.disconnect(cluster.ssh_config_id);
+            }
+            if (cluster?.k8s_config_id) {
+                void k8sForwardManager.disconnect(cluster.k8s_config_id);
             }
 
             return {success: true};
@@ -382,19 +482,26 @@ export function registerClusterHandlers() {
                 return {
                     success: false,
                     error: '无法连接到 Pulsar 集群，请检查服务地址和认证配置',
-                    data: {sshConfigId: target.sshConfigId},
+                    data: {sshConfigId: target.sshConfigId, k8sConfigId: target.k8sConfigId},
                 };
             }
 
             return {
                 success: true,
-                data: {connected: result.connected, version: result.version, sshConfigId: target.sshConfigId},
+                data: {
+                    connected: result.connected,
+                    version: result.version,
+                    sshConfigId: target.sshConfigId,
+                    k8sConfigId: target.k8sConfigId,
+                },
             };
         } catch (error) {
             log.error('cluster:testConnection failed', formatError(error));
             return {success: false, error: formatError(error)};
         } finally {
-            await releaseTestOnlyTunnel(target?.sshConfigId);
+            if (target) {
+                await releaseTestOnlyForward(target);
+            }
         }
     });
 }

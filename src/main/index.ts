@@ -5,6 +5,7 @@ import {registerIPCHandlers, cleanupDatabase} from './ipc/handlers';
 import {nativeClientManager} from './services/pulsar-native-client';
 import {loadTestManager} from './services/load-test';
 import {sshTunnelManager} from './services/ssh-tunnel';
+import {k8sForwardManager} from './services/k8s-port-forward';
 import {stopAlertEngine, syncAlertEngine} from './services/alert-engine';
 import {createLogger, setLogFileForMainProcess} from './utils/logger';
 
@@ -338,6 +339,9 @@ app.on('will-quit', event => {
         await release('load test shutdown', () => loadTestManager.closeAll());
         await release('native client shutdown', () => nativeClientManager.clear());
         await release('ssh tunnel shutdown', () => sshTunnelManager.closeAll());
+        // kubectl 是被我们 spawn 出来的子进程：应用退出而不杀它，本地端口会一直被占着，
+        // 直到那个孤儿进程自己因为 apiserver 连接断开才放（可能要几分钟，也可能永远不放）。
+        await release('k8s forward shutdown', () => k8sForwardManager.closeAll());
     })().finally(() => {
         resourcesReleased = true;
         cleanupDatabase();

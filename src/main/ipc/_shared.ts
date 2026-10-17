@@ -16,12 +16,18 @@ import {
     insertSSHTunnel,
     updateSSHTunnel,
     deleteSSHTunnel,
+    getAllK8sForwards,
+    getK8sForwardById,
+    insertK8sForward,
+    updateK8sForward,
+    deleteK8sForward,
     getSetting,
     setSetting,
     insertOperationLog,
     insertSendHistory,
     runInTransaction,
     type SSHTunnelRecord,
+    type K8sForwardRecord,
 } from '../database/sqlite';
 import {encrypt, decrypt} from '../services/encryption';
 import {SERVICE_URL_PATTERN, WEB_URL_PATTERN} from '../services/app-config';
@@ -33,6 +39,7 @@ import {NAMESPACE_SYNC_MAX_TARGETS} from '../services/namespace-policy-sync';
 import {TOPIC_SYNC_MAX_TARGETS} from '../services/topic-policy-sync';
 import type {NamespacePolicyField, TopicPolicyField} from '../../shared/types';
 import {sshTunnelManager, type TunnelEndpoints, type TunnelTargets} from '../services/ssh-tunnel';
+import {k8sForwardManager, type ForwardEndpoints, type ForwardTargets} from '../services/k8s-port-forward';
 import {createLogger} from '../utils/logger';
 
 const log = createLogger('IPC');
@@ -54,6 +61,11 @@ export {
     insertSSHTunnel,
     updateSSHTunnel,
     deleteSSHTunnel,
+    getAllK8sForwards,
+    getK8sForwardById,
+    insertK8sForward,
+    updateK8sForward,
+    deleteK8sForward,
     getSetting,
     setSetting,
     insertOperationLog,
@@ -64,9 +76,10 @@ export {
     PulsarAdminClient,
     clientManager,
     sshTunnelManager,
+    k8sForwardManager,
 };
 
-export type {SSHTunnelRecord, TunnelTargets};
+export type {SSHTunnelRecord, TunnelTargets, K8sForwardRecord, ForwardTargets};
 
 // Zod schemas for validation
 export const ClusterIdSchema = z.string().min(1).uuid();
@@ -98,17 +111,66 @@ export const SSHConfigSchema = SshInlineSchema.extend({
     id: TunnelIdSchema,
 });
 
-// 集群表单从打开起就带着 ssh 的半成品默认值（只有 port/authType）。没勾隧道时
-// 拿完整 SSH 校验去卡它，"测试连接"就会抛一整段 zod JSON。未勾选直接丢掉这段。
-function stripUnusedSsh<T extends z.ZodTypeAny>(schema: T) {
+// K8s 转发的资源标识：kubectl 只认 TYPE/NAME 这一种写法（svc/x、statefulset/x、pod/x）。
+// 首字符限字母有两个用处：不接受以 - 开头的值被 kubectl 当成选项解析，
+// 以及挡住 "--" 这类会把后面所有参数变成 kubectl 自己参数的输入。
+// 名字部分按 K8s 自己的 DNS subdomain 口径来（小写字母数字、'-'、'.'）。
+const K8sResourceSchema = z
+    .string()
+    .min(3)
+    .max(256)
+    .regex(/^[a-z][a-z0-9.]*\/[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/, '需形如 service/pulsar-broker（小写的 TYPE/NAME）');
+
+// 命名空间是 DNS-1123 label：只能小写字母数字与 '-'，且不能以 '-' 开头或结尾。
+const K8sNamespaceSchema = z
+    .string()
+    .min(1)
+    .max(63)
+    .regex(/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/, '命名空间只能用小写字母、数字与 -');
+
+export const K8sInlineSchema = z.object({
+    namespace: K8sNamespaceSchema,
+    resource: K8sResourceSchema,
+    // 上下文名在 kubeconfig 里是任意字符串（gke_x_y_z、ARN 带 '/' 都常见），
+    // 但它绝不能以 '-' 开头——那会被 kubectl 当成选项。空格允许：
+    // 我们走 spawn 的参数数组，不经过 shell，空格不会被拆开。
+    context: z
+        .string()
+        .max(255)
+        // 控制字符要挡：argv 里混进换行等于往 kubectl 的输出里注入伪造的就绪行。
+        // eslint 觉得"控制字符正则是想匹配用户粘贴的脏输入"是可疑写法，这里正是这个场景。
+        // eslint-disable-next-line no-control-regex
+        .regex(/^[^-\s][^\x00-\x1F]*$/)
+        .optional()
+        .nullable(),
+    // 留空即用 kubectl 自己的默认（KUBECONFIG 环境变量或 ~/.kube/config）。
+    // 这里只存路径字符串，绝不把文件内容读进库：那里面才是凭据。
+    kubeconfigPath: z.string().max(1024).optional().nullable(),
+    // 留空按 PATH 里的 kubectl；桌面应用从图标启动时 PATH 常常不含 brew/npm 目录，
+    // 所以这一格必须能填绝对路径，而不是假设用户装完就能直接用。
+    kubectlPath: z.string().max(1024).optional().nullable(),
+    remoteAdminPort: z.number().int().min(1).max(65535).optional().nullable(),
+    remoteBrokerPort: z.number().int().min(1).max(65535).optional().nullable(),
+});
+
+export const K8sConfigSchema = K8sInlineSchema.extend({
+    id: TunnelIdSchema,
+});
+
+// 集群表单从打开起就带着 ssh / k8s 的半成品默认值（只有 port/authType）。没勾那一项时
+// 拿完整校验去卡它，"测试连接"就会抛一整段 zod JSON。未勾选直接丢掉这段。
+function stripUnusedForwards<T extends z.ZodTypeAny>(schema: T) {
     return z.preprocess(value => {
         if (value && typeof value === 'object' && !Array.isArray(value)) {
             const record = value as Record<string, unknown>;
-            if (!record.useSshTunnel && 'ssh' in record) {
-                const rest = {...record};
+            const rest = {...record};
+            if (!record.useSshTunnel) {
                 delete rest.ssh;
-                return rest;
             }
+            if (!record.useK8sForward) {
+                delete rest.k8s;
+            }
+            return rest;
         }
         return value;
     }, schema);
@@ -126,7 +188,7 @@ const optionalWebUrl = z
 // 负值会让 axios 立刻抛错、超大值会把请求挂在那里没人管，两者都不该进库。
 const adminApiTimeoutSchema = z.number().int().min(1000).max(120000).optional().nullable();
 
-export const ClusterConfigSchema = stripUnusedSsh(
+export const ClusterConfigSchema = stripUnusedForwards(
     z
         .object({
             name: z.string().min(1),
@@ -139,6 +201,9 @@ export const ClusterConfigSchema = stripUnusedSsh(
             useSshTunnel: z.boolean().optional().nullable(),
             sshConfigId: TunnelIdSchema,
             ssh: SshInlineSchema.optional().nullable(),
+            useK8sForward: z.boolean().optional().nullable(),
+            k8sConfigId: TunnelIdSchema,
+            k8s: K8sInlineSchema.optional().nullable(),
             // 与导入校验（app-config 的 1000..120000）同一区间：这里只写 z.number()
             // 的话，负值会让 axios 立刻失败、超大值会把请求挂住，而 0 之外没人兜底。
             adminApiTimeout: adminApiTimeoutSchema,
@@ -147,26 +212,42 @@ export const ClusterConfigSchema = stripUnusedSsh(
         // sshConfigId。缺了它会在连接阶段才报"隧道配置不存在"，用户看不到原因。
         .refine(config => !config.useSshTunnel || !!config.ssh?.host || !!config.sshConfigId, {
             message: 'SSH 隧道需要主机与用户名',
+        })
+        .refine(config => !config.useK8sForward || !!config.k8s?.resource || !!config.k8sConfigId, {
+            message: 'K8s 端口转发需要命名空间与资源名',
+        })
+        // 两条链路各自都会把 Admin / Broker 换成一个本地端口，同时勾上时
+        // "哪一个赢"没有定义：先建 SSH 再用 K8s 覆盖，界面显示的还是 SSH 那套参数。
+        // 与其静默选一个，不如在这里拒绝。
+        .refine(config => !(config.useSshTunnel && config.useK8sForward), {
+            message: 'SSH 隧道与 K8s 端口转发只能启用其一（两者都会改写 Admin 与 Broker 地址）',
         }),
 );
 
 // 测试连接与真实请求走同一套地址解析：勾选隧道时先建隧道再打本地端口，
 // 否则"测试通过但保存后连不上"的情况永远对不上号。
 // id 是"这次测试代表哪台已保存集群"（编辑弹窗本来就带着它），只用于隧道归属校验。
-export const ClusterTestSchema = stripUnusedSsh(
-    z.object({
-        id: ClusterIdSchema.optional().nullable(),
-        serviceUrl: z.string().regex(SERVICE_URL_PATTERN, '需为 pulsar://、pulsar+ssl:// 或 ssl:// 地址'),
-        webServiceUrl: optionalWebUrl,
-        authPlugin: z.string().optional().nullable(),
-        authParams: z.string().optional().nullable(),
-        adminApiTimeout: adminApiTimeoutSchema,
-        tlsEnabled: z.boolean().optional().nullable(),
-        tlsTrustCerts: z.string().optional().nullable(),
-        useSshTunnel: z.boolean().optional().nullable(),
-        sshConfigId: TunnelIdSchema,
-        ssh: SshInlineSchema.optional().nullable(),
-    }),
+export const ClusterTestSchema = stripUnusedForwards(
+    z
+        .object({
+            id: ClusterIdSchema.optional().nullable(),
+            serviceUrl: z.string().regex(SERVICE_URL_PATTERN, '需为 pulsar://、pulsar+ssl:// 或 ssl:// 地址'),
+            webServiceUrl: optionalWebUrl,
+            authPlugin: z.string().optional().nullable(),
+            authParams: z.string().optional().nullable(),
+            adminApiTimeout: adminApiTimeoutSchema,
+            tlsEnabled: z.boolean().optional().nullable(),
+            tlsTrustCerts: z.string().optional().nullable(),
+            useSshTunnel: z.boolean().optional().nullable(),
+            sshConfigId: TunnelIdSchema,
+            ssh: SshInlineSchema.optional().nullable(),
+            useK8sForward: z.boolean().optional().nullable(),
+            k8sConfigId: TunnelIdSchema,
+            k8s: K8sInlineSchema.optional().nullable(),
+        })
+        .refine(config => !(config.useSshTunnel && config.useK8sForward), {
+            message: 'SSH 隧道与 K8s 端口转发只能启用其一（两者都会改写 Admin 与 Broker 地址）',
+        }),
 );
 
 // 通用验证 schema
@@ -1094,8 +1175,9 @@ export function encryptSshSecrets(ssh: z.infer<typeof SshInlineSchema>): Partial
 // 标准化集群数据。
 // 注意：authParams / tlsTrustCerts / SSH 凭据属于凭据，只在主进程内解密使用，
 // 绝不随集群列表下发到渲染进程；这里只暴露"是否已配置"的布尔标记。
-// tunnel 是关联的 ssh_tunnels 行（cluster:list 一次查全部再按 id 匹配，避免 N+1）。
-export function normalizeCluster(cluster: any, tunnel?: SSHTunnelRecord) {
+// tunnel / forward 是关联的配置行（cluster:list 一次查全部再按 id 匹配，避免 N+1）。
+// K8s 那边没有凭据字段可藏：kubeconfig 内容从不入库，这里下发的只是它的路径。
+export function normalizeCluster(cluster: any, tunnel?: SSHTunnelRecord, forward?: K8sForwardRecord) {
     return {
         id: cluster.id,
         name: cluster.name,
@@ -1120,6 +1202,20 @@ export function normalizeCluster(cluster: any, tunnel?: SSHTunnelRecord) {
                   remoteBrokerPort: tunnel.remote_broker_port,
                   // 只报"当前是否有活的本地转发"，端口不下发（渲染层用不到）
                   tunnelActive: sshTunnelManager.endpoints(tunnel.id) !== undefined,
+              }
+            : undefined,
+        useK8sForward: !!cluster.use_k8s_forward,
+        k8sConfigId: cluster.k8s_config_id,
+        k8s: forward
+            ? {
+                  namespace: forward.namespace,
+                  resource: forward.resource,
+                  context: forward.context,
+                  kubeconfigPath: forward.kubeconfig_path,
+                  kubectlPath: forward.kubectl_path,
+                  remoteAdminPort: forward.remote_admin_port,
+                  remoteBrokerPort: forward.remote_broker_port,
+                  forwardActive: k8sForwardManager.endpoints(forward.id) !== undefined,
               }
             : undefined,
         adminApiTimeout: cluster.admin_api_timeout || 5000,
@@ -1166,7 +1262,9 @@ export interface ClusterConnectionConfig {
     // 走隧道时地址被改写成 127.0.0.1，证书校验仍要用原始主机名，
     // 否则等于把主机名校验关掉了。
     tlsVerifyHost?: string | null;
-    viaSshTunnel: boolean;
+    // 地址是不是被本地转发（SSH 隧道或 K8s port-forward）改写出来的。
+    // 原生客户端要用它拒绝「TLS + 转发」这个必然失败的组合，两种改写方式在那边等价。
+    viaLocalForward: boolean;
 }
 
 const LOCAL_TUNNEL_HOST = '127.0.0.1';
@@ -1350,7 +1448,141 @@ async function applySshTunnel(cluster: any, config: ClusterConnectionConfig): Pr
             ? rewriteUrl(config.webServiceUrl, resolved.endpoints.localAdminPort)
             : `${config.tlsEnabled ? 'https' : 'http'}://${LOCAL_TUNNEL_HOST}:${resolved.endpoints.localAdminPort}`,
         tlsVerifyHost: tunnelVerifyHost(cluster, resolved.targets),
-        viaSshTunnel: true,
+        viaLocalForward: true,
+    };
+}
+
+// 转发的远端端口：与 SSH 那边同一口径——优先用集群自身服务地址上的端口
+// （用户填的就是它想连的东西），k8s_forwards 里的端口只是手工连接测试时的兜底。
+function resolveK8sTargets(
+    cluster: {service_url: string; web_service_url?: string | null},
+    record: K8sForwardRecord,
+): ForwardTargets {
+    const admin = parseUrl(cluster.web_service_url);
+    const broker = parseUrl(cluster.service_url);
+    return {
+        adminPort: admin.port || record.remote_admin_port || 8080,
+        brokerPort: broker.port || record.remote_broker_port || 6650,
+    };
+}
+
+// 转发行的归属与 SSH 隧道同一条规矩：它是集群表单内联录入的私有配置，
+// 拿着别的集群的 id 过来会把那台集群的转发目标整行换掉。
+function requireOwnedForward(k8sConfigId: string, ownerClusterId?: string | null): K8sForwardRecord {
+    const existing = getK8sForwardById(k8sConfigId);
+    if (!existing) {
+        throw new Error('未找到对应的 K8s 端口转发配置，请在集群设置里重新填写');
+    }
+    const owner = getAllClusters().find(
+        cluster => cluster.k8s_config_id === existing.id && cluster.id !== ownerClusterId,
+    );
+    if (owner) {
+        throw new Error(`该 K8s 端口转发配置已被集群「${owner.name}」使用，请重新填写一份转发参数`);
+    }
+    return existing;
+}
+
+/**
+ * 勾选了转发但这次没有重填参数：沿用已落库的那一行（校验存在与归属），不写任何数据。
+ */
+export function reuseK8sConfig(k8sConfigId: string, ownerClusterId?: string | null): string {
+    return requireOwnedForward(k8sConfigId, ownerClusterId).id;
+}
+
+/**
+ * 把表单里的转发参数落库：有 k8sConfigId 就覆盖那一行，否则新建。
+ * 这里没有任何凭据要"留空表示沿用"——kubeconfig 路径本身就是一项普通配置。
+ */
+export function persistK8sConfig(
+    k8s: z.infer<typeof K8sInlineSchema>,
+    k8sConfigId?: string | null,
+    ownerClusterId?: string | null,
+): string {
+    const existing = k8sConfigId ? requireOwnedForward(k8sConfigId, ownerClusterId) : undefined;
+    if (!existing) {
+        const id = uuidv4();
+        insertK8sForward({
+            id,
+            namespace: k8s.namespace,
+            resource: k8s.resource,
+            context: k8s.context || null,
+            kubeconfig_path: k8s.kubeconfigPath || null,
+            kubectl_path: k8s.kubectlPath || null,
+            local_admin_port: 0,
+            local_broker_port: 0,
+            remote_admin_port: k8s.remoteAdminPort || 8080,
+            remote_broker_port: k8s.remoteBrokerPort || 6650,
+            status: 'disconnected',
+        });
+        return id;
+    }
+    updateK8sForward(existing.id, {
+        namespace: k8s.namespace,
+        resource: k8s.resource,
+        context: k8s.context || null,
+        kubeconfig_path: k8s.kubeconfigPath || null,
+        kubectl_path: k8s.kubectlPath || null,
+        remote_admin_port: k8s.remoteAdminPort || existing.remote_admin_port || 8080,
+        remote_broker_port: k8s.remoteBrokerPort || existing.remote_broker_port || 6650,
+    });
+    return existing.id;
+}
+
+export interface ForwardResolution {
+    forwardId: string;
+    endpoints: ForwardEndpoints;
+    targets: ForwardTargets;
+}
+
+/**
+ * 按（可能尚未落库的）转发参数起一条 kubectl port-forward。
+ * 与 establishTunnel 同一套规则：带参数就落库并按新参数重建，只带 id 就复用已存的行。
+ */
+export async function establishK8sForward(
+    clusterLike: {service_url: string; web_service_url?: string | null},
+    options: {
+        k8sConfigId?: string | null;
+        k8s?: z.infer<typeof K8sInlineSchema> | null;
+        ownerClusterId?: string | null;
+    },
+): Promise<ForwardResolution> {
+    let forwardId: string;
+    if (options.k8s) {
+        forwardId = persistK8sConfig(options.k8s, options.k8sConfigId, options.ownerClusterId);
+        // 命名空间或资源名换了还复用旧进程，请求会继续打到上一个 pod
+        await k8sForwardManager.invalidate(forwardId);
+    } else {
+        if (!options.k8sConfigId) {
+            throw new Error('启用 K8s 端口转发需要填写命名空间与资源名');
+        }
+        forwardId = options.k8sConfigId;
+    }
+    const record = getK8sForwardById(forwardId);
+    if (!record) {
+        throw new Error('未找到对应的 K8s 端口转发配置，请在集群设置里重新填写');
+    }
+    const targets = resolveK8sTargets(clusterLike, record);
+    const endpoints = await k8sForwardManager.ensure(record, targets);
+    return {forwardId: record.id, endpoints, targets};
+}
+
+// 已勾选转发的集群：起 kubectl（或复用已在转发的进程），把两条链路指向本地端口。
+// 证书校验主机名只能取用户填写的服务地址：转发的对端是集群内的 service/pod，
+// 它自己的名字（pulsar-broker.pulsar.svc.cluster.local）不会出现在 broker 证书里。
+export function forwardVerifyHost(source: {service_url: string; web_service_url?: string | null}): string | null {
+    return parseUrl(source.web_service_url).host || parseUrl(source.service_url).host || null;
+}
+
+async function applyK8sForward(cluster: any, config: ClusterConnectionConfig): Promise<ClusterConnectionConfig> {
+    const resolved = await establishK8sForward(cluster, {k8sConfigId: cluster.k8s_config_id});
+    return {
+        ...config,
+        serviceUrl: rewriteUrl(cluster.service_url, resolved.endpoints.localBrokerPort),
+        webServiceUrl: config.webServiceUrl
+            ? rewriteUrl(config.webServiceUrl, resolved.endpoints.localAdminPort)
+            : `${config.tlsEnabled ? 'https' : 'http'}://${LOCAL_TUNNEL_HOST}:${resolved.endpoints.localAdminPort}`,
+        tlsVerifyHost: forwardVerifyHost(cluster),
+        viaLocalForward: true,
     };
 }
 
@@ -1370,12 +1602,17 @@ export async function buildConnectionConfig(clusterId: string): Promise<ClusterC
         tlsEnabled: !!cluster.tls_enabled,
         tlsTrustCerts: cluster.tls_trust_certs ? decrypt(cluster.tls_trust_certs) : null,
         tlsVerifyHost: null,
-        viaSshTunnel: false,
+        viaLocalForward: false,
     };
-    if (!cluster.use_ssh_tunnel) {
-        return config;
+    // 两条转发不会同时开（schema 已互斥），所以这里按勾选顺序各判一次即可。
+    // SSH 排在前面是历史：先勾过隧道的老集群不会因为多了这个开关而改行为。
+    if (cluster.use_ssh_tunnel) {
+        return applySshTunnel(cluster, config);
     }
-    return applySshTunnel(cluster, config);
+    if (cluster.use_k8s_forward) {
+        return applyK8sForward(cluster, config);
+    }
+    return config;
 }
 
 // 获取 Pulsar Admin Client（公共方法）

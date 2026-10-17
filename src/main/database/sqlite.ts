@@ -10,7 +10,7 @@ let db: Database.Database | null = null;
 // schema 版本以 user_version 跟踪。改基线 DDL 时：升 SCHEMA_VERSION，
 // 并把该版本的增量 DDL 写进 migrate()——CREATE TABLE IF NOT EXISTS 对已存在的
 // 旧库什么都不做，没有这套机制，加列只会对新装用户生效，旧库静默落后。
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 
 function migrate(database: Database.Database, from: number): void {
     // v2：refreshInterval 那行出厂值是 30000，而监控页的刷新间隔单位是秒，
@@ -52,6 +52,20 @@ function migrate(database: Database.Database, from: number): void {
     // 这段留着只为说明 v8 确实做过事，与 v5 同一个理由。
     // v9：告警两张表（alert_rules / alert_events）与那条"一条规则只允许一条未恢复事件"
     // 的偏唯一索引。同样只加表不动旧列，基线语句对老库生效，这里没有数据要修补。
+    // v10：K8s 端口转发。k8s_forwards 这张新表靠基线补齐，但 clusters 上的两列是往
+    // 已存在的表上加，基线的 CREATE TABLE IF NOT EXISTS 对老库什么都不做——
+    // 不 ALTER 的话，老库读集群时拿到 undefined、写集群时直接 no such column，
+    // 而且和 v6/v7 同一个坑：新库基线已带这两列，不查表结构就 ALTER 会 duplicate column
+    // 把整个启动期迁移顶掉。
+    if (from < 10) {
+        const columns = database.prepare('PRAGMA table_info(clusters)').all() as {name: string}[];
+        if (!columns.some(column => column.name === 'use_k8s_forward')) {
+            database.prepare('ALTER TABLE clusters ADD COLUMN use_k8s_forward INTEGER DEFAULT 0').run();
+        }
+        if (!columns.some(column => column.name === 'k8s_config_id')) {
+            database.prepare('ALTER TABLE clusters ADD COLUMN k8s_config_id TEXT').run();
+        }
+    }
 }
 
 // 每次启动都执行基线再补迁移：基线全是幂等语句，因此旧库缺的表和出厂设置行
@@ -124,6 +138,11 @@ export function initDatabase(): Database.Database {
         console.log(`[Database] Cleaned up ${orphans} unreferenced SSH tunnel configs`);
     }
 
+    const orphanForwards = cleanupOrphanK8sForwards();
+    if (orphanForwards > 0) {
+        console.log(`[Database] Cleaned up ${orphanForwards} unreferenced K8s port-forward configs`);
+    }
+
     return db;
 }
 
@@ -165,6 +184,8 @@ export interface ClusterRecord {
     tls_trust_certs?: string;
     use_ssh_tunnel: number;
     ssh_config_id?: string;
+    use_k8s_forward: number;
+    k8s_config_id?: string;
     admin_api_timeout: number;
     status: string;
     version?: string;
@@ -193,10 +214,12 @@ export function insertCluster(
     INSERT INTO clusters (
       id, name, service_url, web_service_url, auth_plugin, auth_params,
       tls_enabled, tls_trust_certs, use_ssh_tunnel, ssh_config_id,
+      use_k8s_forward, k8s_config_id,
       admin_api_timeout, status, version, created_at, updated_at
     ) VALUES (
       @id, @name, @service_url, @web_service_url, @auth_plugin, @auth_params,
       @tls_enabled, @tls_trust_certs, @use_ssh_tunnel, @ssh_config_id,
+      @use_k8s_forward, @k8s_config_id,
       @admin_api_timeout, @status, @version, @created_at, @updated_at
     )
   `);
@@ -213,6 +236,8 @@ const CLUSTER_ALLOWED_FIELDS = new Set([
     'tls_trust_certs',
     'use_ssh_tunnel',
     'ssh_config_id',
+    'use_k8s_forward',
+    'k8s_config_id',
     'admin_api_timeout',
     'status',
     'version',
@@ -338,6 +363,94 @@ export function updateSSHTunnel(id: string, updates: Partial<SSHTunnelRecord>): 
 export function deleteSSHTunnel(id: string): void {
     const database = getDatabase();
     const stmt = database.prepare('DELETE FROM ssh_tunnels WHERE id = ?');
+    stmt.run(id);
+}
+
+// K8s 端口转发配置（与 SSH 隧道同一角色：集群表单内联录入、按集群独占）
+export interface K8sForwardRecord {
+    id: string;
+    namespace: string;
+    resource: string;
+    context?: string;
+    kubeconfig_path?: string;
+    kubectl_path?: string;
+    local_admin_port: number;
+    local_broker_port: number;
+    remote_admin_port: number;
+    remote_broker_port: number;
+    status: string;
+    created_at: string;
+    updated_at: string;
+}
+
+export function getAllK8sForwards(): K8sForwardRecord[] {
+    const database = getDatabase();
+    const stmt = database.prepare('SELECT * FROM k8s_forwards ORDER BY created_at DESC');
+    return stmt.all() as K8sForwardRecord[];
+}
+
+export function getK8sForwardById(id: string): K8sForwardRecord | undefined {
+    const database = getDatabase();
+    const stmt = database.prepare('SELECT * FROM k8s_forwards WHERE id = ?');
+    return stmt.get(id) as K8sForwardRecord | undefined;
+}
+
+export function insertK8sForward(forward: Omit<K8sForwardRecord, 'created_at' | 'updated_at'>): void {
+    const database = getDatabase();
+    const now = new Date().toISOString();
+    const stmt = database.prepare(`
+    INSERT INTO k8s_forwards (
+      id, namespace, resource, context, kubeconfig_path, kubectl_path,
+      local_admin_port, local_broker_port, remote_admin_port, remote_broker_port,
+      status, created_at, updated_at
+    ) VALUES (
+      @id, @namespace, @resource, @context, @kubeconfig_path, @kubectl_path,
+      @local_admin_port, @local_broker_port, @remote_admin_port, @remote_broker_port,
+      @status, @created_at, @updated_at
+    )
+  `);
+    stmt.run({...forward, created_at: now, updated_at: now});
+}
+
+const K8S_FORWARD_ALLOWED_FIELDS = new Set([
+    'namespace',
+    'resource',
+    'context',
+    'kubeconfig_path',
+    'kubectl_path',
+    'local_admin_port',
+    'local_broker_port',
+    'remote_admin_port',
+    'remote_broker_port',
+    'status',
+]);
+
+export function updateK8sForward(id: string, updates: Partial<K8sForwardRecord>): void {
+    const database = getDatabase();
+    const now = new Date().toISOString();
+
+    for (const key of Object.keys(updates)) {
+        if (key !== 'id' && !K8S_FORWARD_ALLOWED_FIELDS.has(key)) {
+            throw new Error(`Invalid field for K8s forward update: ${key}`);
+        }
+    }
+
+    const fields = Object.keys(updates)
+        .filter(k => k !== 'id' && K8S_FORWARD_ALLOWED_FIELDS.has(k))
+        .map(k => `${k} = @${k}`)
+        .join(', ');
+
+    if (fields === '') {
+        throw new Error('No valid fields provided for K8s forward update');
+    }
+
+    const stmt = database.prepare(`UPDATE k8s_forwards SET ${fields}, updated_at = @updated_at WHERE id = @id`);
+    stmt.run({...updates, id, updated_at: now});
+}
+
+export function deleteK8sForward(id: string): void {
+    const database = getDatabase();
+    const stmt = database.prepare('DELETE FROM k8s_forwards WHERE id = ?');
     stmt.run(id);
 }
 
@@ -1045,6 +1158,21 @@ export function cleanupOrphanSshTunnels(): number {
         .prepare(
             `DELETE FROM ssh_tunnels
              WHERE id NOT IN (SELECT ssh_config_id FROM clusters WHERE ssh_config_id IS NOT NULL)`,
+        )
+        .run();
+    return result.changes;
+}
+
+/**
+ * 剪掉没有任何集群引用的 K8s 转发配置。理由与 SSH 隧道那条完全一样：
+ * 点一次「测试端口转发」就落一行，用户随后取消弹窗就留下没人引用的行。
+ */
+export function cleanupOrphanK8sForwards(): number {
+    const database = getDatabase();
+    const result = database
+        .prepare(
+            `DELETE FROM k8s_forwards
+             WHERE id NOT IN (SELECT k8s_config_id FROM clusters WHERE k8s_config_id IS NOT NULL)`,
         )
         .run();
     return result.changes;

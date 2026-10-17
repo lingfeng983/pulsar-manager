@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS clusters (
     tls_trust_certs TEXT,
     use_ssh_tunnel INTEGER DEFAULT 0,
     ssh_config_id TEXT,
+    use_k8s_forward INTEGER DEFAULT 0,
+    k8s_config_id TEXT,
     admin_api_timeout INTEGER DEFAULT 5000,
     status TEXT DEFAULT 'disconnected',
     version TEXT,
@@ -35,6 +37,26 @@ CREATE TABLE IF NOT EXISTS ssh_tunnels (
     local_admin_port INTEGER DEFAULT 0,
     local_broker_port INTEGER DEFAULT 0,
     remote_host TEXT,
+    remote_admin_port INTEGER DEFAULT 8080,
+    remote_broker_port INTEGER DEFAULT 6650,
+    status TEXT DEFAULT 'disconnected',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- 集群端口转发表（kubectl port-forward）
+-- 与 ssh_tunnels 同一角色：集群表单内联录入、按集群独占的一行转发配置。
+-- 这里没有任何凭据——kubeconfig 路径指向的文件才是凭据，本表只存路径字符串，
+-- 所以既不用加密，也不该把文件内容读进来存一遍。
+CREATE TABLE IF NOT EXISTS k8s_forwards (
+    id TEXT PRIMARY KEY,
+    namespace TEXT NOT NULL,
+    resource TEXT NOT NULL,
+    context TEXT,
+    kubeconfig_path TEXT,
+    kubectl_path TEXT,
+    local_admin_port INTEGER DEFAULT 0,
+    local_broker_port INTEGER DEFAULT 0,
     remote_admin_port INTEGER DEFAULT 8080,
     remote_broker_port INTEGER DEFAULT 6650,
     status TEXT DEFAULT 'disconnected',
@@ -200,6 +222,7 @@ CREATE INDEX IF NOT EXISTS idx_clusters_status ON clusters(status);
 CREATE INDEX IF NOT EXISTS idx_operation_logs_cluster_id ON operation_logs(cluster_id);
 CREATE INDEX IF NOT EXISTS idx_operation_logs_created_at ON operation_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_ssh_tunnels_status ON ssh_tunnels(status);
+CREATE INDEX IF NOT EXISTS idx_k8s_forwards_status ON k8s_forwards(status);
 CREATE INDEX IF NOT EXISTS idx_message_templates_scope ON message_templates(cluster_id, topic_uri);
 CREATE INDEX IF NOT EXISTS idx_consumer_configs_scope ON consumer_session_configs(cluster_id, topic_uri);
 CREATE INDEX IF NOT EXISTS idx_send_history_scope ON send_history(cluster_id, topic_uri);

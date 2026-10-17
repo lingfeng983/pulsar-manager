@@ -11,10 +11,12 @@ import {z} from 'zod';
 import {
     getAllClusters,
     getAllSSHTunnels,
+    getAllK8sForwards,
     getDatabase,
     getSetting,
     insertCluster,
     insertSSHTunnel,
+    insertK8sForward,
     runInTransaction,
     setSetting,
 } from '../database/sqlite';
@@ -135,6 +137,26 @@ const ExportedSshSchema = z.object({
     remoteBrokerPort: z.number().int().min(1).max(65535).nullable().optional(),
 });
 
+// K8s 转发条目同样不含凭据：导出的是 kubeconfig 的"路径"，不是它的内容。
+// 换一台机器导入后这个路径多半不存在，导入摘要会提示集群需要自行检查连接。
+const ExportedK8sSchema = z.object({
+    namespace: z
+        .string()
+        .min(1)
+        .max(63)
+        .regex(/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/),
+    resource: z
+        .string()
+        .min(3)
+        .max(256)
+        .regex(/^[a-z][a-z0-9.]*\/[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/),
+    context: z.string().max(255).nullable().optional(),
+    kubeconfigPath: z.string().max(1024).nullable().optional(),
+    kubectlPath: z.string().max(1024).nullable().optional(),
+    remoteAdminPort: z.number().int().min(1).max(65535).nullable().optional(),
+    remoteBrokerPort: z.number().int().min(1).max(65535).nullable().optional(),
+});
+
 const ExportedClusterSchema = z.object({
     name: z.string().min(1).max(64),
     serviceUrl: z.string().regex(SERVICE_URL_PATTERN),
@@ -143,6 +165,7 @@ const ExportedClusterSchema = z.object({
     tlsEnabled: z.boolean(),
     adminApiTimeout: z.number().int().min(1000).max(120000),
     ssh: ExportedSshSchema.nullable().optional(),
+    k8s: ExportedK8sSchema.nullable().optional(),
 });
 
 // 快捷键覆盖表沿用渲染层的形状（version/enabled/windows/mac），
@@ -186,9 +209,11 @@ export function parseConfigBundle(raw: unknown): {bundle: ConfigBundle} | {error
 
 export function buildConfigBundle(): ConfigBundle {
     const tunnels = new Map(getAllSSHTunnels().map(tunnel => [tunnel.id, tunnel]));
+    const forwards = new Map(getAllK8sForwards().map(forward => [forward.id, forward]));
     const clusters: ExportedClusterConfig[] = [];
     for (const cluster of getAllClusters()) {
         const tunnel = cluster.ssh_config_id ? tunnels.get(cluster.ssh_config_id) : undefined;
+        const forward = cluster.k8s_config_id ? forwards.get(cluster.k8s_config_id) : undefined;
         const candidate = {
             name: cluster.name,
             serviceUrl: cluster.service_url,
@@ -205,6 +230,17 @@ export function buildConfigBundle(): ConfigBundle {
                       remoteHost: tunnel.remote_host ?? null,
                       remoteAdminPort: tunnel.remote_admin_port ?? null,
                       remoteBrokerPort: tunnel.remote_broker_port ?? null,
+                  }
+                : null,
+            k8s: forward
+                ? {
+                      namespace: forward.namespace,
+                      resource: forward.resource,
+                      context: forward.context ?? null,
+                      kubeconfigPath: forward.kubeconfig_path ?? null,
+                      kubectlPath: forward.kubectl_path ?? null,
+                      remoteAdminPort: forward.remote_admin_port ?? null,
+                      remoteBrokerPort: forward.remote_broker_port ?? null,
                   }
                 : null,
         };
@@ -249,6 +285,7 @@ export function applyConfigBundle(bundle: ConfigBundle): ConfigImportResult {
         clustersImported: 0,
         clustersSkipped: [],
         tunnelsImported: 0,
+        forwardsImported: 0,
         shortcutsApplied: false,
     };
     runInTransaction(() => {
@@ -283,6 +320,26 @@ export function applyConfigBundle(bundle: ConfigBundle): ConfigImportResult {
                 });
                 result.tunnelsImported += 1;
             }
+            let k8sConfigId: string | null = null;
+            if (cluster.k8s) {
+                k8sConfigId = randomUUID();
+                insertK8sForward({
+                    id: k8sConfigId,
+                    namespace: cluster.k8s.namespace,
+                    resource: cluster.k8s.resource,
+                    context: cluster.k8s.context ?? null,
+                    // kubeconfig 路径照抄：换机器时它指向的文件不存在，
+                    // 用户在表单里看一眼就能改，比导入时凭空丢掉这个配置好
+                    kubeconfig_path: cluster.k8s.kubeconfigPath ?? null,
+                    kubectl_path: cluster.k8s.kubectlPath ?? null,
+                    local_admin_port: 0,
+                    local_broker_port: 0,
+                    remote_admin_port: cluster.k8s.remoteAdminPort ?? 8080,
+                    remote_broker_port: cluster.k8s.remoteBrokerPort ?? 6650,
+                    status: 'disconnected',
+                });
+                result.forwardsImported += 1;
+            }
             insertCluster({
                 id: randomUUID(),
                 name: cluster.name,
@@ -294,6 +351,8 @@ export function applyConfigBundle(bundle: ConfigBundle): ConfigImportResult {
                 tls_trust_certs: null,
                 use_ssh_tunnel: sshConfigId ? 1 : 0,
                 ssh_config_id: sshConfigId,
+                use_k8s_forward: k8sConfigId ? 1 : 0,
+                k8s_config_id: k8sConfigId,
                 admin_api_timeout: cluster.adminApiTimeout,
                 status: 'disconnected',
             });

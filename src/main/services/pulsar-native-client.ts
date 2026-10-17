@@ -46,8 +46,8 @@ export interface NativeConnectionConfig {
     authParams?: string | null;
     tlsEnabled?: boolean;
     tlsTrustCerts?: string | null;
-    // 地址是被 SSH 隧道改写出来的 127.0.0.1
-    viaSshTunnel?: boolean;
+    // 地址是被本地转发改写出来的 127.0.0.1（SSH 隧道或 kubectl port-forward）
+    viaLocalForward?: boolean;
 }
 
 // 原生客户端只接受证书文件路径，而集群里存的是 PEM 内容，只能落一次盘。
@@ -87,11 +87,12 @@ function toClientConfig(config: NativeConnectionConfig): ClientConfig {
     // 隧道把地址换成 127.0.0.1 后，Broker 证书的主机名校验必然失败，而 pulsar-client
     // 的 Node 绑定没有暴露 SNI/服务名覆盖项（只有 tlsValidateHostname 开关），
     // 关掉校验等于放弃 TLS，所以这一组合明确拒绝而不是静默降级。
-    if (config.viaSshTunnel && tlsScheme) {
+    if (config.viaLocalForward && tlsScheme) {
         throw new Error(
-            '「TLS + SSH 隧道」的消息收发不可用：隧道把 Broker 地址换成了 127.0.0.1，证书主机名校验必然失败，' +
-                '而原生客户端没有可指定 SNI 的参数（管理 API、命名空间与监控走 HTTP，不受此限制）。二选一：' +
-                '经隧道访问时把 Broker 地址改为 pulsar://（流量已在隧道内加密），或关闭隧道直连 pulsar+ssl://。',
+            '「TLS + 本地转发（SSH 隧道 / K8s 端口转发）」的消息收发不可用：转发把 Broker 地址换成了 127.0.0.1，' +
+                '证书主机名校验必然失败，而原生客户端没有可指定 SNI 的参数（管理 API、命名空间与监控走 HTTP，' +
+                '不受此限制）。二选一：经转发访问时把 Broker 地址改为 pulsar://（流量已在转发通道内），' +
+                '或关闭转发直连 pulsar+ssl://。',
         );
     }
     const clientConfig: ClientConfig = {
@@ -332,7 +333,7 @@ function nativeConfigFingerprint(config: NativeConnectionConfig): string {
                 authParams: config.authParams || '',
                 tlsEnabled: config.tlsEnabled,
                 tlsTrustCerts: config.tlsTrustCerts || '',
-                viaSshTunnel: config.viaSshTunnel,
+                viaLocalForward: config.viaLocalForward,
             }),
         )
         .digest('hex');

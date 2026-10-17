@@ -50,6 +50,21 @@ function sshFormValues(ssh?: ClusterConfig['ssh']) {
     };
 }
 
+// K8s 那边没有"已配置凭据"的标记（凭据在 kubeconfig 文件里，不在本应用），
+// 所以除 forwardActive 之外都能回填。
+function k8sFormValues(k8s?: ClusterConfig['k8s']) {
+    if (!k8s) {
+        return undefined;
+    }
+    return {
+        namespace: k8s.namespace,
+        resource: k8s.resource,
+        context: k8s.context,
+        kubeconfigPath: k8s.kubeconfigPath,
+        kubectlPath: k8s.kubectlPath,
+    };
+}
+
 const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, onSuccess, editingCluster}) => {
     const [form] = Form.useForm();
     const [currentStep, setCurrentStep] = useState(0);
@@ -58,11 +73,17 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
     const [testResult, setTestResult] = useState<{connected: boolean; version?: string} | null>(null);
     const [tunnelTesting, setTunnelTesting] = useState(false);
     const [tunnelResult, setTunnelResult] = useState<{ok: boolean; text: string} | null>(null);
+    const [forwardTesting, setForwardTesting] = useState(false);
+    const [forwardResult, setForwardResult] = useState<{ok: boolean; text: string} | null>(null);
 
     useEffect(() => {
         if (open) {
             if (editingCluster) {
-                form.setFieldsValue({...editingCluster, ssh: sshFormValues(editingCluster.ssh)});
+                form.setFieldsValue({
+                    ...editingCluster,
+                    ssh: sshFormValues(editingCluster.ssh),
+                    k8s: k8sFormValues(editingCluster.k8s),
+                });
             } else {
                 form.resetFields();
                 form.setFieldsValue({
@@ -72,11 +93,13 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
                     tlsEnabled: false,
                     useSshTunnel: false,
                     ssh: {port: 22, authType: 'password'},
+                    useK8sForward: false,
                 });
             }
             setCurrentStep(0);
             setTestResult(null);
             setTunnelResult(null);
+            setForwardResult(null);
         }
     }, [open, editingCluster, form]);
 
@@ -94,10 +117,13 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
 
         try {
             const response = await window.electronAPI.cluster.testConnection(values);
-            // 失败时主进程同样回传它建立/落库的隧道 id：连不上不代表隧道没建，
-            // 不接住这条 id，保存时会再落一条重复的隧道配置。
+            // 失败时主进程同样回传它建立/落库的通道 id：连不上不代表转发没建，
+            // 不接住这条 id，保存时会再落一条重复的配置。
             if (response.data?.sshConfigId) {
                 form.setFieldValue('sshConfigId', response.data.sshConfigId);
+            }
+            if (response.data?.k8sConfigId) {
+                form.setFieldValue('k8sConfigId', response.data.k8sConfigId);
             }
             if (response.success && response.data) {
                 setTestResult(response.data);
@@ -149,6 +175,43 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
         }
     };
 
+    // 单独测一次转发：它只会证明"kubectl 能不能把这个资源的两条端口接到本地"，
+    // 不碰 Pulsar 本身。集群里还没填 Admin 地址时，这一步是唯一能核对命名空间与
+    // 资源名有没有写错的机会——报错也直接来自 kubectl，比 broker 的超时具体得多。
+    const handleTestForward = async () => {
+        try {
+            await form.validateFields([
+                ['k8s', 'namespace'],
+                ['k8s', 'resource'],
+            ]);
+        } catch {
+            return;
+        }
+        const k8s = form.getFieldValue('k8s');
+        setForwardTesting(true);
+        setForwardResult(null);
+        try {
+            const response = await window.electronAPI.k8s.connect({
+                ...k8s,
+                id: form.getFieldValue('k8sConfigId') || editingCluster?.k8sConfigId,
+                remoteAdminPort: k8s?.remoteAdminPort || 8080,
+                remoteBrokerPort: k8s?.remoteBrokerPort || 6650,
+            });
+            if (response.success && response.data) {
+                form.setFieldValue('k8sConfigId', response.data.forwardId);
+                const admin = `127.0.0.1:${response.data.localAdminPort}`;
+                const broker = `127.0.0.1:${response.data.localBrokerPort}`;
+                setForwardResult({ok: true, text: `转发已建立：Admin ${admin}，Broker ${broker}`});
+            } else {
+                setForwardResult({ok: false, text: response.error || '端口转发建立失败'});
+            }
+        } catch (error) {
+            setForwardResult({ok: false, text: error instanceof Error ? error.message : '端口转发建立失败'});
+        } finally {
+            setForwardTesting(false);
+        }
+    };
+
     const handleSubmit = async () => {
         let allValues: ClusterConfig;
         try {
@@ -196,17 +259,22 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
         if (typeof testTunnelId === 'string' && testTunnelId && testTunnelId !== editingCluster?.sshConfigId) {
             void window.electronAPI.ssh.disconnect(testTunnelId).catch(() => {});
         }
+        const testForwardId = form.getFieldValue('k8sConfigId');
+        if (typeof testForwardId === 'string' && testForwardId && testForwardId !== editingCluster?.k8sConfigId) {
+            void window.electronAPI.k8s.disconnect(testForwardId).catch(() => {});
+        }
         form.resetFields();
         setCurrentStep(0);
         setTestResult(null);
         setTunnelResult(null);
+        setForwardResult(null);
         onCancel();
     };
 
     const STEP_FIELDS: (string | string[])[][] = [
         ['name', 'serviceUrl', 'webServiceUrl', 'adminApiTimeout'],
         ['authPlugin', 'authParams'],
-        ['useSshTunnel'],
+        ['useSshTunnel', 'useK8sForward'],
         ['tlsEnabled', 'tlsTrustCerts'],
     ];
 
@@ -222,6 +290,14 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
               ]
             : [];
 
+    const k8sStepFields = (): (string | string[])[] =>
+        form.getFieldValue('useK8sForward')
+            ? [
+                  ['k8s', 'namespace'],
+                  ['k8s', 'resource'],
+              ]
+            : [];
+
     const connectionTestFields = (): (string | string[])[] => [
         'serviceUrl',
         'webServiceUrl',
@@ -230,10 +306,14 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
         'tlsEnabled',
         'tlsTrustCerts',
         ...sshStepFields(),
+        ...k8sStepFields(),
     ];
 
     const nextStep = async () => {
-        const fields = currentStep === 2 ? ['useSshTunnel', ...sshStepFields()] : STEP_FIELDS[currentStep];
+        const fields =
+            currentStep === 2
+                ? ['useSshTunnel', 'useK8sForward', ...sshStepFields(), ...k8sStepFields()]
+                : STEP_FIELDS[currentStep];
         try {
             await form.validateFields(fields);
         } catch {
@@ -323,31 +403,39 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
                     valuePropName="checked"
                     extra="开启后应用会在本机随机端口起转发，Admin 与 Broker 地址都指向这条隧道"
                 >
-                    <Switch />
+                    <Switch
+                        onChange={checked => {
+                            if (checked) {
+                                form.setFieldValue('useK8sForward', false);
+                            }
+                        }}
+                    />
                 </Form.Item>
 
                 {/* 拒绝发生在原生消息路径建 Client 的那一刻，等用户点发送才撞上就太晚了，
-                    这里按同一条件（隧道开 + Broker 地址是 TLS scheme）提前显出来说明 */}
+                    这里按同一条件（本地转发开 + Broker 地址是 TLS scheme）提前显出来说明 */}
                 <Form.Item
                     noStyle
                     shouldUpdate={(prev, curr) =>
-                        prev.useSshTunnel !== curr.useSshTunnel || prev.serviceUrl !== curr.serviceUrl
+                        prev.useSshTunnel !== curr.useSshTunnel ||
+                        prev.useK8sForward !== curr.useK8sForward ||
+                        prev.serviceUrl !== curr.serviceUrl
                     }
                 >
                     {({getFieldValue}) =>
-                        getFieldValue('useSshTunnel') &&
+                        (getFieldValue('useSshTunnel') || getFieldValue('useK8sForward')) &&
                         /^(pulsar\+ssl|ssl):\/\//.test(String(getFieldValue('serviceUrl') || '')) ? (
                             <Alert
                                 type="warning"
                                 showIcon
-                                message="「TLS + SSH 隧道」下消息收发不可用"
+                                message="「TLS + 本地转发（SSH 隧道 / K8s 端口转发）」下消息收发不可用"
                                 description={
                                     <>
-                                        隧道会把 Broker 地址换成 127.0.0.1，TLS
+                                        转发会把 Broker 地址换成 127.0.0.1，TLS
                                         证书的主机名校验必然失败，原生客户端又没有 SNI 覆盖参数可绕。管理
                                         API、命名空间与监控走 HTTP，<strong>不受影响</strong>
-                                        ；只有生产/消费/读取会被拒。二选一：经隧道访问时把 Broker 地址改成
-                                        pulsar://（流量已在隧道内加密），或关闭隧道直连 pulsar+ssl://。
+                                        ；只有生产/消费/读取会被拒。二选一：经转发访问时把 Broker 地址改成
+                                        pulsar://（流量已在转发通道内加密），或关闭转发直连 pulsar+ssl://。
                                     </>
                                 }
                                 style={{marginBottom: 12}}
@@ -463,6 +551,116 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
                         )
                     }
                 </Form.Item>
+
+                <Divider plain>K8s 端口转发（kubectl port-forward）</Divider>
+
+                <Form.Item
+                    name="useK8sForward"
+                    label="启用 K8s 端口转发"
+                    valuePropName="checked"
+                    extra={
+                        '集群跑在 Kubernetes 里、又只想在本机连时用它：应用会调用 kubectl ' +
+                        '把 Admin 与 Broker 端口接到本机随机端口。需要本机已安装 kubectl，且所选上下文能访问该集群'
+                    }
+                >
+                    <Switch
+                        // 两条通道都会改写同一对地址，同时开着没有"哪个赢"的定义，
+                        // 所以界面上勾一个就替用户取消另一个（主进程 schema 是同一口径的兜底）
+                        onChange={checked => {
+                            if (checked) {
+                                form.setFieldValue('useSshTunnel', false);
+                            }
+                        }}
+                    />
+                </Form.Item>
+
+                <Form.Item
+                    noStyle
+                    shouldUpdate={(prev, curr) =>
+                        prev.useK8sForward !== curr.useK8sForward || prev.serviceUrl !== curr.serviceUrl
+                    }
+                >
+                    {({getFieldValue}) => {
+                        if (!getFieldValue('useK8sForward')) {
+                            return null;
+                        }
+                        return (
+                            <>
+                                <Form.Item
+                                    name={['k8s', 'namespace']}
+                                    label="命名空间"
+                                    rules={[
+                                        {required: true, message: '请输入命名空间'},
+                                        {
+                                            pattern: /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/,
+                                            message: '只能用小写字母、数字与 -（K8s 命名空间的写法）',
+                                        },
+                                    ]}
+                                    extra="例如 pulsar、default"
+                                >
+                                    <Input placeholder="pulsar" />
+                                </Form.Item>
+
+                                <Form.Item
+                                    name={['k8s', 'resource']}
+                                    label="资源"
+                                    rules={[
+                                        {required: true, message: '请输入要转发的资源'},
+                                        {
+                                            pattern: /^[a-z][a-z0-9.]*\/[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/,
+                                            message: '需形如 service/pulsar-broker（小写的 TYPE/NAME）',
+                                        },
+                                    ]}
+                                    // 只填名字的话 kubectl 会按 pod 去找，转发到不存在的东西上；
+                                    // 这里把 TYPE/NAME 说死，省掉一次"资源找不到"的往返
+                                    extra="TYPE/NAME 写法：service/xxx、statefulset/xxx、pod/xxx、deployment/xxx"
+                                >
+                                    <Input placeholder="service/pulsar-broker" />
+                                </Form.Item>
+
+                                <Form.Item
+                                    name={['k8s', 'context']}
+                                    label="上下文"
+                                    extra="留空用 kubectl 当前上下文；可用 kubectl config get-contexts 查看名字"
+                                >
+                                    <Input placeholder="gke_my-project_us-central1_my-cluster" />
+                                </Form.Item>
+
+                                <Form.Item
+                                    name={['k8s', 'kubeconfigPath']}
+                                    label="kubeconfig 路径"
+                                    extra="留空用 KUBECONFIG 或 ~/.kube/config。本应用只保存这个路径，不会读取文件里的凭据"
+                                >
+                                    <Input placeholder="~/.kube/config" />
+                                </Form.Item>
+
+                                <Form.Item
+                                    name={['k8s', 'kubectlPath']}
+                                    label="kubectl 路径"
+                                    extra="留空用 PATH 里的 kubectl。从桌面图标启动时 PATH 常常不含 brew / npm 装的目录，那种情况在这里填绝对路径"
+                                >
+                                    <Input placeholder="/usr/local/bin/kubectl" />
+                                </Form.Item>
+
+                                {editingCluster?.k8s?.forwardActive ? <Tag color="green">当前转发已在进行</Tag> : null}
+
+                                {forwardResult ? (
+                                    <Alert
+                                        type={forwardResult.ok ? 'success' : 'error'}
+                                        message={forwardResult.text}
+                                        icon={forwardResult.ok ? <CheckCircleOutlined /> : <CloseCircleOutlined />}
+                                        showIcon
+                                        style={{marginBottom: 12}}
+                                    />
+                                ) : null}
+
+                                <Button type="default" onClick={handleTestForward} loading={forwardTesting}>
+                                    测试端口转发
+                                </Button>
+                            </>
+                        );
+                    }}
+                </Form.Item>
             </>
         );
     };
@@ -513,7 +711,7 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
     const steps = [
         {title: '基础信息', icon: <ClusterOutlined />, content: renderStep0},
         {title: '认证配置', icon: <LockOutlined />, content: renderStep1},
-        {title: 'SSH 隧道', icon: <ApiOutlined />, content: renderStep2},
+        {title: '隧道 / 转发', icon: <ApiOutlined />, content: renderStep2},
         {title: '高级配置', icon: <SettingOutlined />, content: renderStep3},
     ];
 
@@ -557,6 +755,7 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
                     adminApiTimeout: 5000,
                     tlsEnabled: false,
                     useSshTunnel: false,
+                    useK8sForward: false,
                 }}
             >
                 {steps[currentStep].content()}

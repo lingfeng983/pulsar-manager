@@ -4,16 +4,21 @@ import {statSync} from 'node:fs';
 import {
     getAllSSHTunnels,
     getSSHTunnelById,
+    getAllK8sForwards,
+    getK8sForwardById,
     getSetting,
     setSetting,
     SSHConfigSchema,
+    K8sConfigSchema,
     ClusterIdSchema,
     z,
     ensureDbInitialized,
     formatError,
     registerRawHandler,
     establishTunnel,
+    establishK8sForward,
     sshTunnelManager,
+    k8sForwardManager,
 } from './_shared';
 import {createLogger} from '../utils/logger';
 
@@ -124,8 +129,81 @@ export function registerSystemHandlers() {
         }
     });
 
-    // ========== 主题 ==========
+    // ========== K8s 端口转发 ==========
 
+    registerRawHandler('k8s:list', async () => {
+        try {
+            ensureDbInitialized();
+            const forwards = getAllK8sForwards();
+            return {
+                success: true,
+                data: forwards.map(f => ({
+                    id: f.id,
+                    namespace: f.namespace,
+                    resource: f.resource,
+                    context: f.context,
+                    kubeconfigPath: f.kubeconfig_path,
+                    kubectlPath: f.kubectl_path,
+                    // 库里的 status 可能停在异常值（进程被外部杀掉、应用崩溃），
+                    // 以当前是否真的还持有 kubectl 进程为准
+                    status: k8sForwardManager.isForwarding(f.id) ? 'connected' : 'disconnected',
+                    localAdminPort: f.local_admin_port,
+                    localBrokerPort: f.local_broker_port,
+                    remoteAdminPort: f.remote_admin_port,
+                    remoteBrokerPort: f.remote_broker_port,
+                })),
+            };
+        } catch (error) {
+            log.error('k8s:list failed', formatError(error));
+            return {success: false, error: formatError(error)};
+        }
+    });
+
+    registerRawHandler('k8s:connect', async config => {
+        try {
+            ensureDbInitialized();
+            const validated = K8sConfigSchema.parse(config);
+
+            // 独立起一条转发（没有集群上下文）：远端端口取表单里填的那两个。
+            // 这里的 URL 只是给端口解析用的载体——它没有端口，所以落到配置行里的值。
+            const resolved = await establishK8sForward(
+                {service_url: 'pulsar://127.0.0.1', web_service_url: 'http://127.0.0.1'},
+                {k8sConfigId: validated.id, k8s: validated},
+            );
+
+            return {
+                success: true,
+                data: {
+                    forwardId: resolved.forwardId,
+                    localAdminPort: resolved.endpoints.localAdminPort,
+                    localBrokerPort: resolved.endpoints.localBrokerPort,
+                },
+            };
+        } catch (error) {
+            log.error('k8s:connect failed', formatError(error));
+            return {success: false, error: formatError(error)};
+        }
+    });
+
+    registerRawHandler('k8s:disconnect', async forwardId => {
+        try {
+            ensureDbInitialized();
+            const parsedId = ClusterIdSchema.safeParse(forwardId);
+            if (!parsedId.success) {
+                return {success: false, error: 'Invalid forward id'};
+            }
+            if (!getK8sForwardById(parsedId.data)) {
+                return {success: false, error: 'Forward not found'};
+            }
+            await k8sForwardManager.disconnect(parsedId.data);
+            return {success: true};
+        } catch (error) {
+            log.error('k8s:disconnect failed', formatError(error));
+            return {success: false, error: formatError(error)};
+        }
+    });
+
+    // ========== 主题 ==========
     // 主题只有这三种：写进 user_settings 的 theme 会在启动时决定 data-theme，
     // 放开任意字符串等于让渲染层把一个不存在的主题名写进库（界面从此没有配色表）。
     registerRawHandler('theme:set', async theme => {

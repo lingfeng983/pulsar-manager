@@ -83,10 +83,13 @@ export function registerConfigHandlers() {
             throw new Error(`配置文件不符合格式要求：${describeInvalid(parsed.error)}`);
         }
         const result = applyConfigBundle(parsed.bundle);
+        // 两种通道分开报：老导出文件里根本没有 k8s 这一项，只报一个"配置 N 个"
+        // 会让人以为导入的东西和导出时不一致
         const summary = [
             `新建集群 ${result.clustersImported} 个`,
             `跳过同名 ${result.clustersSkipped.length} 个`,
             `SSH 配置 ${result.tunnelsImported} 个`,
+            `K8s 转发配置 ${result.forwardsImported} 个`,
         ].join('、');
         insertOperationLog({
             cluster_id: null,
