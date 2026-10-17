@@ -89,6 +89,7 @@ import type {
     PulsarWorkerState,
     PickedArchiveFile,
     InspectionRunParams,
+    InspectionHistoryRow,
     InspectionRunResult,
     TopologyLimits,
 } from './shared/types';
@@ -519,6 +520,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // 集群巡检：一次只读采集换一份能导出发人的报告
     inspection: {
         run: (params: InspectionRunParams) => ipcRenderer.invoke('inspection:run', params),
+        history: (params: {clusterId: string; limit?: number}) => ipcRenderer.invoke('inspection:history', params),
+        detail: (params: {id: string}) => ipcRenderer.invoke('inspection:detail', params),
+        clear: (params: {clusterId: string}) => ipcRenderer.invoke('inspection:clear', params),
     },
 
     // 拓扑
@@ -962,6 +966,9 @@ declare global {
             };
             inspection: {
                 run: (params: InspectionRunParams) => Promise<APIResponse<InspectionRunResult>>;
+                history: (params: {clusterId: string; limit?: number}) => Promise<APIResponse<InspectionHistoryRow[]>>;
+                detail: (params: {id: string}) => Promise<APIResponse<InspectionRunResult>>;
+                clear: (params: {clusterId: string}) => Promise<APIResponse<number>>;
             };
             topology: {
                 getClusterTopology: (

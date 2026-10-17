@@ -10,7 +10,7 @@ let db: Database.Database | null = null;
 // schema 版本以 user_version 跟踪。改基线 DDL 时：升 SCHEMA_VERSION，
 // 并把该版本的增量 DDL 写进 migrate()——CREATE TABLE IF NOT EXISTS 对已存在的
 // 旧库什么都不做，没有这套机制，加列只会对新装用户生效，旧库静默落后。
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 11;
 
 function migrate(database: Database.Database, from: number): void {
     // v2：refreshInterval 那行出厂值是 30000，而监控页的刷新间隔单位是秒，
@@ -66,6 +66,9 @@ function migrate(database: Database.Database, from: number): void {
             database.prepare('ALTER TABLE clusters ADD COLUMN k8s_config_id TEXT').run();
         }
     }
+    // v11：巡检历史表 inspections。只加新表、不动任何旧列，启动时那遍基线 DDL
+    // 已经把表建好（CREATE TABLE IF NOT EXISTS 对老库同样生效），这里没有数据要修补——
+    // 留这段只为说明 v11 确实做过事，与 v5/v8/v9 同一个理由。
 }
 
 // 每次启动都执行基线再补迁移：基线全是幂等语句，因此旧库缺的表和出厂设置行
@@ -1057,6 +1060,94 @@ export function countOpenAlertEvents(): number {
         count: number;
     };
     return row.count;
+}
+
+// ========== 巡检历史 ==========
+
+export interface InspectionRecord {
+    id: string;
+    cluster_id: string;
+    cluster_name: string;
+    version: string | null;
+    generated_at: string;
+    crit: number;
+    warn: number;
+    ok: number;
+    skip: number;
+    scope_json: string;
+    checks_json: string;
+    markdown: string;
+}
+
+/** 历史列表用的行：不带 checks_json / markdown，一屏几十行不去解析整份报告。 */
+export type InspectionListRow = Omit<InspectionRecord, 'checks_json' | 'markdown'>;
+
+const INSPECTION_LIST_COLUMNS = 'id, cluster_id, cluster_name, version, generated_at, crit, warn, ok, skip, scope_json';
+
+export function insertInspection(record: InspectionRecord): void {
+    const database = getDatabase();
+    database
+        .prepare(
+            `INSERT INTO inspections (
+               id, cluster_id, cluster_name, version, generated_at, crit, warn, ok, skip,
+               scope_json, checks_json, markdown
+             ) VALUES (
+               @id, @cluster_id, @cluster_name, @version, @generated_at, @crit, @warn, @ok, @skip,
+               @scope_json, @checks_json, @markdown
+             )`,
+        )
+        .run({...record, version: record.version ?? null});
+}
+
+export function listInspections(clusterId: string, limit: number): InspectionListRow[] {
+    const database = getDatabase();
+    return database
+        .prepare(
+            `SELECT ${INSPECTION_LIST_COLUMNS} FROM inspections
+             WHERE cluster_id = ? ORDER BY generated_at DESC LIMIT ?`,
+        )
+        .all(clusterId, limit) as InspectionListRow[];
+}
+
+export function getInspectionById(id: string): InspectionRecord | undefined {
+    const database = getDatabase();
+    return database.prepare('SELECT * FROM inspections WHERE id = ?').get(id) as InspectionRecord | undefined;
+}
+
+/**
+ * 环比要的前一份：同集群、在本次之前、排除本次自己。
+ * 按 generated_at 而不是 id 排序——id 是随机 uuid，历史两份的写入先后与它的字典序无关。
+ */
+export function getPreviousInspection(
+    clusterId: string,
+    generatedAt: string,
+    excludeId: string,
+): InspectionRecord | undefined {
+    const database = getDatabase();
+    return database
+        .prepare(
+            `SELECT * FROM inspections
+             WHERE cluster_id = ? AND id <> ? AND generated_at < ?
+             ORDER BY generated_at DESC LIMIT 1`,
+        )
+        .get(clusterId, excludeId, generatedAt) as InspectionRecord | undefined;
+}
+
+/** 只留最近 keep 份：一次巡检写入几十 MB 不至于，但一天点几十次、几百个集群攒起来没人收。 */
+export function pruneInspections(clusterId: string, keep: number): number {
+    const database = getDatabase();
+    return database
+        .prepare(
+            `DELETE FROM inspections
+             WHERE cluster_id = ?
+               AND id NOT IN (SELECT id FROM inspections WHERE cluster_id = ? ORDER BY generated_at DESC LIMIT ?)`,
+        )
+        .run(clusterId, clusterId, keep).changes;
+}
+
+export function deleteInspections(clusterId: string): number {
+    const database = getDatabase();
+    return database.prepare('DELETE FROM inspections WHERE cluster_id = ?').run(clusterId).changes;
 }
 
 // 用户设置相关操作

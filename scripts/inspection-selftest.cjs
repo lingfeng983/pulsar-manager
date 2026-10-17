@@ -4,6 +4,7 @@
  */
 const assert = require('node:assert');
 const S = require('../dist/src/main/services/cluster-inspection.js');
+const D = require('../dist/src/main/services/inspection-diff.js');
 
 let passed = 0;
 const failures = [];
@@ -260,6 +261,235 @@ function fakeClient(overrides) {
 
 const BASE_INPUT = {clusterId: 'c1', clusterName: '生产簇', alerts: []};
 
+// ---------------------------------------------------------------- 环比（inspection-diff）
+
+function item(key, level, summary) {
+    return {key, title: `检查项 ${key}`, level, summary: summary || `${key} 的结论`};
+}
+
+function kindOf(items, key) {
+    const found = items.find(entry => entry.key === key);
+    return found ? found.kind : '(缺)';
+}
+
+check('级别移动判定：恶化 / 好转 / 不变', () => {
+    const prev = [item('backlog', 'warn'), item('consumers', 'crit'), item('alerts', 'ok'), item('workers', 'skip')];
+    const cur = [item('backlog', 'crit'), item('consumers', 'ok'), item('alerts', 'ok'), item('workers', 'warn')];
+    const items = D.diffInspectionChecks(prev, cur);
+    eq(kindOf(items, 'backlog'), 'worsened', 'warn → crit');
+    eq(kindOf(items, 'consumers'), 'improved', 'crit → ok');
+    eq(kindOf(items, 'alerts'), 'unchanged', 'ok → ok');
+    eq(kindOf(items, 'workers'), 'worsened', 'skip → warn 是变坏');
+});
+
+check('读不到了（ok → skip）算恶化而不是不变', () => {
+    const items = D.diffInspectionChecks([item('brokers', 'ok')], [item('brokers', 'skip')]);
+    eq(kindOf(items, 'brokers'), 'worsened', 'ok → skip');
+    eq(D.diffInspectionChecks([item('brokers', 'skip')], [item('brokers', 'ok')])[0].kind, 'improved', 'skip → ok');
+});
+
+check('新增只报 crit / warn：正常项新出现不是新闻', () => {
+    const items = D.diffInspectionChecks([], [item('collect', 'warn'), item('backlog', 'ok')]);
+    eq(items.length, 1, '只留一条');
+    eq(items[0].key, 'collect', 'warn 那条');
+    eq(items[0].previousLevel, null, '新增没有前值');
+});
+
+check('消失的高级别项报「本次未出现」而不是「已恢复」', () => {
+    const items = D.diffInspectionChecks([item('backlog', 'crit'), item('alerts', 'ok')], []);
+    eq(items.length, 1, 'ok 项消失不列');
+    eq(items[0].kind, 'resolved', '消失');
+    eq(items[0].level, null, '本次没有读数');
+    eq(items[0].previousLevel, 'crit', '前值保留');
+    eq(items[0].summary, 'backlog 的结论', '沿用上次那句话说清是什么');
+});
+
+check('环比排序：需要人处理的在前，同 kind 内按严重度倒序', () => {
+    const prev = [item('a', 'ok'), item('b', 'warn'), item('c', 'warn'), item('d', 'warn'), item('f', 'ok')];
+    const cur = [item('a', 'crit'), item('c', 'ok'), item('d', 'warn'), item('e', 'warn'), item('f', 'warn')];
+    const items = D.diffInspectionChecks(prev, cur);
+    eq(items.map(entry => entry.kind).join(','), 'worsened,worsened,new,resolved,improved,unchanged', '按 kind 分组');
+    // 同为恶化，crit 排在 warn 前面
+    eq(items.map(entry => entry.key).join(','), 'a,f,e,b,c,d', '组内按级别倒序');
+    eq(items.length, 6, '不变的那项也在表里，只是排在最后');
+});
+
+check('changedCount 只数移动过的项', () => {
+    const diff = D.buildInspectionDiff('p-1', '2026-10-17T00:00:00.000Z', [item('a', 'ok')], [item('a', 'ok'), item('b', 'crit')]);
+    eq(diff.changedCount, 1, '一条新增');
+    eq(diff.previousId, 'p-1', '带上前一份的 id');
+    eq(diff.items.length, 2, '含不变项');
+    eq(D.buildInspectionDiff('p', 't', [item('a', 'ok')], [item('a', 'ok')]).changedCount, 0, '全一致时为 0');
+});
+
+check('环比文案：本次未出现不等于已恢复', () => {
+    eq(D.diffChangeLabel('resolved'), '本次未出现', '文案口径');
+    eq(D.diffChangeLabel('worsened'), '恶化', '恶化');
+});
+
+// ---------------------------------------------------------------- 历史表（SQL 口径）
+//
+// 这几条语句与 src/main/database/sqlite.ts 里的 helper 是同一段 SQL 的两份抄本：
+// helper 本身在纯 node 下起不来（node_modules 里的 better-sqlite3 编的是 Electron 的
+// ABI），所以这里用 node 自带的 sqlite 驱动按同样的语句验一遍列名、排序与删除条件。
+// 表结构从编译好的基线 DDL 里拿，不在测试里重抄一份建表语句——基线与 helper 谁改了
+// 忘了对方，这里就会炸。
+
+const {DatabaseSync} = require('node:sqlite');
+const {SCHEMA_SQL} = require('../dist/src/main/database/schema.js');
+
+const INSERT_INSPECTION = `INSERT INTO inspections (
+   id, cluster_id, cluster_name, version, generated_at, crit, warn, ok, skip,
+   scope_json, checks_json, markdown
+ ) VALUES (
+   @id, @cluster_id, @cluster_name, @version, @generated_at, @crit, @warn, @ok, @skip,
+   @scope_json, @checks_json, @markdown
+ )`;
+
+const LIST_INSPECTIONS = `SELECT id, cluster_id, cluster_name, version, generated_at, crit, warn, ok, skip, scope_json
+ FROM inspections WHERE cluster_id = ? ORDER BY generated_at DESC LIMIT ?`;
+
+const PREVIOUS_INSPECTION = `SELECT * FROM inspections
+ WHERE cluster_id = ? AND id <> ? AND generated_at < ?
+ ORDER BY generated_at DESC LIMIT 1`;
+
+const PRUNE_INSPECTIONS = `DELETE FROM inspections
+ WHERE cluster_id = ?
+   AND id NOT IN (SELECT id FROM inspections WHERE cluster_id = ? ORDER BY generated_at DESC LIMIT ?)`;
+
+function inspectionRecord(overrides) {
+    return {
+        id: 'aaaaaaaa-0000-4000-8000-000000000001',
+        cluster_id: '11111111-0000-4000-8000-000000000001',
+        cluster_name: '生产簇',
+        version: '3.0.4',
+        generated_at: '2026-10-17T02:00:00.000Z',
+        crit: 1,
+        warn: 2,
+        ok: 5,
+        skip: 1,
+        scope_json: '{"topicsSeen":9,"topicsSampled":5}',
+        checks_json: '[{"key":"backlog","title":"消息积压","level":"warn","summary":"x"}]',
+        markdown: '# 报告',
+        ...overrides,
+    };
+}
+
+function openHistoryDb() {
+    const database = new DatabaseSync(':memory:');
+    // 与主进程同一个设置：SQLite 的 foreign_keys 默认关着，不打开的话
+    // cluster_id 那条外键就是一行装饰，测不出列名写错
+    database.exec('PRAGMA foreign_keys = ON');
+    database.exec(SCHEMA_SQL);
+    database
+        .prepare("INSERT INTO clusters (id, name, service_url, web_service_url, created_at, updated_at) VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))")
+        .run('11111111-0000-4000-8000-000000000001', '生产簇', 'pulsar://h:6650', 'http://h:8080');
+    database
+        .prepare("INSERT INTO clusters (id, name, service_url, web_service_url, created_at, updated_at) VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))")
+        .run('22222222-0000-4000-8000-000000000002', '测试簇', 'pulsar://h:6650', 'http://h:8080');
+    return database;
+}
+
+check('基线 DDL 连跑两次不炸（每次启动都会重跑一遍）', () => {
+    const database = openHistoryDb();
+    database.exec(SCHEMA_SQL);
+    const columns = database.prepare('PRAGMA table_info(inspections)').all().map(column => column.name);
+    eq(
+        columns.join(','),
+        'id,cluster_id,cluster_name,version,generated_at,crit,warn,ok,skip,scope_json,checks_json,markdown',
+        'inspections 列清单',
+    );
+    database.close();
+});
+
+check('插入与读取：version 缺省落 null，列表不带大字段', () => {
+    const database = openHistoryDb();
+    database.prepare(INSERT_INSPECTION).run(inspectionRecord({version: null}));
+    const rows = database.prepare(LIST_INSPECTIONS).all('11111111-0000-4000-8000-000000000001', 50);
+    eq(rows.length, 1, '一条');
+    eq(rows[0].version, null, '未取到版本');
+    assert.ok(!('checks_json' in rows[0]) && !('markdown' in rows[0]), '列表不解析整份报告');
+    eq(JSON.parse(rows[0].scope_json).topicsSeen, 9, 'scope 取回来');
+    const full = database.prepare('SELECT * FROM inspections WHERE id = ?').get('aaaaaaaa-0000-4000-8000-000000000001');
+    assert.ok(full.checks_json.includes('消息积压'), '整份检查项在 detail 里');
+    database.close();
+});
+
+check('历史列表按时间倒序且只给这一台集群', () => {
+    const database = openHistoryDb();
+    // id 的字典序与时间序刻意相反：证明排序走的是 generated_at 而不是主键
+    database.prepare(INSERT_INSPECTION).run(inspectionRecord({id: 'z-1', generated_at: '2026-10-17T01:00:00.000Z'}));
+    database.prepare(INSERT_INSPECTION).run(inspectionRecord({id: 'a-1', generated_at: '2026-10-17T03:00:00.000Z'}));
+    database.prepare(INSERT_INSPECTION).run(inspectionRecord({id: 'a-2', generated_at: '2026-10-17T02:00:00.000Z'}));
+    database.prepare(INSERT_INSPECTION).run(
+        inspectionRecord({id: 'other', cluster_id: '22222222-0000-4000-8000-000000000002', generated_at: '2026-10-17T09:00:00.000Z'}),
+    );
+    const rows = database.prepare(LIST_INSPECTIONS).all('11111111-0000-4000-8000-000000000001', 50);
+    eq(rows.map(row => row.id).join(','), 'a-1,a-2,z-1', '倒序且不含别的集群');
+    const limited = database.prepare(LIST_INSPECTIONS).all('11111111-0000-4000-8000-000000000001', 2);
+    eq(limited.map(row => row.id).join(','), 'a-1,a-2', 'limit 截的是最新的那几条');
+    database.close();
+});
+
+check('环比取前一份：排除本次自己、只看更早的', () => {
+    const database = openHistoryDb();
+    database.prepare(INSERT_INSPECTION).run(inspectionRecord({id: 'p1', generated_at: '2026-10-16T01:00:00.000Z'}));
+    database.prepare(INSERT_INSPECTION).run(inspectionRecord({id: 'p2', generated_at: '2026-10-17T01:00:00.000Z'}));
+    database.prepare(INSERT_INSPECTION).run(inspectionRecord({id: 'cur', generated_at: '2026-10-17T05:00:00.000Z'}));
+    const previous = database
+        .prepare(PREVIOUS_INSPECTION)
+        .get('11111111-0000-4000-8000-000000000001', 'cur', '2026-10-17T05:00:00.000Z');
+    eq(previous.id, 'p2', '紧邻的前一份');
+    const first = database
+        .prepare(PREVIOUS_INSPECTION)
+        .get('11111111-0000-4000-8000-000000000001', 'p1', '2026-10-16T01:00:00.000Z');
+    eq(first, undefined, '最早的一份没有前值');
+    const notInOtherCluster = database
+        .prepare(PREVIOUS_INSPECTION)
+        .get('22222222-0000-4000-8000-000000000002', 'x', '2026-10-17T05:00:00.000Z');
+    eq(notInOtherCluster, undefined, '不会跨集群抓到前一份');
+    database.close();
+});
+
+check('剪枝只留最近 N 份，且按时间而不是主键判定', () => {
+    const database = openHistoryDb();
+    database.prepare(INSERT_INSPECTION).run(inspectionRecord({id: 'z-old', generated_at: '2026-10-15T01:00:00.000Z'}));
+    database.prepare(INSERT_INSPECTION).run(inspectionRecord({id: 'a-mid', generated_at: '2026-10-16T01:00:00.000Z'}));
+    database.prepare(INSERT_INSPECTION).run(inspectionRecord({id: 'm-new', generated_at: '2026-10-17T01:00:00.000Z'}));
+    database.prepare(INSERT_INSPECTION).run(
+        inspectionRecord({id: 'other', cluster_id: '22222222-0000-4000-8000-000000000002'}),
+    );
+    const removed = database
+        .prepare(PRUNE_INSPECTIONS)
+        .run('11111111-0000-4000-8000-000000000001', '11111111-0000-4000-8000-000000000001', 2).changes;
+    eq(removed, 1, '删掉一份');
+    const left = database
+        .prepare('SELECT id FROM inspections WHERE cluster_id = ? ORDER BY generated_at DESC')
+        .all('11111111-0000-4000-8000-000000000001');
+    eq(left.map(row => row.id).join(','), 'm-new,a-mid', '留下的必须是最新的那几份');
+    eq(database.prepare('SELECT COUNT(*) as c FROM inspections WHERE cluster_id = ?').get('22222222-0000-4000-8000-000000000002').c, 1, '别的集群一份不少');
+    database.close();
+});
+
+check('清空历史按集群隔离；外键让乱写的 cluster_id 进不来', () => {
+    const database = openHistoryDb();
+    database.prepare(INSERT_INSPECTION).run(inspectionRecord({id: 'k1'}));
+    database.prepare(INSERT_INSPECTION).run(
+        inspectionRecord({id: 'k2', cluster_id: '22222222-0000-4000-8000-000000000002'}),
+    );
+    eq(database.prepare('DELETE FROM inspections WHERE cluster_id = ?').run('11111111-0000-4000-8000-000000000001').changes, 1, '删一条');
+    eq(database.prepare('SELECT COUNT(*) as c FROM inspections').get().c, 1, '另一集群还在');
+    let rejected = false;
+    try {
+        database.prepare(INSERT_INSPECTION).run(inspectionRecord({id: 'k3', cluster_id: '不存在的集群'}));
+    } catch (error) {
+        rejected = true;
+        assert.ok(/FOREIGN KEY/i.test(String(error.message)), '报的是外键而不是列名');
+    }
+    assert.ok(rejected, 'cluster_id 外键真的生效');
+    database.close();
+});
+
 async function main() {
     await checkAsync('一次正常巡检把九类检查都排进报告', async () => {
         const report = await S.runInspection(fakeClient(), BASE_INPUT);
@@ -423,6 +653,24 @@ async function main() {
         assert.ok(md.includes('0 个租户'), '空集群也给出范围');
         assert.ok(md.includes('未取到') || md.includes('broker 版本'), '版本缺省有兜底文案');
         assert.ok(!md.includes('未采样的部分不在本报告结论之内'), '没截断就不写截断提醒');
+    });
+
+    await checkAsync('Markdown 带上环比段（发出去的文件要说清比上次涨跌）', async () => {
+        const report = await S.runInspection(fakeClient(), BASE_INPUT);
+        // 造假一份"上次"：把本次判为 ok 的积压写成 crit，环比里就该出现一条好转
+        const previousChecks = report.checks.map(check =>
+            check.key === 'backlog' ? {...check, level: 'crit'} : {...check},
+        );
+        const diff = D.buildInspectionDiff('p-9', '2026-10-16T09:00:00.000Z', previousChecks, report.checks);
+        assert.ok(diff.changedCount >= 1, '样例至少动一项');
+        const md = S.renderInspectionMarkdown(report, diff);
+        assert.ok(md.includes('## 与上次巡检的差别（上次：2026-10-16T09:00:00.000Z）'), '环比小标题带上前一份时间');
+        assert.ok(md.includes('好转｜消息积压'), '移动项按「变化｜检查项：结论」列出');
+        // 差分段插在范围/结论之后、逐项清单之前：拿到文件的人先判断涨跌，再看逐项证据
+        assert.ok(md.indexOf('与上次巡检的差别') > md.indexOf('- 结论：'), '在总览之后');
+        assert.ok(md.indexOf('与上次巡检的差别') < md.indexOf('Broker 健康检查'), '在逐项清单之前');
+        const plain = S.renderInspectionMarkdown(report);
+        assert.ok(!plain.includes('与上次巡检的差别'), '没有前一份时不写空段');
     });
 
     console.log(`ALL PASS（${passed} 项）`);

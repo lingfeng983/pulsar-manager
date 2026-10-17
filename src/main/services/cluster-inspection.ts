@@ -9,8 +9,10 @@
  * 传入的 client 访问。这样判定规则可以在没有集群的机器上被自测覆盖。
  */
 import {mapWithConcurrency} from './http-client';
+import {renderDiffMarkdown} from './inspection-diff';
 import type {
     InspectionCheck,
+    InspectionDiff,
     InspectionLevel,
     InspectionReport,
     InspectionTotals,
@@ -450,8 +452,9 @@ const LEVEL_NAMES: Record<InspectionLevel, string> = {crit: '严重', warn: '关
 /**
  * 报告要能脱离应用被读懂（贴进工单、发到群里），所以 Markdown 里把采样范围与
  * 截断都写全——读到文件的人不知道范围，就会把「没有发现高积压」当成全集群结论。
+ * 环比段插在结论清单之前：拿到文件的人最先要判断的是「比上次好了还是坏了」。
  */
-export function renderInspectionMarkdown(report: InspectionReport): string {
+export function renderInspectionMarkdown(report: InspectionReport, diff?: InspectionDiff | null): string {
     const lines: string[] = [];
     lines.push(`# Pulsar 集群巡检报告：${report.clusterName}`);
     lines.push('');
@@ -470,6 +473,9 @@ export function renderInspectionMarkdown(report: InspectionReport): string {
         lines.push('- 注意：采样在命名空间或 topic 上限处被截断，未采样的部分不在本报告结论之内');
     }
     lines.push('');
+    if (diff) {
+        lines.push(...renderDiffMarkdown(diff));
+    }
     for (const item of report.checks) {
         lines.push(`## ${LEVEL_MARKS[item.level]} ${item.title}（${LEVEL_NAMES[item.level]}）`);
         lines.push('');

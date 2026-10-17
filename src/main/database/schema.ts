@@ -217,6 +217,27 @@ CREATE TABLE IF NOT EXISTS alert_events (
     FOREIGN KEY (cluster_id) REFERENCES clusters(id) ON DELETE CASCADE
 );
 
+-- 巡检报告：一次巡检一行，checks / scope 存 JSON 而不是拆成子表——
+-- 报告是「某时刻的整份快照」，从来只被整体读取和整体导出，拆开只会让环比要拼四次 JOIN。
+-- cluster_name / version 是当时写死的副本：集群后来改名不该改写历史，
+-- 半年后翻到这份报告的人要看到的是当时那台集群的名字（与 alert_events 同一个理由）。
+-- 四个级别计数单独立列：历史列表只扫这几个数，不该为渲染一行去解析整份 JSON。
+CREATE TABLE IF NOT EXISTS inspections (
+    id TEXT PRIMARY KEY,
+    cluster_id TEXT NOT NULL,
+    cluster_name TEXT NOT NULL,
+    version TEXT,
+    generated_at TEXT NOT NULL,
+    crit INTEGER NOT NULL DEFAULT 0,
+    warn INTEGER NOT NULL DEFAULT 0,
+    ok INTEGER NOT NULL DEFAULT 0,
+    skip INTEGER NOT NULL DEFAULT 0,
+    scope_json TEXT NOT NULL,
+    checks_json TEXT NOT NULL,
+    markdown TEXT NOT NULL,
+    FOREIGN KEY (cluster_id) REFERENCES clusters(id) ON DELETE CASCADE
+);
+
 -- 创建索引
 CREATE INDEX IF NOT EXISTS idx_clusters_status ON clusters(status);
 CREATE INDEX IF NOT EXISTS idx_operation_logs_cluster_id ON operation_logs(cluster_id);

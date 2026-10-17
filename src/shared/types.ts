@@ -1702,4 +1702,37 @@ export interface InspectionRunParams {
 export interface InspectionRunResult {
     report: InspectionReport;
     markdown: string;
+    // 与上一次巡检的差别。第一次跑（库里没有前一份）时为 null，界面就不显示对比区
+    diff: InspectionDiff | null;
+}
+
+// 历史列表的一行。checks 不进这个形状：列表要扫的是「哪次跑出了几项严重」，
+// 把每份报告的 JSON 都解析一遍只为渲染一行是白干的活。
+export interface InspectionHistoryRow {
+    id: string;
+    clusterId: string;
+    clusterName: string;
+    generatedAt: string;
+    version: string | null;
+    totals: InspectionTotals;
+    scope: InspectionScope;
+}
+
+export type InspectionChangeKind = 'new' | 'resolved' | 'worsened' | 'improved' | 'unchanged';
+
+export interface InspectionDiffItem {
+    key: string;
+    title: string;
+    kind: InspectionChangeKind;
+    level: InspectionLevel | null;
+    previousLevel: InspectionLevel | null;
+    summary: string;
+}
+
+export interface InspectionDiff {
+    previousId: string;
+    previousGeneratedAt: string;
+    items: InspectionDiffItem[];
+    // 只在级别真的移动时有话要说：一份「全是 unchanged」的报告读起来比不读还累
+    changedCount: number;
 }
