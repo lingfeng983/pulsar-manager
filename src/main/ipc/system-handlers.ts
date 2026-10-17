@@ -1,3 +1,6 @@
+import {dialog} from 'electron';
+import {basename} from 'node:path';
+import {statSync} from 'node:fs';
 import {
     getAllSSHTunnels,
     getSSHTunnelById,
@@ -15,6 +18,11 @@ import {
 import {createLogger} from '../utils/logger';
 
 const log = createLogger('IPC');
+
+// 单次上传的包上限。这个数字不是 worker 侧的配置（那边可以调大也可以调小），
+// 而是本工具自己的兜底：整个文件要经主进程读一遍再流出去，
+// 没有上限的话选错一个几 GB 的镜像 tar 就会把应用按在那里。
+const ARCHIVE_MAX_BYTES = 512 * 1024 * 1024;
 
 // settings 通道是通用键值口，放开任意 key 会让渲染层（一旦被注入脚本控制）
 // 读写 user_settings 里任何内容，包括主题等内部键。只放行界面上真实用到的。
@@ -193,6 +201,49 @@ export function registerSystemHandlers() {
             return {success: true, data: logs};
         } catch (error) {
             log.error('logs:getRecent failed', formatError(error));
+            return {success: false, error: formatError(error)};
+        }
+    });
+
+    // ========== 本地包选择 ==========
+
+    // 路径由系统对话框产生，渲染进程只能拿到"用户刚选过的那个文件"，
+    // 这比开一个"按路径读文件"的通道安全得多——后者等于把整台机器交给页面。
+    // 过滤器只是帮用户少翻两级目录，不是校验：Go 的包是编译出来的裸二进制，
+    // 没有可靠后缀，所以「所有文件」这一档必须留着，真正的门槛只有下面的大小。
+    registerRawHandler('file:pickArchive', async () => {
+        try {
+            const result = await dialog.showOpenDialog({
+                title: '选择函数 / 连接器的包',
+                properties: ['openFile'],
+                filters: [
+                    {name: '常见的包（jar / nar / zip / py）', extensions: ['jar', 'nar', 'zip', 'py']},
+                    {name: '所有文件', extensions: ['*']},
+                ],
+            });
+            if (result.canceled || result.filePaths.length === 0) {
+                // 取消不是错误：界面据此保持原状，不该弹一条红字
+                return {success: true, data: null};
+            }
+            const picked = result.filePaths[0];
+            const stat = statSync(picked);
+            if (!stat.isFile()) {
+                return {success: false, error: '选中的不是文件'};
+            }
+            if (stat.size === 0) {
+                return {success: false, error: '这个文件是空的，worker 取过去也加载不了'};
+            }
+            if (stat.size > ARCHIVE_MAX_BYTES) {
+                return {
+                    success: false,
+                    error:
+                        `包太大（${Math.round(stat.size / 1024 / 1024)}MB），本工具单次上传上限 ` +
+                        `${Math.round(ARCHIVE_MAX_BYTES / 1024 / 1024)}MB：更大的包请先放到 worker 取到的地址`,
+                };
+            }
+            return {success: true, data: {path: picked, name: basename(picked), size: stat.size}};
+        } catch (error) {
+            log.error('file:pickArchive failed', formatError(error));
             return {success: false, error: formatError(error)};
         }
     });

@@ -11,6 +11,9 @@ export const API_ENDPOINTS = {
 
 export const REQUEST_CONFIG = {
     TIMEOUT: 5000,
+    // 上传本地包用的超时： admin 请求 5 秒是「点一下不该卡住」的口径，
+    // 而几十 MB 的包在慢链路上一分钟都传不完，套用 5 秒只会得到一个看不出原因的超时。
+    UPLOAD_TIMEOUT: 300000,
     MAX_CONCURRENT: 5,
     // 聚合类任务使用独立信号量，避免与叶子请求共用许可造成死锁
     MAX_CONCURRENT_AGGREGATE: 2,

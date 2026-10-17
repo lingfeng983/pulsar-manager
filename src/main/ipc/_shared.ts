@@ -465,15 +465,19 @@ export const FunctionTriggerSchema = RuntimeItemPathSchema.extend({
         .optional(),
 });
 
-// 新建的包位置只接受坐标字符串：内置函数是 function://、worker 存过的包是
-// 同类坐标，外部包是 http(s)。本地上传需要文件选择框与流式 multipart，
-// 这条路径本机没有可对照的 worker 能验，宁缺毋滥。
+// 包来源两档：archive 是 worker 自己取得到的坐标（内置插件的 builtin://、
+// 包存储里的 function://、http(s) 地址），localPackagePath 是刚在系统对话框里选中的本机文件。
+// 路径不做字符集校验：它只由主进程的对话框产生，Windows 绝对路径本来就有盘符与反斜杠，
+// 按 topic 那套字符集限制只会把合法的选择拦死。
 const ArchiveSchema = z.string().trim().min(1).max(1024);
 
-export const RuntimeCreateSchema = RuntimeNamespaceSchema.extend({
+const RuntimeCreateBaseSchema = RuntimeNamespaceSchema.extend({
     name: TopicSchema,
-    className: z.string().trim().min(1).max(255),
-    archive: ArchiveSchema,
+    // GO 运行时 worker 不看入口类，JAVA/PYTHON 少了它 worker 自己拒——这里不重复设门槛
+    className: z.string().trim().max(255).optional(),
+    runtime: z.enum(['JAVA', 'PYTHON', 'GO']).optional(),
+    archive: ArchiveSchema.optional(),
+    localPackagePath: ArchiveSchema.optional(),
     inputs: z.array(z.string().trim().min(1).max(255)).max(50).optional(),
     output: z.string().trim().max(255).optional(),
     logTopic: z.string().trim().max(255).optional(),
@@ -494,6 +498,18 @@ export const RuntimeCreateSchema = RuntimeNamespaceSchema.extend({
     processingGuarantee: z.enum(['ATLEAST_ONCE', 'ATMOST_ONCE', 'EFFECTIVELY_ONCE']).optional(),
     // 连接器参数与函数的 userConfig：形状由所选插件决定，这里只保证是扁平的 JSON 对象
     userConfig: z.record(z.string(), z.unknown()).optional(),
+});
+
+// 两个都填时 worker 按「有 url 就先按 url」处理，界面显示的是本地文件、
+// 传上去的字节却没被读——与其留一个静默的错，不如在入口就拒掉。
+export const RuntimeCreateSchema = RuntimeCreateBaseSchema.superRefine((value, ctx) => {
+    if (!!value.archive === !!value.localPackagePath) {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['archive'],
+            message: value.archive ? '本地文件与包坐标只能二选一' : '要么给包坐标，要么选一个本地包',
+        });
+    }
 });
 
 export const WorkerClusterSchema = z.object({clusterId: ClusterIdSchema});

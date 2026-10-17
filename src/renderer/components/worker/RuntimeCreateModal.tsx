@@ -1,8 +1,28 @@
 import React, {useCallback, useEffect, useMemo, useState} from 'react';
-import {Alert, AutoComplete, Col, Form, Input, InputNumber, Modal, Row, Select, Typography} from 'antd';
+import {
+    Alert,
+    AutoComplete,
+    Button,
+    Col,
+    Form,
+    Input,
+    InputNumber,
+    Modal,
+    Radio,
+    Row,
+    Select,
+    Space,
+    Typography,
+} from 'antd';
 import {loadTopics} from '../../hooks/resourceCache';
-import {PROCESSING_GUARANTEES, runtimeKindLabel} from './meta';
-import type {PulsarBuiltinDefinition, PulsarResourceKind, PulsarRuntimeCreateParams} from '../../types';
+import {PROCESSING_GUARANTEES, FUNCTION_RUNTIMES, runtimeKindLabel} from './meta';
+import type {
+    PickedArchiveFile,
+    PulsarBuiltinDefinition,
+    PulsarFunctionRuntime,
+    PulsarResourceKind,
+    PulsarRuntimeCreateParams,
+} from '../../types';
 
 const {Text} = Typography;
 
@@ -18,11 +38,15 @@ interface Props {
     onSubmit: (params: PulsarRuntimeCreateParams) => Promise<boolean>;
 }
 
+type PackageSource = 'url' | 'local';
+
 interface CreateForm {
     name: string;
     builtin?: string;
-    className: string;
-    archive: string;
+    className?: string;
+    source: PackageSource;
+    archive?: string;
+    runtime?: PulsarFunctionRuntime;
     inputs?: string[];
     output?: string;
     logTopic?: string;
@@ -55,6 +79,19 @@ function parseUserConfig(
     return {ok: true, value: parsed as Record<string, unknown>};
 }
 
+// 文件名猜运行时，只为少点一次下拉：jar/nar 是 JAVA，py 是 PYTHON，
+// 其余（Go 的包是编译出来的裸二进制，常常没有后缀）交回给用户自己选。
+function guessRuntime(fileName: string): PulsarFunctionRuntime | undefined {
+    const lower = fileName.toLowerCase();
+    if (lower.endsWith('.py')) {
+        return 'PYTHON';
+    }
+    if (lower.endsWith('.jar') || lower.endsWith('.nar')) {
+        return 'JAVA';
+    }
+    return undefined;
+}
+
 const RuntimeCreateModal: React.FC<Props> = ({
     open,
     clusterId,
@@ -69,6 +106,9 @@ const RuntimeCreateModal: React.FC<Props> = ({
     const [topics, setTopics] = useState<string[]>([]);
     const [submitting, setSubmitting] = useState(false);
     const [localError, setLocalError] = useState<string | null>(null);
+    const [picked, setPicked] = useState<PickedArchiveFile | null>(null);
+    const source = Form.useWatch('source', form) ?? 'url';
+    const runtime = Form.useWatch('runtime', form) ?? 'JAVA';
 
     const scope = `${tenant}/${namespace}`;
     const topicOptions = useMemo(() => topics.map(name => ({value: name})), [topics]);
@@ -116,18 +156,46 @@ const RuntimeCreateModal: React.FC<Props> = ({
             }
             const patch: Partial<CreateForm> = {className: item.className};
             if (item.archive) {
+                // 内置项自带的是 worker 认识的坐标，本地文件那一档对它没有意义
                 patch.archive = item.archive;
+                patch.source = 'url';
+                setPicked(null);
             }
             form.setFieldsValue(patch);
         },
         [builtins, form],
     );
 
+    const pickFile = useCallback(async () => {
+        setLocalError(null);
+        const response = await window.electronAPI.file.pickArchive();
+        if (!response.success) {
+            setLocalError(response.error || '文件选择失败');
+            return;
+        }
+        // 取消不是失败：保持原状，等用户再点一次或换一档来源
+        if (!response.data) {
+            return;
+        }
+        setPicked(response.data);
+        if (kind === 'function') {
+            const guessed = guessRuntime(response.data.name);
+            if (guessed) {
+                form.setFieldsValue({runtime: guessed});
+            }
+        }
+    }, [kind, form]);
+
     const handleSubmit = useCallback(async () => {
         let values: CreateForm;
         try {
             values = await form.validateFields();
         } catch {
+            return;
+        }
+        const useLocal = values.source === 'local';
+        if (useLocal && !picked) {
+            setLocalError('还没有选本地包：只填坐标或只选文件，二选一');
             return;
         }
         const parsed = parseUserConfig(values.userConfigText);
@@ -145,10 +213,12 @@ const RuntimeCreateModal: React.FC<Props> = ({
                 tenant,
                 namespace,
                 name: values.name.trim(),
-                className: values.className.trim(),
-                archive: values.archive.trim(),
+                className: values.className?.trim() || undefined,
+                archive: useLocal ? undefined : values.archive?.trim() || undefined,
+                localPackagePath: useLocal ? picked?.path : undefined,
+                runtime: kind === 'function' ? (values.runtime ?? 'JAVA') : undefined,
                 inputs: values.inputs?.length ? values.inputs : undefined,
-                output: values.output?.trim() || undefined,
+                output: kind === 'sink' ? undefined : values.output?.trim() || undefined,
                 logTopic: values.logTopic?.trim() || undefined,
                 parallelism: values.parallelism,
                 cpu: values.cpu,
@@ -159,11 +229,15 @@ const RuntimeCreateModal: React.FC<Props> = ({
             });
             if (done) {
                 form.resetFields();
+                setPicked(null);
             }
         } finally {
             setSubmitting(false);
         }
-    }, [clusterId, kind, tenant, namespace, form, onSubmit]);
+    }, [clusterId, kind, tenant, namespace, form, onSubmit, picked]);
+
+    // GO 不看入口类，连接器更是从包里的 META-INF 自己认；只有 JAVA/PYTHON 少了类名会被 worker 拒。
+    const needClassName = kind === 'function' && runtime !== 'GO';
 
     return (
         <Modal
@@ -205,22 +279,63 @@ const RuntimeCreateModal: React.FC<Props> = ({
                     </Col>
                 </Row>
 
+                {kind === 'function' ? (
+                    <Form.Item
+                        name="runtime"
+                        label="运行时"
+                        initialValue="JAVA"
+                        tooltip="worker 按包字段（jar / py / go）反推运行时，这里选的就是发哪一个字段"
+                    >
+                        <Radio.Group options={FUNCTION_RUNTIMES} optionType="button" />
+                    </Form.Item>
+                ) : null}
+
                 <Form.Item
                     name="className"
                     label="类名（className）"
-                    rules={[{required: true, message: 'worker 按这个类名加载处理逻辑'}]}
+                    rules={needClassName ? [{required: true, message: 'worker 按这个类名加载处理逻辑'}] : []}
+                    tooltip={
+                        kind === 'source' || kind === 'sink'
+                            ? '连接器一般能从包里的 META-INF 认出来，留空让 worker 自己取'
+                            : 'GO 的包不需要入口类'
+                    }
                 >
                     <Input placeholder="org.apache.pulsar.functions.builtins.FilterFunction" />
                 </Form.Item>
 
-                <Form.Item
-                    name="archive"
-                    label="包坐标（archive）"
-                    tooltip="内置函数与内置连接器是 worker 认识的坐标；外部包填 http(s) 地址"
-                    rules={[{required: true, message: '要运行就得告诉 worker 代码在哪'}]}
-                >
-                    <Input placeholder="function://..." />
+                <Form.Item name="source" label="包来源" initialValue="url">
+                    <Radio.Group
+                        options={[
+                            {value: 'url', label: 'worker 取到的坐标'},
+                            {value: 'local', label: '本机文件'},
+                        ]}
+                        optionType="button"
+                    />
                 </Form.Item>
+
+                {source === 'local' ? (
+                    <Form.Item label="包文件" required>
+                        <Space>
+                            <Button onClick={() => void pickFile()}>选择文件</Button>
+                            {picked ? (
+                                <Text>
+                                    {picked.name}（{(picked.size / 1024 / 1024).toFixed(1)}MB）
+                                </Text>
+                            ) : (
+                                <Text type="secondary">还没选：jar / nar / py，或 Go 编译出来的裸二进制</Text>
+                            )}
+                        </Space>
+                    </Form.Item>
+                ) : (
+                    <Form.Item
+                        name="archive"
+                        label="包坐标（archive）"
+                        tooltip="内置插件是 builtin:// 或 function://，已上传的包是同类坐标，外部包是 http(s) 地址"
+                        rules={[{required: true, message: '要运行就得告诉 worker 代码在哪'}]}
+                    >
+                        <Input placeholder="function://..." />
+                    </Form.Item>
+                )}
 
                 <Form.Item name="inputs" label={kind === 'source' ? '可选输入 topic' : '输入 topic'}>
                     <Select
@@ -237,7 +352,8 @@ const RuntimeCreateModal: React.FC<Props> = ({
                         <Form.Item
                             name="output"
                             label={kind === 'source' ? '写入 topic' : '输出 topic'}
-                            tooltip="留空表示没有产出：只做副作用的函数与部分连接器本来就不写 topic"
+                            tooltip="留空表示没有产出：只做副作用的函数本来就不写 topic"
+                            hidden={kind === 'sink'}
                         >
                             <AutoComplete options={topicOptions} placeholder="persistent://public/default/out" />
                         </Form.Item>
@@ -293,8 +409,15 @@ const RuntimeCreateModal: React.FC<Props> = ({
             </Form>
 
             <Text type="secondary">
-                创建只把坐标交给 worker，取包由它完成：坐标不可达时 broker 拒绝，错误原文显示在页面上。
+                {source === 'local'
+                    ? '本机文件随创建请求一起发过去，worker 收到后自己落包并记住坐标：包越大这一趟越久，别关窗口。'
+                    : '创建只把坐标交给 worker，取包由它完成：坐标不可达时 broker 拒绝，错误原文显示在页面上。'}
             </Text>
+            {kind === 'sink' ? (
+                <div>
+                    <Text type="secondary">连接器的目的地在它自己的参数里配，表单上没有「输出 topic」这一项。</Text>
+                </div>
+            ) : null}
         </Modal>
     );
 };

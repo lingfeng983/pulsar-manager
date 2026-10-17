@@ -1,4 +1,9 @@
 import {AxiosInstance} from 'axios';
+import {createReadStream, statSync} from 'node:fs';
+import {basename} from 'node:path';
+// 上传走 form-data 而不是全局 FormData：全局那份只能装 Blob，
+// 几十 MB 的包得先进内存；这一份能直接把文件流接进分段。
+import UploadForm from 'form-data';
 import {
     NotFoundError,
     Semaphore,
@@ -13,6 +18,7 @@ import {REQUEST_CONFIG} from '../config/constants';
 import type {
     PulsarBuiltinDefinition,
     PulsarFunctionInstance,
+    PulsarFunctionRuntime,
     PulsarFunctionStats,
     PulsarInstanceStatus,
     PulsarResourceKind,
@@ -77,6 +83,58 @@ function itemPath(kind: PulsarResourceKind, tenant: string, namespace: string, n
     return name ? `${base}/${seg(name)}` : base;
 }
 
+// ========== 包字段与运行时 ==========
+
+// worker 的包字段按运行时分裂：函数是 jar / py / go 三选一，连接器只有 archive。
+// 字段名写错不是「被忽略」：配置分段由 Jackson 严格反序列化，未知属性直接 400 回来。
+const RUNTIME_FIELDS: Record<PulsarFunctionRuntime, 'jar' | 'py' | 'go'> = {
+    JAVA: 'jar',
+    PYTHON: 'py',
+    GO: 'go',
+};
+
+// 文件段三种运行时同名（data），配置段却各自不同：functionConfig / sinkConfig / sourceConfig
+function configPart(kind: PulsarResourceKind): string {
+    return kind === 'function' ? 'functionConfig' : `${kind}Config`;
+}
+
+const MB = 1024 * 1024;
+
+// broker 的 resources.ram / resources.disk 是字节（默认 1073741824 = 1GB），
+// 界面统一按 MB 收口，进出各换算一次。
+function bytesToMb(value: unknown): number | undefined {
+    return typeof value === 'number' ? Math.round(value / MB) : undefined;
+}
+
+function functionRuntime(data: any): PulsarFunctionRuntime | undefined {
+    const explicit = String(data?.runtime ?? '').toUpperCase();
+    if (explicit === 'JAVA' || explicit === 'PYTHON' || explicit === 'GO') {
+        return explicit as PulsarFunctionRuntime;
+    }
+    // worker 也是这么推的：看 jar / py / go 哪一个非空
+    if (data?.py) {
+        return 'PYTHON';
+    }
+    if (data?.go) {
+        return 'GO';
+    }
+    return data?.jar ? 'JAVA' : undefined;
+}
+
+// 读回来的包位置与运行时一起折，函数才有的三个字段在这里收成界面上的一个 archive
+function foldPackage(kind: PulsarResourceKind, data: any): {archive?: string; runtime?: PulsarFunctionRuntime} {
+    if (kind !== 'function') {
+        return data?.archive ? {archive: String(data.archive)} : {};
+    }
+    const runtime = functionRuntime(data);
+    for (const field of Object.values(RUNTIME_FIELDS)) {
+        if (data?.[field]) {
+            return {archive: String(data[field]), runtime};
+        }
+    }
+    return runtime ? {runtime} : {};
+}
+
 // ========== 响应折叠 ==========
 
 // broker 的实例状态形如 {numInstances, instances: {"<t>-<n>-<fn>-<i>": {instanceId, status:{...}}}}，
@@ -139,8 +197,8 @@ function foldStats(data: any): PulsarFunctionStats {
     };
 }
 
-// 函数用 resources:{cpu,ramDisk,disk} 与 jarPath，连接器用平铺的 cpu/ramMb/diskMb 与 archive。
-// 字段名不同、含义相同，这里一次收口，界面上就只有一种资源展示口径。
+// 函数与连接器共用 resources:{cpu,ram,disk}（ram/disk 是字节），包字段却不同：
+// 函数按运行时分成 jar / py / go，连接器只有 archive。这里一次收口，界面上只有一种口径。
 function foldConfig(
     kind: PulsarResourceKind,
     tenant: string,
@@ -150,22 +208,24 @@ function foldConfig(
 ): PulsarRuntimeConfig {
     const resources = data?.resources ?? {};
     const asNumber = (value: unknown): number | undefined => (typeof value === 'number' ? value : undefined);
+    const pkg = foldPackage(kind, data);
     return {
         kind,
         tenant,
         namespace,
         name,
         className: data?.className ? String(data.className) : undefined,
-        archive: data?.jarPath ? String(data.jarPath) : data?.archive ? String(data.archive) : undefined,
+        archive: pkg.archive,
+        runtime: pkg.runtime,
         inputs: Array.isArray(data?.inputs) ? data.inputs.map(String) : undefined,
-        // 连接器的产出叫 topic，函数的叫 output
-        output: data?.output ? String(data.output) : data?.topic ? String(data.topic) : undefined,
+        // 函数的产出叫 output，来源的叫 topicName；连接器没有单一输出字段
+        output: data?.output ? String(data.output) : data?.topicName ? String(data.topicName) : undefined,
         logTopic: data?.logTopic ? String(data.logTopic) : undefined,
         parallelism: asNumber(data?.parallelism),
         processingGuarantee: data?.processingGuarantees ? String(data.processingGuarantees) : undefined,
-        cpu: asNumber(resources?.cpu) ?? asNumber(data?.cpu),
-        ramMb: asNumber(resources?.ramDisk) ?? asNumber(data?.ramMb),
-        diskMb: asNumber(resources?.disk) ?? asNumber(data?.diskMb),
+        cpu: asNumber(resources?.cpu),
+        ramMb: bytesToMb(resources?.ram),
+        diskMb: bytesToMb(resources?.disk),
         autoAck: typeof data?.autoAck === 'boolean' ? data.autoAck : undefined,
         timeoutMs: asNumber(data?.timeoutMs),
         raw: data && typeof data === 'object' ? data : {},
@@ -177,7 +237,7 @@ function foldBuiltin(kind: PulsarResourceKind, data: any): PulsarBuiltinDefiniti
         kind,
         name: String(data?.name ?? ''),
         className: String(data?.className ?? data?.sinkClass ?? data?.sourceClass ?? ''),
-        archive: data?.jarPath ? String(data.jarPath) : data?.archive ? String(data.archive) : undefined,
+        archive: foldPackage(kind, data).archive,
         description: data?.description ? String(data.description) : undefined,
         inputs: data?.inputs,
         multiDataInputs: data?.multiDataInputs,
@@ -363,19 +423,46 @@ export class WorkerAPI {
     // ========== 新建 ==========
 
     async create(params: PulsarRuntimeCreateParams): Promise<string> {
-        return this.enqueue(async () => {
-            await this.requireWorker();
-            const config = WorkerAPI.buildCreateBody(params);
-            const form = WorkerAPI.buildForm({
-                ...(params.archive ? {url: params.archive} : {}),
-                [params.kind === 'function' ? 'functionConfig' : `${params.kind}Config`]: JSON.stringify(config),
+        return this.enqueue(() => this.register(params));
+    }
+
+    /**
+     * 本地包走的是「同一次注册请求里带文件段」，不是先上传再注册：
+     * 注册端点自己就收 data 文件段（三种运行时同名），worker 收到后自己落包——
+     * 开了包存储就写进包存储，没开就写 BookKeeper——坐标由它生成并记进函数元数据。
+     * 而 packages 那套端点要的是 {type}/{tenant}/{ns}/{name}/{version} 加 metadata 段，
+     * 成功只回 204 空体，坐标还得调用方自己拼，两步反而各多一个坑。
+     *
+     * 这一趟也刻意不占 admin 信号量：几十 MB 在慢链路上一分钟传不完，
+     * 握着 5 个许可之一不放，会把同集群其它 admin 请求排到 30 秒等待上限之后全部报错。
+     */
+    async createWithLocalPackage(params: PulsarRuntimeCreateParams): Promise<string> {
+        return this.register(params);
+    }
+
+    // 注册请求的三段：data 是文件（只有本地包这一档有）、url 是 worker 自己去取的坐标、
+    // 配置段是完整的功能定义。文件段与 url 在 worker 侧是「有 url 就先按 url」的关系，
+    // 两档来源各发各的那一个，不会互相盖掉。
+    private async register(params: PulsarRuntimeCreateParams): Promise<string> {
+        await this.requireWorker();
+        const path = itemPath(params.kind, params.tenant, params.namespace, params.name);
+        const config = JSON.stringify(WorkerAPI.buildCreateBody(params));
+        if (params.localPackagePath) {
+            const form = WorkerAPI.buildFileForm(configPart(params.kind), config, params.localPackagePath);
+            const response = await this.http.post(path, form, {
+                headers: form.getHeaders(),
+                timeout: REQUEST_CONFIG.UPLOAD_TIMEOUT,
+                maxBodyLength: Infinity,
+                maxContentLength: Infinity,
             });
-            const response = await this.http.post(
-                itemPath(params.kind, params.tenant, params.namespace, params.name),
-                form,
-            );
             return WorkerAPI.readText(response.data) || '已提交';
-        });
+        }
+        const fields: Record<string, string> = {[configPart(params.kind)]: config};
+        if (params.archive) {
+            fields.url = params.archive;
+        }
+        const response = await this.http.post(path, WorkerAPI.buildForm(fields));
+        return WorkerAPI.readText(response.data) || '已提交';
     }
 
     private static buildCreateBody(params: PulsarRuntimeCreateParams): Record<string, unknown> {
@@ -383,18 +470,25 @@ export class WorkerAPI {
             tenant: params.tenant,
             namespace: params.namespace,
             name: params.name,
-            className: params.className,
         };
+        // GO 运行时 worker 不校验入口类，留空就不发这个键——发一个假类名只会存进元数据里
+        if (params.className) {
+            body.className = params.className;
+        }
         // 空数组与 undefined 都写成「不发这个键」：函数配置里 inputs:[] 与不填
         // 在 broker 侧含义不同（前者会触发校验失败）
-        if (params.archive) {
-            body[params.kind === 'function' ? 'jarPath' : 'archive'] = params.archive;
+        // 本地包只把文件名写进包字段：字节在 data 段里，worker 只看 jar / py / go
+        // 哪一个非空来推断运行时，这个字符串本身不会被它当路径去读。
+        const pkg = params.archive ?? (params.localPackagePath ? basename(params.localPackagePath) : undefined);
+        if (pkg) {
+            body[params.kind === 'function' ? RUNTIME_FIELDS[params.runtime ?? 'JAVA'] : 'archive'] = pkg;
         }
         if (params.inputs?.length) {
             body.inputs = params.inputs;
         }
-        if (params.output) {
-            body[params.kind === 'function' ? 'output' : 'topic'] = params.output;
+        // 连接器没有单一输出字段：sink 的目的地在 configs 里，只有 source 叫 topicName
+        if (params.output && params.kind !== 'sink') {
+            body[params.kind === 'function' ? 'output' : 'topicName'] = params.output;
         }
         if (params.logTopic) {
             body.logTopic = params.logTopic;
@@ -408,14 +502,38 @@ export class WorkerAPI {
         if (params.cpu || params.ramMb || params.diskMb) {
             body.resources = {
                 cpu: params.cpu ?? 1,
-                ramDisk: params.ramMb ?? 1024,
-                disk: params.diskMb ?? 10240,
+                ram: (params.ramMb ?? 1024) * MB,
+                disk: (params.diskMb ?? 10240) * MB,
             };
         }
         if (params.userConfig && Object.keys(params.userConfig).length > 0) {
             body[params.kind === 'function' ? 'userConfig' : 'configs'] = params.userConfig;
         }
         return body;
+    }
+
+    // 文件段必须带 filename：worker 落包取的是 fileDetail.getFileName()，
+    // 没有文件名的分段在它那边等于「没上传」，注册会以 Package is not provided 失败。
+    private static buildFileForm(part: string, config: string, filePath: string): UploadForm {
+        let size: number;
+        try {
+            size = statSync(filePath).size;
+        } catch (error) {
+            throw new Error(`本地包读不到：${filePath}（选完之后被移动或删除了？）原因：${(error as Error).message}`);
+        }
+        if (!size) {
+            throw new Error(`本地包是空的：${filePath}`);
+        }
+        const form = new UploadForm();
+        // knownLength 让 form-data 能写出 Content-Length 与正确的分段结尾：
+        // 少了它，流式分段会被整个缓冲进内存，或者边界算错让 worker 读不到文件段。
+        form.append('data', createReadStream(filePath), {
+            filename: basename(filePath),
+            contentType: 'application/octet-stream',
+            knownLength: size,
+        });
+        form.append(part, config);
+        return form;
     }
 
     // axios 会按 FormData 自动补 multipart 边界，这里不能手填 Content-Type：

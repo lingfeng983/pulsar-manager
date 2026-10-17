@@ -1007,6 +1007,10 @@ export interface PulsarRuntimeStatus {
 
 export type PulsarResourceKind = 'function' | 'sink' | 'source';
 
+// worker 按「jar / py / go 哪一个非空」推断函数的运行时，连接器没有这个概念（只有 NAR）。
+// 界面上让用户直接说清楚，比让他猜该填哪个包字段强。
+export type PulsarFunctionRuntime = 'JAVA' | 'PYTHON' | 'GO';
+
 // 只列界面一定会展示的字段。broker 返回的 FunctionConfig 有几十个键，
 // 全量映射的结果是一张没人读完的表；其余键原样留在 raw 里给详情抽屉。
 export interface PulsarRuntimeConfig {
@@ -1015,14 +1019,17 @@ export interface PulsarRuntimeConfig {
     namespace: string;
     name: string;
     className?: string;
-    // 包位置：function:// 是 worker 已存包的坐标，其余是本地路径或 http(s) 地址
+    // 包位置：函数取 jar / py / go 之一，连接器取 archive
     archive?: string;
+    // 只有函数有运行时；worker 回什么就用什么，没回就由包字段反推
+    runtime?: PulsarFunctionRuntime;
     inputs?: string[];
+    // 函数的 output、来源的 topicName；连接器没有单一输出字段（目的地在 configs 里）
     output?: string;
     logTopic?: string;
     parallelism?: number;
     processingGuarantee?: string;
-    // 函数与连接器共用这套资源字段
+    // 函数与连接器共用 resources:{cpu,ram,disk}，broker 侧 ram/disk 是字节，这里统一折成 MB
     cpu?: number;
     ramMb?: number;
     diskMb?: number;
@@ -1072,17 +1079,22 @@ export interface PulsarBuiltinDefinition {
 
 // 新建函数/连接器的表单载荷：主进程把它拼成 multipart 请求，
 // 只带已填字段，未填的键根本不进请求体。
-// 包只能是坐标（内置函数的 function://、worker 已存过的包、http(s) 地址）：
-// 上传本地 jar 需要文件选择框与流式 multipart，这条实现路径在本机没有可对照的
-// worker 可验，与其上一个测不出对错的入口，不如把坐标写清楚。
+// 包来源两档，界面只能选一档：archive 是 worker 自己取得到的坐标（内置插件的
+// builtin://、包存储里的 function://、http(s) 地址），localPackagePath 是本机文件。
+// 后者不需要先上传——注册请求自己就带 data 文件段，worker 落包并把坐标记进函数元数据。
 export interface PulsarRuntimeCreateParams {
     clusterId: string;
     kind: PulsarResourceKind;
     tenant: string;
     namespace: string;
     name: string;
-    className: string;
+    // GO 运行时不需要入口类（worker 不校验），JAVA/PYTHON 少了它 worker 直接拒
+    className?: string;
     archive?: string;
+    // 与 archive 二选一：本机的包文件，注册请求里当 data 文件段发出去
+    localPackagePath?: string;
+    // 只有函数用；留空按 JAVA 处理（worker 自己也是这个默认）
+    runtime?: PulsarFunctionRuntime;
     inputs?: string[];
     output?: string;
     logTopic?: string;
@@ -1093,6 +1105,14 @@ export interface PulsarRuntimeCreateParams {
     processingGuarantee?: string;
     // 连接器参数（sinkConfig/sourceConfig 的 configs 段）与函数的 userConfig，原样透传
     userConfig?: Record<string, unknown>;
+}
+
+// 文件选择对话框的返回：path 只在主进程用来读这个文件，
+// 界面只显示 name 与 size——把整份内容跟着过一遍 IPC 没有读者。
+export interface PickedArchiveFile {
+    path: string;
+    name: string;
+    size: number;
 }
 
 // ========== 命名空间策略（Namespace Policies）==========

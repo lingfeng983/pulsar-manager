@@ -78,6 +78,7 @@ import type {
     PulsarRuntimeItem,
     PulsarTriggerResult,
     PulsarWorkerState,
+    PickedArchiveFile,
     TopologyLimits,
 } from './shared/types';
 
@@ -536,6 +537,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
         getRecent: (limit?: number) => ipcRenderer.invoke('logs:getRecent', limit),
     },
 
+    // 本地文件选择（函数 / 连接器的包）：只回路径与元信息，内容不进渲染进程
+    file: {
+        pickArchive: () => ipcRenderer.invoke('file:pickArchive'),
+    },
+
     // 插件市场：本地声明式插件，只贡献压测预设与 Topic 模板
     plugin: {
         list: () => ipcRenderer.invoke('plugin:list'),
@@ -945,6 +951,10 @@ declare global {
             };
             logs: {
                 getRecent: (limit?: number) => Promise<APIResponse<OperationLog[]>>;
+            };
+            file: {
+                // 用户取消时 data 为 null，这不是失败
+                pickArchive: () => Promise<APIResponse<PickedArchiveFile | null>>;
             };
             plugin: {
                 list: () => Promise<APIResponse<PluginListResult>>;

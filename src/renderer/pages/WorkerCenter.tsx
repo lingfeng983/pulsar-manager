@@ -733,6 +733,10 @@ const WorkerCenter: React.FC<Props> = ({clusterId: propClusterId, tenant: propTe
                             <Descriptions.Item label="投递保证">
                                 {detail.config.processingGuarantee || '—'}
                             </Descriptions.Item>
+                            {detail.config.kind === 'function' ? (
+                                // 运行时不是 broker 单独回的一个字段，是它按 jar / py / go 哪一个非空给的
+                                <Descriptions.Item label="运行时">{detail.config.runtime || '—'}</Descriptions.Item>
+                            ) : null}
                             <Descriptions.Item label="CPU">{detail.config.cpu ?? '—'}</Descriptions.Item>
                             <Descriptions.Item label="内存">
                                 {detail.config.ramMb ? `${detail.config.ramMb} MB` : '—'}

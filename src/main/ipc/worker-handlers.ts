@@ -78,16 +78,23 @@ export function registerWorkerHandlers() {
         },
     );
 
+    // 本地包这一档把路径记进审计：事后要查的是「他上传的是哪一个文件」，
+    // 而这一刻 archive 字段本来就是空的，只记 class 等于什么都没记。
     registerMutationHandler(
         'worker:item:create',
         RuntimeCreateSchema,
         passThrough,
         input => ({
             ...itemAudit('create')(input),
-            details: JSON.stringify({class: input.className, archive: input.archive}),
+            details: JSON.stringify({
+                class: input.className,
+                archive: input.archive,
+                localPackage: input.localPackagePath,
+                runtime: input.runtime,
+            }),
         }),
-        (client, input) =>
-            client.createRuntimeItem({
+        (client, input) => {
+            const params = {
                 clusterId: input.clusterId,
                 kind: input.kind,
                 tenant: input.tenant,
@@ -95,6 +102,7 @@ export function registerWorkerHandlers() {
                 name: input.name,
                 className: input.className,
                 archive: input.archive,
+                runtime: input.runtime,
                 inputs: input.inputs,
                 output: input.output,
                 logTopic: input.logTopic,
@@ -104,7 +112,11 @@ export function registerWorkerHandlers() {
                 diskMb: input.diskMb,
                 processingGuarantee: input.processingGuarantee,
                 userConfig: input.userConfig,
-            }),
+            };
+            return input.localPackagePath
+                ? client.createRuntimeWithPackage({...params, localPackagePath: input.localPackagePath})
+                : client.createRuntimeItem(params);
+        },
     );
 
     registerMutationHandler(

@@ -25,6 +25,13 @@ export const PROCESSING_GUARANTEES = [
     {value: 'EFFECTIVELY_ONCE', label: '恰好一次（EFFECTIVELY_ONCE）'},
 ];
 
+// 选它等于选「包坐标发进 jar / py / go 三个字段里的哪一个」：worker 就是这么反推运行时的
+export const FUNCTION_RUNTIMES = [
+    {value: 'JAVA', label: 'Java'},
+    {value: 'PYTHON', label: 'Python'},
+    {value: 'GO', label: 'Go'},
+];
+
 export function instanceStatusMeta(status: PulsarInstanceStatus): {color: string; label: string} {
     if (status === 'running') {
         return {color: 'green', label: '运行中'};

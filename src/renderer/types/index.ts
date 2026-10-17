@@ -98,6 +98,7 @@ export type {
     // 函数与连接器
     PulsarBuiltinDefinition,
     PulsarFunctionInstance,
+    PulsarFunctionRuntime,
     PulsarFunctionStats,
     PulsarResourceKind,
     PulsarRuntimeConfig,
@@ -107,6 +108,7 @@ export type {
     PulsarTriggerResult,
     PulsarWorkerNode,
     PulsarWorkerState,
+    PickedArchiveFile,
     // 命名空间策略
     NamespaceBacklogQuota,
     NamespaceBacklogQuotaValue,

@@ -266,6 +266,12 @@ export class PulsarAdminClient {
         return this.workerAPI.create(params);
     }
 
+    // 本地包这条同样是「创建」一个动作，只是请求里多带一个 data 文件段；
+    // 编排放在 WorkerAPI 里，服务层不碰 ipc。
+    async createRuntimeWithPackage(params: PulsarRuntimeCreateParams) {
+        return this.workerAPI.createWithLocalPackage(params);
+    }
+
     async triggerFunction(tenant: string, namespace: string, name: string, topic: string, data?: string) {
         return this.workerAPI.trigger(tenant, namespace, name, topic, data);
     }
