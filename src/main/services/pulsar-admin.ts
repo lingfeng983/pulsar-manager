@@ -6,11 +6,13 @@ import {ResourceAPI} from './resource-api';
 import {MetricsAPI} from './metrics-api';
 import {WorkerAPI} from './worker-api';
 import {NamespacePolicyAPI} from './namespace-policy-api';
+import {TopicPolicyAPI} from './topic-policy-api';
 import type {
     NamespacePolicyField,
     PulsarResourceKind,
     PulsarRuntimeCreateParams,
     TopicConfigPatch,
+    TopicPolicyField,
     TopologyLimits,
 } from '../../shared/types';
 
@@ -20,6 +22,7 @@ export {ResourceAPI} from './resource-api';
 export {MetricsAPI} from './metrics-api';
 export {WorkerAPI, WorkerUnavailableError} from './worker-api';
 export {NamespacePolicyAPI} from './namespace-policy-api';
+export {TopicPolicyAPI} from './topic-policy-api';
 
 // Re-export specific types for convenience (handlers.ts imports these)
 export type {
@@ -51,6 +54,7 @@ export class PulsarAdminClient {
     private metricsAPI: MetricsAPI;
     private workerAPI: WorkerAPI;
     private namespacePolicyAPI: NamespacePolicyAPI;
+    private topicPolicyAPI: TopicPolicyAPI;
 
     constructor(config: PulsarAdminConfig) {
         this.http = createAxiosClient(config);
@@ -61,6 +65,7 @@ export class PulsarAdminClient {
         this.metricsAPI = new MetricsAPI(this.http, this.semaphore, this.resourceAPI, this.aggregateSemaphore);
         this.workerAPI = new WorkerAPI(this.http, this.semaphore);
         this.namespacePolicyAPI = new NamespacePolicyAPI(this.http, this.semaphore);
+        this.topicPolicyAPI = new TopicPolicyAPI(this.http, this.semaphore);
     }
 
     // ========== 集群操作 ==========
@@ -148,6 +153,37 @@ export class PulsarAdminClient {
         persistent: boolean = true,
     ) {
         return this.resourceAPI.updateTopicConfig(tenant, namespace, topic, patch, persistent);
+    }
+
+    // ========== Topic 级策略 ==========
+    //
+    // 与 updateTopicConfig 分开是刻意的：那条通道写的是 partitions 与 retention
+    // （topic 本体与策略端点），这一条写的是 broker 的 TopicPolicies 一组端点，
+    // 两者的清除语义不同——前者没有「撤销」可言，后者 DELETE 就是退回命名空间。
+
+    async getTopicPolicies(tenant: string, namespace: string, topic: string, persistent: boolean = true) {
+        return this.topicPolicyAPI.getPolicies(tenant, namespace, topic, persistent);
+    }
+
+    async setTopicPolicy(
+        tenant: string,
+        namespace: string,
+        topic: string,
+        field: TopicPolicyField,
+        value: unknown,
+        persistent: boolean = true,
+    ) {
+        return this.topicPolicyAPI.setPolicy(tenant, namespace, topic, field, value, persistent);
+    }
+
+    async clearTopicPolicy(
+        tenant: string,
+        namespace: string,
+        topic: string,
+        field: TopicPolicyField,
+        persistent: boolean = true,
+    ) {
+        return this.topicPolicyAPI.clearPolicy(tenant, namespace, topic, field, persistent);
     }
 
     async createTopic(

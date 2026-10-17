@@ -28,8 +28,9 @@ import {SERVICE_URL_PATTERN, WEB_URL_PATTERN} from '../services/app-config';
 import {PulsarAdminClient, clientManager} from '../services/pulsar-admin';
 import {condenseErrorText} from '../services/http-client';
 import {POLICY_FIELDS} from '../services/namespace-policy-api';
+import {TOPIC_POLICY_FIELDS} from '../services/topic-policy-api';
 import {NAMESPACE_SYNC_MAX_TARGETS} from '../services/namespace-policy-sync';
-import type {NamespacePolicyField} from '../../shared/types';
+import type {NamespacePolicyField, TopicPolicyField} from '../../shared/types';
 import {sshTunnelManager, type TunnelEndpoints, type TunnelTargets} from '../services/ssh-tunnel';
 import {createLogger} from '../utils/logger';
 
@@ -260,27 +261,12 @@ export const CreateSubscriptionSchema = SubscriptionPathSchema.extend({
     initialPosition: InitialPositionSchema.optional().default('Latest'),
 });
 
-// 只有这三项存在 topic 级写入口；.strict() 让表单里那些改不动的策略
-// 在参数校验阶段就报错，而不是"提交成功但值没变"。
-// 三项都是可选的：编辑配置弹窗的语义是"留空表示不修改"，渲染层每次只提交
-// 用户真正填过的字段，若这里要求全量必填，只改一项的合法请求会被拒成
-// "Invalid input parameters"，现象是保存配置永远失败。
+// 分区数是「配置」页签唯一的写入口；保留策略、TTL、去重、未确认上限这些
+// topic 级覆盖都由「策略」页签按字段单独 set/clear，走 topic:policy:* 通道。
+// .strict() 让误提交进来的 retention* 之类在参数校验阶段就报错，
+// 而不是"提交成功但值没变"。
 export const TopicConfigPatchSchema = z
     .object({
-        // -1 是 broker 表示"该维度不限制"的合法值（0 只用于两项同时为 0 关闭保留），
-        // 下限放到 -1，否则用户按 broker 语义填 -1 会被参数校验拦下。
-        retentionTimeInMinutes: z
-            .number()
-            .int()
-            .min(-1)
-            .max(365 * 24 * 60)
-            .optional(),
-        retentionSizeInMB: z
-            .number()
-            .int()
-            .min(-1)
-            .max(1024 * 1024)
-            .optional(),
         numPartitions: z.number().int().min(0).max(1000).optional(),
     })
     .strict()
@@ -577,6 +563,31 @@ export const NamespacePolicySyncSchema = z.object({
     source: NamespacePolicySyncScopeSchema,
     targets: z.array(NamespacePolicySyncScopeSchema).min(1).max(NAMESPACE_SYNC_MAX_TARGETS),
     fields: z.array(NamespacePolicyFieldSchema).min(1).max(POLICY_FIELDS.length),
+});
+
+// ========== Topic 级策略 ==========
+
+// 字段枚举由主进程的字段表给出，与命名空间策略同一套理由：
+// 在 IPC 层再列一遍可写字段就是第二张字段表，加一个端点要改两个文件，
+// 漏改的那半边表现为「界面能选、 broker 说不是合法字段」。
+export const TopicPolicyFieldSchema = z.enum(
+    TOPIC_POLICY_FIELDS as unknown as [TopicPolicyField, ...TopicPolicyField[]],
+);
+
+// 作用域就是 topic 本体路径，persistent 沿用 TopicPathSchema 的缺省（持久）。
+const TopicPolicyScopeSchema = TopicPathSchema;
+
+export const TopicPolicyGetSchema = TopicPolicyScopeSchema;
+
+export const TopicPolicySetSchema = TopicPolicyScopeSchema.extend({
+    field: TopicPolicyFieldSchema,
+    // 形状随字段走：TTL 与两个上限是裸数字、去重是裸布尔、保留是对象，
+    // 取值范围与形状校验都在字段表里做，这里不重复一遍。
+    value: z.unknown(),
+});
+
+export const TopicPolicyClearSchema = TopicPolicyScopeSchema.extend({
+    field: TopicPolicyFieldSchema,
 });
 
 // partitions = 0 表示非分区 topic：这两条路径在 Admin API 里是不同的端点，

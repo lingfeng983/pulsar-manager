@@ -128,6 +128,13 @@ export type {
     NamespaceRateLimit,
     NamespaceRateValue,
     NamespaceRetentionValue,
+    // Topic 级策略
+    TopicPolicyClearParams,
+    TopicPolicyField,
+    TopicPolicyScopeParams,
+    TopicPolicySetParams,
+    TopicPolicyUnavailable,
+    TopicPolicyView,
 } from '../../shared/types';
 
 // 订阅

@@ -29,6 +29,7 @@ import {
     DeleteOutlined,
     PlusOutlined,
     ReloadOutlined,
+    SafetyOutlined,
     SendOutlined,
 } from '@ant-design/icons';
 import type {TopicConfig, TopicConfigPatch, TopicStats} from '../types';
@@ -42,6 +43,7 @@ import PageShell from '../components/common/PageShell';
 import StateBlock from '../components/common/StateBlock';
 import {useConfirmDanger} from '../components/common/dangerConfirm';
 import TopicSchemaTab from '../components/topic/TopicSchemaTab';
+import TopicPolicyPanel from '../components/topic/TopicPolicyPanel';
 import PermissionsPanel from '../components/common/PermissionsPanel';
 
 interface TopicDetailProps {
@@ -359,10 +361,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                 const config = response.data;
                 setTopicConfig(config);
                 editConfigForm.setFieldsValue({
-                    // 留空 = 不修改。broker 没给出 topic 级覆盖值时不填 0，
-                    // 否则保存会把"继承命名空间"误写成"显式设为 0"。
-                    retentionTimeInMinutes: config.retentionTimeInMinutes ?? null,
-                    retentionSizeInMB: config.retentionSizeInMB ?? null,
+                    // 留空 = 不修改。分区数是 0 就真的是 0（非分区），不能拿它当"没填"看。
                     numPartitions: config.partitions.length > 0 ? config.partitions.length : null,
                 });
             } else {
@@ -387,12 +386,6 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
             const values = await editConfigForm.validateFields();
             const patch: TopicConfigPatch = {};
 
-            if (typeof values.retentionTimeInMinutes === 'number') {
-                patch.retentionTimeInMinutes = values.retentionTimeInMinutes;
-            }
-            if (typeof values.retentionSizeInMB === 'number') {
-                patch.retentionSizeInMB = values.retentionSizeInMB;
-            }
             if (typeof values.numPartitions === 'number') {
                 patch.numPartitions = values.numPartitions;
             }
@@ -953,33 +946,6 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                                         </div>
                                         <div className="options-grid">
                                             <div className="opt-group">
-                                                <div className="opt-group-title">保留策略（topic 级覆盖）</div>
-                                                <Form.Item
-                                                    name="retentionTimeInMinutes"
-                                                    label="保留时间（分钟）"
-                                                    extra="留空表示不修改；-1 表示不按时间清理。填 0 只有在保留大小同为 0 时才有效（两项一起置 0 才是关闭保留）"
-                                                >
-                                                    <InputNumber
-                                                        min={-1}
-                                                        max={525600}
-                                                        style={{width: '100%'}}
-                                                        placeholder="不修改"
-                                                    />
-                                                </Form.Item>
-                                                <Form.Item
-                                                    name="retentionSizeInMB"
-                                                    label="保留大小（MB）"
-                                                    extra="留空表示不修改；-1 表示不限容量。填 0 只有在保留时间同为 0 时才有效"
-                                                >
-                                                    <InputNumber
-                                                        min={-1}
-                                                        max={1048576}
-                                                        style={{width: '100%'}}
-                                                        placeholder="不修改"
-                                                    />
-                                                </Form.Item>
-                                            </div>
-                                            <div className="opt-group">
                                                 <div className="opt-group-title">分区</div>
                                                 <Form.Item
                                                     name="numPartitions"
@@ -994,7 +960,8 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                                                         placeholder="不修改"
                                                     />
                                                 </Form.Item>
-                                                {/* 生效值只读展示：这些策略本 broker 没有 topic 级写入口 */}
+                                                {/* 这里显示的是实际生效值（来自 stats），通常是命名空间或 broker 默认；
+                                                    topic 级覆盖值在「策略」页签，两者可以不一样 */}
                                                 <div className="readonly-block">
                                                     <div>
                                                         生效积压配额：
@@ -1016,13 +983,31 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                                             </div>
                                         </div>
                                         <p className="hint-text">
-                                            最大消息大小、积压配额、TTL、生产/消费者上限等策略在本 broker
-                                            上只有命名空间级别的写入口， 在 topic
-                                            级别修改不会生效，因此这里不提供输入框。
+                                            保留策略、消息 TTL、去重与未确认上限都有 topic
+                                            级端点，在「策略」页签按覆盖值修改；
+                                            积压配额、最大消息大小、生产/消费者数量上限等仍只有命名空间级写入口，
+                                            上面这几行显示的是实际生效值，不是 topic 级覆盖。
                                         </p>
                                     </Form>
                                 </StateBlock>
                             </Card>
+                        ),
+                    },
+                    {
+                        key: 'policy',
+                        label: '策略',
+                        icon: <SafetyOutlined />,
+                        children: (
+                            <TopicPolicyPanel
+                                clusterId={clusterId}
+                                tenant={tenant}
+                                namespace={namespace}
+                                topic={topic}
+                                persistent={persistent}
+                                // antd 页签只隐藏不卸载：首次激活再读六个端点，
+                                // 否则打开详情页要多一轮 IPC
+                                active={activeTab === 'policy'}
+                            />
                         ),
                     },
                 ]}

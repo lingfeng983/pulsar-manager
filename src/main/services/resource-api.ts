@@ -34,7 +34,9 @@ function topicSegment(persistent: boolean): string {
     return persistent ? 'persistent' : 'non-persistent';
 }
 
-function topicPath(tenant: string, namespace: string, topic: string, persistent: boolean): string {
+// topic 级策略服务（topic-policy-api）走的是同一组资源路径，这里导出而不是让它
+// 自己再拼一遍——转义与非持久前缀这两条规则各写一份，迟早只改一边。
+export function topicPath(tenant: string, namespace: string, topic: string, persistent: boolean): string {
     return `/admin/v2/${topicSegment(persistent)}/${seg(tenant)}/${seg(namespace)}/${seg(topic)}`;
 }
 
@@ -52,7 +54,7 @@ function subscriptionPath(
  * 列表接口返回的 name 已经是 `tenant/ns/topic` 完整形态（scheme 被剥掉），
  * 再拼一次前缀会得到 `tenant/ns/tenant/ns/topic`。这里统一收口。
  */
-function shortTopicName(topic: string): string {
+export function shortTopicName(topic: string): string {
     if (!topic.includes('/')) {
         return topic;
     }
@@ -106,12 +108,9 @@ function collapseTopicUris(topicUris: string[]): Topic[] {
     return [...byName.values()];
 }
 
-// 实测本 broker 只有这三个策略存在 topic 级写入口，其余只能在命名空间级别设置。
-const WRITABLE_TOPIC_CONFIG_KEYS: (keyof TopicConfigPatch)[] = [
-    'retentionTimeInMinutes',
-    'retentionSizeInMB',
-    'numPartitions',
-];
+// topic 本体通道只有分区数这一项可写：topic 级策略各自是一条端点，
+// 走 topic-policy-api，不走这份「留空表示不改」的补丁形状。
+const WRITABLE_TOPIC_CONFIG_KEYS: (keyof TopicConfigPatch)[] = ['numPartitions'];
 
 // 创建与更新共用同一个请求体形状，只有动词不同。
 function tenantPolicy(config: Partial<Tenant>): {adminRoles: string[]; allowedClusters: string[]} {
@@ -497,12 +496,11 @@ export class ResourceAPI {
                 ownerBrokers: [],
             };
 
-            // 实测本 broker 只在 topic 级提供 partitions / retention / permissions，
-            // backlog-quota、ttl、max-producers 等没有 topic 级路由，
-            // 生效值只能从 stats 里读（backlogQuotaLimitSize / deduplicationStatus）。
-            const [partitions, retention, permissions, stats] = await Promise.all([
+            // 实测本 broker 在 topic 本体路径下只有 partitions / permissions 两条稳定端点，
+            // 其余策略（retention、TTL、去重…）挂在 topic 级策略端点上，由 TopicPolicyAPI 读；
+            // 生效值只能从 stats 里拿（backlogQuotaLimitSize / deduplicationStatus）。
+            const [partitions, permissions, stats] = await Promise.all([
                 orNotFound(() => this.http.get(`${base}/partitions`), null),
-                orNotFound(() => this.http.get(`${base}/retention`), null),
                 orNotFound(() => this.http.get(`${base}/permissions`), null),
                 orNotFound(() => this.http.get(`${base}/stats`), null),
             ]);
@@ -515,12 +513,6 @@ export class ResourceAPI {
                     topicName,
                     persistent,
                 ).partitions;
-            }
-
-            const retentionData = retention?.data as any;
-            if (retentionData && typeof retentionData === 'object') {
-                config.retentionTimeInMinutes = numberOrUndefined(retentionData.retentionTimeInMinutes);
-                config.retentionSizeInMB = numberOrUndefined(retentionData.retentionSizeInMB);
             }
 
             const permissionData = permissions?.data as any;
@@ -567,42 +559,9 @@ export class ResourceAPI {
                 throw new Error('没有需要更新的配置项');
             }
 
-            if (keys.includes('retentionTimeInMinutes') || keys.includes('retentionSizeInMB')) {
-                // POST /retention 整体替换 RetentionPolicies：先读回现值再合并，
-                // 否则只改 retentionSize 会把 retentionTime 清零。
-                // 实测 topic 级 GET /retention 在没显式设置过时返回空 body，此时取命名空间
-                // 的生效值；两者都读不到就用 -1，因为 broker 明确拒绝"一维为 0 另一维非 0"
-                // （0 只用来配合另一维也为 0 表示整体关闭保留）。
-                const [topicRetention, nsRetention] = await Promise.all([
-                    orNotFound(() => this.http.get(`${base}/retention`), null),
-                    orNotFound(
-                        () => this.http.get(`/admin/v2/namespaces/${seg(tenant)}/${seg(namespace)}/retention`),
-                        null,
-                    ),
-                ]);
-                const current =
-                    topicRetention?.data && typeof topicRetention.data === 'object'
-                        ? (topicRetention.data as any)
-                        : null;
-                const inherited =
-                    nsRetention?.data && typeof nsRetention.data === 'object' ? (nsRetention.data as any) : null;
-                const resolve = (field: keyof TopicConfigPatch, patchValue: number | undefined): number => {
-                    if (typeof patchValue === 'number') {
-                        return patchValue;
-                    }
-                    return numberOr(current?.[field], numberOr(inherited?.[field], -1));
-                };
-                await this.http.post(`${base}/retention`, {
-                    retentionTimeInMinutes: resolve('retentionTimeInMinutes', patch.retentionTimeInMinutes),
-                    retentionSizeInMB: resolve('retentionSizeInMB', patch.retentionSizeInMB),
-                });
-            }
-
-            if (typeof patch.numPartitions === 'number') {
-                // 实测 PUT 是"创建分区 topic"，对已存在的分区 topic 返回
-                // 409 `Partitioned topic already exists`；POST 才是更新分区数。
-                await this.http.post(`${base}/partitions`, patch.numPartitions);
-            }
+            // 实测 PUT 是"创建分区 topic"，对已存在的分区 topic 返回
+            // 409 `Partitioned topic already exists`；POST 才是更新分区数。
+            await this.http.post(`${base}/partitions`, patch.numPartitions);
         });
     }
 

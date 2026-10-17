@@ -122,8 +122,11 @@ export interface Topic {
 
 // Topic 配置：主进程按实测可用的端点拼装。
 // 注意 `GET {topic}/info` 在 broker 上并不存在（实测 404），所以配置值来自
-// /partitions 元数据、topic 级 retention、permissions 与 /stats 里的生效值；
+// /partitions 元数据、permissions 与 /stats 里的生效值；
 // 取不到的字段保持 undefined，而不是回退成 0 或空串冒充"已配置"。
+//
+// 保留策略、TTL 这类 topic 级覆盖不在这里读：它们各自是一条策略端点，
+// 统一由 TopicPolicyView（topic-policy-api）给出，两条路径各读一份迟早对不上。
 export interface TopicConfig {
     // tenant/ns/topic
     topicName: string;
@@ -131,9 +134,6 @@ export interface TopicConfig {
     // 分区 URI 列表，长度即分区数
     partitions: string[];
     ownerBrokers: string[];
-    // topic 级覆盖，broker 未设置该覆盖时为 undefined（此时生效值来自命名空间/broker）
-    retentionTimeInMinutes?: number;
-    retentionSizeInMB?: number;
     permissions?: Record<string, string[]>;
     // 以下取自 stats / partitioned-stats，是实际生效值，通常是命名空间或 broker 默认
     backlogQuotaLimitSize?: number;
@@ -141,12 +141,9 @@ export interface TopicConfig {
     deduplicationEnabled?: boolean;
 }
 
-// 只有这两个策略在本 broker 上有 topic 级写入口（POST {topic}/retention），
-// 分区数走 PUT {topic}/partitions。其余字段没有 topic 级端点，
-// 收进 patch 会被拒绝，避免表单静默丢数据。
+// 这一条通道只改 topic 本体（分区数）。topic 级策略走 topic:policy:* 通道：
+// 策略端点的语义是"设置/撤销覆盖"，与"留空表示不改"的补丁形状不是一回事。
 export interface TopicConfigPatch {
-    retentionTimeInMinutes?: number;
-    retentionSizeInMB?: number;
     numPartitions?: number;
 }
 
@@ -1330,6 +1327,66 @@ export interface NamespacePolicySyncApplyResult {
     targets: NamespacePolicySyncTargetResult[];
     succeeded: number;
     failed: number;
+}
+
+// ========== Topic 级策略（TopicPolicies）==========
+//
+// broker 把策略分成三层：broker 默认、命名空间覆盖、topic 覆盖。这一节是第三层。
+// topic 级覆盖不是"另存一份全量策略"，而是一字段一端点：GET 只回那一个值
+// （标量直接回裸数字/布尔，retention 回对象），POST 设置、DELETE 撤销回上层。
+// 字段集合因此只列 broker 上确实存在这三件套的项——inactive topic、delayed
+// delivery、offload、persistence 等虽有端点但请求体形状未核对，不臆造。
+
+export type TopicPolicyField =
+    | 'retention'
+    | 'messageTtlSeconds'
+    | 'deduplicationEnabled'
+    | 'maxUnackedMessagesPerConsumer'
+    | 'maxUnackedMessagesPerSubscription';
+
+// 某个字段在这台 broker 上读不出来。两种原因必须分开显示：
+// 404 是没有 topic 级端点（老 broker），405 是 broker.conf 里
+// topicLevelPoliciesEnabled=false——后者运维改一个配置就能恢复，前者不能。
+export interface TopicPolicyUnavailable {
+    field: TopicPolicyField;
+    reason: string;
+}
+
+export interface TopicPolicyView {
+    // tenant/ns/topic（短名，不带 persistent:// 前缀）
+    topicName: string;
+    persistent: boolean;
+    // 未设置 = 沿用命名空间/broker，与「设为 -1 / 设为 0」是三种不同事实
+    retentionTimeInMinutes: number | null;
+    retentionSizeInMB: number | null;
+    messageTtlSeconds: number | null;
+    deduplicationEnabled: boolean | null;
+    maxUnackedMessagesPerConsumer: number | null;
+    maxUnackedMessagesPerSubscription: number | null;
+    clearableFields: TopicPolicyField[];
+    unavailable: TopicPolicyUnavailable[];
+    // 逐端点的原始返回：折叠表只列上面这些字段，broker 上还有更多 topic 级端点
+    // （未核对形状的那几个），出问题时这是唯一的现场证据。
+    raw: Record<string, unknown>;
+}
+
+export interface TopicPolicyScopeParams {
+    clusterId: string;
+    tenant: string;
+    namespace: string;
+    topic: string;
+    persistent?: boolean;
+}
+
+// 写入形状与读取形状不同：retention 写回是一个对象（broker 的 POST 整体替换两个维度，
+// 少发一个等于把它清零），其余字段是裸标量。value 保持 unknown 由字段表逐字段校验。
+export interface TopicPolicySetParams extends TopicPolicyScopeParams {
+    field: TopicPolicyField;
+    value: unknown;
+}
+
+export interface TopicPolicyClearParams extends TopicPolicyScopeParams {
+    field: TopicPolicyField;
 }
 
 export interface ExportedSshConfig {

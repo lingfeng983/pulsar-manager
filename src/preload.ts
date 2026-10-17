@@ -57,6 +57,10 @@ import type {
     Topic,
     TopicConfig,
     TopicConfigPatch,
+    TopicPolicyClearParams,
+    TopicPolicyScopeParams,
+    TopicPolicySetParams,
+    TopicPolicyView,
     TopicStats,
     BrokerSchemaInfo,
     BrokerSchemaType,
@@ -496,6 +500,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
         syncApply: (params: NamespacePolicySyncParams) => ipcRenderer.invoke('namespace:policies:sync:apply', params),
     },
 
+    // Topic 级策略（broker 的 TopicPolicies：一字段一端点）
+    topicPolicy: {
+        get: (params: TopicPolicyScopeParams) => ipcRenderer.invoke('topic:policy:get', params),
+        set: (params: TopicPolicySetParams) => ipcRenderer.invoke('topic:policy:set', params),
+        clear: (params: TopicPolicyClearParams) => ipcRenderer.invoke('topic:policy:clear', params),
+    },
+
     // 拓扑
     topology: {
         getClusterTopology: (clusterId: string, limits?: TopologyLimits) =>
@@ -918,6 +929,11 @@ declare global {
                 clear: (params: NamespacePolicyClearParams) => Promise<APIResponse<void>>;
                 syncPlan: (params: NamespacePolicySyncParams) => Promise<APIResponse<NamespacePolicySyncPlanResult>>;
                 syncApply: (params: NamespacePolicySyncParams) => Promise<APIResponse<NamespacePolicySyncApplyResult>>;
+            };
+            topicPolicy: {
+                get: (params: TopicPolicyScopeParams) => Promise<APIResponse<TopicPolicyView>>;
+                set: (params: TopicPolicySetParams) => Promise<APIResponse<void>>;
+                clear: (params: TopicPolicyClearParams) => Promise<APIResponse<void>>;
             };
             topology: {
                 getClusterTopology: (

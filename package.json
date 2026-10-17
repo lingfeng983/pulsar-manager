@@ -18,6 +18,7 @@
         "selftest": "node scripts/template-engine-selftest.mjs",
         "selftest:worker": "npm run build:main && node scripts/worker-api-selftest.cjs",
         "selftest:policies": "npm run build:main && node scripts/namespace-policy-selftest.cjs",
+        "selftest:topic": "npm run build:main && node scripts/topic-policy-selftest.cjs",
         "icon": "node scripts/make-icon.mjs",
         "electron:pack": "npm run build && electron-builder --dir && npm run verify:package",
         "electron:dist": "npm run build && electron-builder && npm run verify:package",
