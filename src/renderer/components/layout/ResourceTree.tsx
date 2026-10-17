@@ -15,6 +15,7 @@ import {
     SendOutlined,
     DownloadOutlined,
     SearchOutlined,
+    SafetyCertificateOutlined,
 } from '@ant-design/icons';
 import {useClusterStore} from '../../store/cluster';
 import {useTabStore} from '../../store/tabs';
@@ -33,7 +34,16 @@ import {
 } from '../../hooks/resourceCache';
 import {shortName} from '../../utils/format';
 import {matchesFilter} from '../../utils/textFilter';
-import {topicTab, tenantTab, namespaceTab, topologyTab, metricsTab, producerTab, consumerTab} from '../../utils/tabIds';
+import {
+    topicTab,
+    tenantTab,
+    namespaceTab,
+    topologyTab,
+    metricsTab,
+    inspectionTab,
+    producerTab,
+    consumerTab,
+} from '../../utils/tabIds';
 import {useCommand} from '../../hooks/useKeybindings';
 import TenantFormModal from '../tenant/TenantFormModal';
 import TopicFormModal from '../topic/TopicFormModal';
@@ -736,6 +746,11 @@ const ResourceTree: React.FC = () => {
                         );
                     }
                     break;
+                case 'inspection':
+                    if (dataRef?.type === 'cluster') {
+                        addTab(inspectionTab(dataRef.clusterId, dataRef.cluster?.name));
+                    }
+                    break;
                 case 'delete':
                     if (dataRef?.type === 'cluster') {
                         const {clusterId} = dataRef;
@@ -891,6 +906,12 @@ const ResourceTree: React.FC = () => {
                 ...baseItems,
                 {key: 'topology', label: '查看拓扑', icon: <ApartmentOutlined />, onSelect: run('topology')},
                 {key: 'metrics', label: '查看监控', icon: <BarChartOutlined />, onSelect: run('metrics')},
+                {
+                    key: 'inspection',
+                    label: '集群巡检',
+                    icon: <SafetyCertificateOutlined />,
+                    onSelect: run('inspection'),
+                },
                 {key: 'sep-1', separator: true},
                 {key: 'createTenant', label: '新建租户', icon: <PlusOutlined />, onSelect: run('createTenant')},
                 {key: 'sep-2', separator: true},

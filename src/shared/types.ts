@@ -1642,3 +1642,64 @@ export interface PluginListResult {
     errors: PluginLoadError[];
     pluginsDir: string;
 }
+
+// ========== 集群巡检（Inspection） ==========
+
+// 四级而不是两级：巡检里「这条没跑起来（老 broker 没有该端点）」与「这条判定为危险」
+// 完全是两种信息，混成同一条会让用户把所有红字都当成故障。
+export type InspectionLevel = 'ok' | 'warn' | 'crit' | 'skip';
+
+export interface InspectionCheck {
+    key: string;
+    title: string;
+    level: InspectionLevel;
+    // 一行结论，界面上直接显示、Markdown 里作为条目正文
+    summary: string;
+    // 证据行（topic 名、数值），只在展开态与导出文件里出现
+    detail?: string[];
+    // 针对这一条的可执行建议；没有建议时不写（不是每条检查都需要）
+    suggestion?: string;
+}
+
+// 巡检采样到的规模。截断必须显式报出来：「没发现高积压」和「只看了前 60 个 topic，
+// 里面没有高积压」是两句话，后者界面上要让用户看见。
+export interface InspectionScope {
+    tenants: number;
+    namespacesSeen: number;
+    // 命名空间里列到的 topic 总数（截断之前），与真正逐个取统计的数量分开：
+    // 「见到 460 个、只采了 60 个」是报告里必须说清的一句话
+    topicsSeen: number;
+    topicsSampled: number;
+    maxNamespaces: number;
+    maxTopics: number;
+    truncated: boolean;
+}
+
+export interface InspectionTotals {
+    ok: number;
+    warn: number;
+    crit: number;
+    skip: number;
+}
+
+export interface InspectionReport {
+    clusterId: string;
+    clusterName: string;
+    // ISO 时间，导出文件的标题里也用它
+    generatedAt: string;
+    version: string | null;
+    scope: InspectionScope;
+    checks: InspectionCheck[];
+    totals: InspectionTotals;
+}
+
+export interface InspectionRunParams {
+    clusterId: string;
+    maxNamespaces?: number;
+    maxTopics?: number;
+}
+
+export interface InspectionRunResult {
+    report: InspectionReport;
+    markdown: string;
+}

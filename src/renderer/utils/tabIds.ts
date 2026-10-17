@@ -107,3 +107,14 @@ export const workerTab = (clusterId?: string, clusterName?: string): TabItem => 
     type: 'worker',
     data: clusterId ? {clusterId} : undefined,
 });
+
+// 巡检按集群各开一页：报告是「某个集群在某一时刻的快照」，
+// 两个集群的结果挤进同一个页签，导出的 Markdown 会说不清自己属于谁。
+export const inspectionTabId = (clusterId?: string): string => (clusterId ? `inspection-${clusterId}` : 'inspection');
+
+export const inspectionTab = (clusterId?: string, clusterName?: string): TabItem => ({
+    id: inspectionTabId(clusterId),
+    title: clusterId ? `${clusterName || '集群'}巡检` : '集群巡检',
+    type: 'inspection',
+    data: clusterId ? {clusterId} : undefined,
+});

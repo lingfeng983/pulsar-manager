@@ -88,6 +88,8 @@ import type {
     PulsarTriggerResult,
     PulsarWorkerState,
     PickedArchiveFile,
+    InspectionRunParams,
+    InspectionRunResult,
     TopologyLimits,
 } from './shared/types';
 
@@ -512,6 +514,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
         clear: (params: TopicPolicyClearParams) => ipcRenderer.invoke('topic:policy:clear', params),
         syncPlan: (params: TopicPolicySyncParams) => ipcRenderer.invoke('topic:policy:sync:plan', params),
         syncApply: (params: TopicPolicySyncParams) => ipcRenderer.invoke('topic:policy:sync:apply', params),
+    },
+
+    // 集群巡检：一次只读采集换一份能导出发人的报告
+    inspection: {
+        run: (params: InspectionRunParams) => ipcRenderer.invoke('inspection:run', params),
     },
 
     // 拓扑
@@ -952,6 +959,9 @@ declare global {
                 clear: (params: TopicPolicyClearParams) => Promise<APIResponse<void>>;
                 syncPlan: (params: TopicPolicySyncParams) => Promise<APIResponse<TopicPolicySyncPlanResult>>;
                 syncApply: (params: TopicPolicySyncParams) => Promise<APIResponse<TopicPolicySyncApplyResult>>;
+            };
+            inspection: {
+                run: (params: InspectionRunParams) => Promise<APIResponse<InspectionRunResult>>;
             };
             topology: {
                 getClusterTopology: (

@@ -15,6 +15,7 @@ import {
     ApartmentOutlined,
     FunctionOutlined,
     AlertOutlined,
+    SafetyCertificateOutlined,
     MenuFoldOutlined,
     MenuUnfoldOutlined,
 } from '@ant-design/icons';
@@ -28,7 +29,16 @@ import {useAlertStore} from '../../store/alerts';
 import {useLayoutStore} from '../../store/layout';
 import {loadTenants, loadNamespaces, loadTopics} from '../../hooks/resourceCache';
 import {shortName} from '../../utils/format';
-import {topicTab, tenantTab, namespaceTab, topologyTab, metricsTab, alertTab, workerTab} from '../../utils/tabIds';
+import {
+    topicTab,
+    tenantTab,
+    namespaceTab,
+    topologyTab,
+    metricsTab,
+    alertTab,
+    workerTab,
+    inspectionTab,
+} from '../../utils/tabIds';
 import {matchesFilter} from '../../utils/textFilter';
 import {downloadBlob} from '../../utils/download';
 import {useCommand} from '../../hooks/useKeybindings';
@@ -319,6 +329,11 @@ const TopNav: React.FC = () => {
         addTab(workerTab());
     }, [addTab]);
 
+    // 集群巡检：不带集群打开时页面自己落到第一个集群，和 worker 入口同一个口径。
+    const handleOpenInspection = useCallback(() => {
+        addTab(inspectionTab());
+    }, [addTab]);
+
     // 告警中心：徽标是"未恢复事件数"，点开页面并不清空它——
     // 事件要在告警中心里逐条确认或等它自动恢复，徽标跟着界面走才会误导。
     const openAlertCount = useAlertStore(state => state.openCount);
@@ -464,6 +479,14 @@ const TopNav: React.FC = () => {
                             onClick={handleOpenWorker}
                         >
                             函数
+                        </Button>
+                        <Button
+                            size="small"
+                            icon={<SafetyCertificateOutlined />}
+                            title="集群巡检"
+                            onClick={handleOpenInspection}
+                        >
+                            巡检
                         </Button>
                         <Button
                             size="small"
