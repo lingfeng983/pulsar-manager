@@ -167,7 +167,10 @@ if (!unpackedDir) {
                 const entry = typeof info.pkg.main === 'string' ? info.pkg.main.replace(/\\/g, '/') : '';
                 const requiredEntries = [
                     entry,
-                    'dist/preload.js',
+                    // tsconfig.node.json 刻意不设 rootDir，preload 产物与 main 同在
+                    // dist/src 下；写成 dist/preload.js 会把每一个完整产物都判成
+                    // 被截断的半成品，发版在打包之后直接停住。
+                    'dist/src/preload.js',
                     // 渲染层入口：只有主进程与 preload、没有页面时窗口会白屏，
                     // 而安装包本身看起来完全正常
                     'dist/renderer/index.html',
