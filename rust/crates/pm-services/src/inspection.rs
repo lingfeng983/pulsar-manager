@@ -1,7 +1,7 @@
 //! 集群巡检：一次只读采集 + 一组判定规则，产出一份能直接发给别人的报告。
 //!
-//! 判定全部是纯函数，可以不连集群单测；口径与文案严格对齐
-//! `src/main/services/cluster-inspection.ts` 与 `inspection-diff.ts`：
+//! 判定全部是纯函数，可以不连集群单测；口径与文案严格对齐原 Electron 版的
+//! cluster-inspection.ts 与 inspection-diff.ts（已随 Electron 删除，对照请查 git 历史）：
 //! 报告要能脱离应用被读懂，所以「采样范围」「截断」「口径是否被改过」都要写在里面。
 
 use futures::stream::{self, StreamExt};

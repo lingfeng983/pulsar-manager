@@ -1,9 +1,9 @@
-// 主进程、preload、渲染进程共用的领域类型与 IPC 契约。
+// 后台（Rust）与页面共用的领域类型与 RPC 契约。
 //
-// 这些类型此前在 src/preload.ts、src/renderer/types/index.ts、
-// src/main/services/http-client.ts 三处各写一份，字段还互相不一致（同一个
-// TopicStats 在一处必填、另一处可选、第三处直接缺字段），改接口时极易漏改。
-// 这里给出唯一的规范定义，三侧统一引用。
+// 这些类型此前在契约层、src/renderer/types/index.ts、原 Node 侧的 http-client 三处
+// 各写一份，字段还互相不一致（同一个 TopicStats 在一处必填、另一处可选、第三处直接
+// 缺字段），改接口时极易漏改。
+// 这里给出唯一的规范定义，两侧统一引用。
 //
 // 收敛规则：
 // 1. 字段并集取全，避免任何一侧丢字段；
@@ -311,8 +311,8 @@ export interface AggregatedStats {
 
 // ========== 消息 ==========
 
-// 收发全部走原生 pulsar-client：admin REST 上没有 send / peek 路由。
-// 载荷必须是纯 JSON（sandbox 的 preload 收不了类实例），因此 data 一律 base64。
+// 收发全部走 Rust 侧的 pulsar crate：admin REST 上没有 send / peek 路由。
+// 载荷必须是纯 JSON（跨 IPC 传不了类实例），因此 data 一律 base64。
 export interface Message {
     messageId: string;
     topicName: string;
@@ -323,13 +323,13 @@ export interface Message {
     data: string;
     partitionKey?: string;
     redeliveryCount?: number;
-    // 手动确认会话里主进程发的句柄：确认要拿它找回原生 Message 对象。
+    // 手动确认会话里后台发的句柄：确认要拿它找回原生 Message 对象。
     // 不用 messageId 当键——批消息里多条的 id 字符串可能相同，会串消息。
     ackSeq?: number;
-    // MessageId.serialize() 的 base64：绑定只有 deserialize，没有 fromString，
-    // 想按 id 回放就必须把字节带出来。当前没有按 id 回放的入口，而 Electron 29
-    // 的 Node-API 禁止外部 Buffer，调用 serialize() 会直接抛
-    // "External buffers are not allowed" 并把整条消费会话带停，所以这里不再赋值。
+    // MessageId 序列化后的 base64：绑定只有 deserialize、没有 fromString，
+    // 想按 id 回放就必须把字节带出来。当前没有按 id 回放的入口，所以这里不赋值。
+    //（Electron 时代还不能填：Node-API 禁止外部 Buffer，serialize() 会抛
+    // "External buffers are not allowed" 并把整条消费会话带停。Rust 侧无此限制。）
     messageIdBytes?: string;
     // 超出可确认窗口被淘汰后为 false：界面据此提示"将由 broker 重投"而不是假装能确认
     ackable?: boolean;
@@ -736,7 +736,7 @@ export interface SendHistoryEntry {
     createdAt: string;
 }
 
-// 主进程 → 渲染进程的推送通道名（preload 与 ipc/stream 共用，避免两处各写一份字面量）
+// 后台 → 页面的推送通道名（api-contract 与 Rust 侧 emit 共用，避免两处各写一份字面量）
 export const MESSAGE_STREAM_CHANNELS = {
     consumeBatch: 'msg:consume-batch',
     readBatch: 'msg:read-batch',

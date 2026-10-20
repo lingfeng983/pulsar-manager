@@ -217,7 +217,7 @@ pub async fn check(current_version: &str, watermark: &str) -> AppResult<UpdateCh
         return Err(AppError::Other("发行版附件地址不是受信任的 gitee 域名".into()));
     }
     let sha256 = sha256_from_notes(&notes).ok_or_else(|| {
-        AppError::Other("该发行版的说明里没有 SHA256，无法校验安装包，请先用 release.sh 重新发布".into())
+        AppError::Other("该发行版的说明里没有 SHA256，无法校验安装包，请让发布方补上 SHA256 行后重新发布".into())
     })?;
 
     *pending().lock().unwrap() = Some(Pending {

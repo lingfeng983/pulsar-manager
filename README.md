@@ -1,13 +1,14 @@
 # Pulsar Manager Desktop
 
-Apache Pulsar 集群的桌面运维客户端，基于 Electron + React + TypeScript。官方 Apache Pulsar Manager（Web 管理 UI）已停止维护，本项目以桌面客户端承接 Pulsar 运维的完整链路：集群管理、消息收发、快速压测、监控巡检、告警通知、内置文档与插件市场——一个本地、安全、免费的工具装下 Pulsar 运维的七件事。
+Apache Pulsar 集群的桌面运维客户端，后台是 Rust（Tauri 2 外壳），界面是 React + TypeScript。官方 Apache Pulsar Manager（Web 管理 UI）已停止维护，本项目以桌面客户端承接 Pulsar 运维的完整链路：集群管理、消息收发、快速压测、监控巡检、告警通知、内置文档与插件市场——一个本地、安全、免费的工具装下 Pulsar 运维的七件事。
 
-所有与 broker 的通信都在主进程完成，渲染进程只通过 preload 暴露的白名单接口拿数据；凭据以 AES-256 加密后落库，加密密钥由系统密钥库保护（平台不支持时默认拒绝降级为明文），数据存于本地 SQLite，不依赖任何外部服务。
+所有与 broker 的通信都在 Rust 后台完成，页面只有一个入口 `rpc(method, args)`，契约写在 `src/renderer/api-contract.ts`；凭据以 AES-256 加密后落库，加密密钥由系统密钥库保护（Windows DPAPI；平台不支持时默认拒绝降级为明文），数据存于本地 SQLite，不依赖任何外部服务。进程里没有 Node 运行时，也不打包 Chromium，页面跑在系统自带的 WebView2 上，安装包约 7 MB。
 
 ![License](https://img.shields.io/badge/License-Apache%202.0-blue)
-![Version](https://img.shields.io/badge/Version-v1.5.0-orange)
+![Version](https://img.shields.io/badge/Version-v1.6.0-orange)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
-![Electron](https://img.shields.io/badge/Electron-29-47848F)
+![Tauri](https://img.shields.io/badge/Tauri-2-FFC131)
+![Rust](https://img.shields.io/badge/Rust-1.98-DEA584)
 ![React](https://img.shields.io/badge/React-18-61DAFB)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178C6)
 ![PRs](https://img.shields.io/badge/PRs-welcome-brightgreen)
@@ -29,28 +30,37 @@ Apache Pulsar 集群的桌面运维客户端，基于 Electron + React + TypeScr
 | 函数与连接器 | Functions / Connectors 管理、本机包上传 | [函数与连接器](#函数与连接器) |
 | 接入与扩展 | SSH 隧道、K8s 端口转发、Schema、ACL、插件市场、文档中心 | [接入通道](#接入通道)、[Schema 与权限](#schema-与权限)、[文档中心](#文档中心)、[插件市场](#插件市场) |
 
-## Rust 原生版（Tauri 外壳，同一套界面）
+## 架构（Rust 后台 + 复用 React 界面）
 
-`rust/` 下是同一功能的 Rust 实现：后台全部在 Rust 里（另起进程、原生 Pulsar 协议 + Admin REST），
-界面复用本仓库的 React 前端，装进 Tauri 外壳——只依赖系统自带的 WebView2，不再携带整个 Chromium
-（安装包 7 MB，Electron 版约 90 MB）。
+```
+React 18 页面（src/renderer）
+   │  window.electronAPI.xxx()        ← 名字是 Electron 时代留下的，改动它要动 40 多个页面
+   │  单一入口 rpc(method, args) + 事件推送
+Rust 后台（rust/crates）
+   pm-tauri    外壳：rpc 按业务域链式分发、托盘、单实例、外链、日志
+   pm-services 业务：集群装配、凭据加密、策略、巡检、告警、通知、消息会话、压测、更新、隧道
+   pm-pulsar   Admin REST 客户端 + pulsar crate 原生收发
+   pm-store    SQLite（18 张表，user_version = 17，幂等基线 DDL + 补列）
+   pm-core     领域模型、错误、路径推导、日志 sink
+```
 
-页面与 Electron 版逐像素一致：`src/preload.ts` 里的 155 个接口由 `scripts/gen-tauri-bridge.mjs`
-生成同名桥接，前端代码一行都不用改；窗口尺寸、托盘菜单、关闭即收进托盘、外链交给系统浏览器，
-这些外壳行为也按 Electron 版的实现对齐。
+前后端契约的唯一真源是 `src/renderer/api-contract.ts`：150 个方法的名称、参数顺序、返回类型，
+以及 `window.electronAPI` 的 `declare global` 都在这一个文件里，加方法不需要重跑任何代码生成。
 
-两个版本共用同一份 `pulsar-manager.db`（`user_version = 17`）、同一套 DPAPI 保护的凭据密钥与同一份
-`logs/main.log`，可以互相打开对方的数据、交替启动。
+历史上这里还有一套 Electron 实现（`src/main/**` + 沙箱 preload + electron-builder）。它已被整体删除，
+页面与 Rust 后台是唯一的实现；`docs/rust/README.md` 里保留了迁移期攒下的性能与外壳行为对照，
+两版共用同一份 `pulsar-manager.db`（`user_version = 17`）与同一套 DPAPI 保护的凭据密钥，
+所以老用户装的 Electron 版数据可以直接被现在的版本打开。
 
 ```bash
-# 1) 先出前端产物（两个版本共用）
+# 1) 先出前端产物（外壳读 dist/renderer）
 npm run build:renderer
 # 2) 编译并打包（产物：rust/target/release/Pulsar Manager.exe
 #    与 rust/target/release/bundle/nsis/Pulsar Manager_<版本>_x64-setup.exe）
-cd rust/crates/pm-tauri && npx tauri build
+npm run app:build
 ```
 
-架构、模块划分、与 Electron 版的差异及未实现项见 [docs/rust/README.md](./docs/rust/README.md)。
+模块划分、外壳行为与调试用环境变量见 [docs/rust/README.md](./docs/rust/README.md)。
 
 ## 界面预览
 
@@ -70,7 +80,7 @@ cd rust/crates/pm-tauri && npx tauri build
 
 - 集群增删改查、连接测试（走 Admin API 健康检查，并尝试读取集群版本）
 - 首屏进入即对所有集群探活一次（不阻塞页面渲染），列表与资源树的状态点因此反映的是本次启动的实测结果，而不是上次退出时留在库里的那份；顶部导航「刷新集群状态」走同一轮探活
-- 凭据以 AES-256 加密后落库，加密密钥由 Electron `safeStorage`（OS 密钥库）保护；平台不支持时默认**拒绝降级**为明文，需显式设置 `ALLOW_PLAINTEXT_KEY=1` 才会写明文密钥文件
+- 凭据以 AES-256-GCM 加密后落库，加密密钥由系统密钥库保护（Windows 走 DPAPI，见 `pm-services/src/crypto.rs`）；密钥不可用时默认**拒绝降级**为明文，需显式设置 `ALLOW_PLAINTEXT_KEY=1` 才写明文密钥文件。DPAPI 解不开时不阻断启动：旧密钥改名 `.encryption-key.v2.broken-<时间戳>` 并重新生成，界面顶部挂横幅提示重填认证参数
 - 单实例锁：重复启动会把焦点交回已有窗口，而不是再起一个进程
 
 ### 资源浏览与管理
@@ -96,13 +106,13 @@ Topic 详情页的「消息浏览器」有三种模式，互不混淆（不是�
 
 消息列表（Reader 与订阅消费共用）默认按 Publish Time 倒序、点表头切换升降序，所有列可拖宽（宽度只存在组件状态里，刷新回默认），载荷自动判定类型：JSON 看能否 `JSON.parse`，XML 交给 `DOMParser` 实测能否成树，其余按纯文本——判不出结构就不装作判得出。详情弹窗里同一份正文按判定出的语法着色缩进。
 
-消息由主进程按批推送（攒够 50 条或 300ms 一批），载荷为 base64；界面会尝试解回文本，判定为二进制时才保留 base64。支持导出 JSON / CSV。
+消息由后台按批推送（攒够 50 条 / 300ms / 8MB 一批），载荷为 base64；界面会尝试解回文本，判定为二进制时才保留 base64。支持导出 JSON / CSV。
 
 ### 生产者与消费者工作台
 
 消息浏览器解决"发一条看看"，工作台解决"挂着跑一段"：
 
-- **生产者工作台**：一个 topic 可挂多条常驻会话。报文是**模板**——正文必须是合法 JSON，`${...}` 是占位符，支持 `int/float/bool/string/uuid/choice/seq/index/now/date/timestamp` 这些生成函数与具名变量，整体占位符保留原类型（数字不会被写成字符串），`$each{count,of}` 按列表展开。单发（1–1000 条）走常驻会话，连续发送是可运行时改速率的限速流（`ratePerSecond` 0 为不限、总量 0 为到手动停止、在途上限、出错即停可选），统计给已发/失败/字节、msg/s、MB/s 与 P50/P99 确认延迟；`flush` 只把原生队列最后一段推出，`stop` 才断会话。另有"直接发送"一条现开现关、不留连接的通道。一次上千条大报文时解析与发送是分批交替的（每批不超 200 条、正文合计不超 16MB），主进程不会先把 `条数 × 正文` 整份堆在内存里，界面上拿到的失败清单仍然是完整的。「发送历史」读的是本地 `send_history`，按 集群 + topic 显最近 200 条（模板名、条数、平均单条字节、messageId、失败原因，展开看正文前缀）
+- **生产者工作台**：一个 topic 可挂多条常驻会话。报文是**模板**——正文必须是合法 JSON，`${...}` 是占位符，支持 `int/float/bool/string/uuid/choice/seq/index/now/date/timestamp` 这些生成函数与具名变量，整体占位符保留原类型（数字不会被写成字符串），`$each{count,of}` 按列表展开。单发（1–1000 条）走常驻会话，连续发送是可运行时改速率的限速流（`ratePerSecond` 0 为不限、总量 0 为到手动停止、在途上限、出错即停可选），统计给已发/失败/字节、msg/s、MB/s 与 P50/P99 确认延迟；`flush` 只把原生队列最后一段推出，`stop` 才断会话。另有"直接发送"一条现开现关、不留连接的通道。一次上千条大报文时解析与发送是分批交替的（每批不超 200 条、正文合计不超 16MB），后台不会先把 `条数 × 正文` 整份堆在内存里，界面上拿到的失败清单仍然是完整的。「发送历史」读的是本地 `send_history`，按 集群 + topic 显最近 200 条（模板名、条数、平均单条字节、messageId、失败原因，展开看正文前缀）
 - **消费者工作台**：同样多会话并存（Exclusive 除外，重复开时先弹确认）。订阅设置可配类型（Shared/Key_Shared/Failover/Exclusive）、起始（Latest/Earliest）、自动确认开关、限量、`receiverQueueSize`、`ackTimeoutMs`/`nAckRedeliverTimeoutMs`（关掉自动确认才出现）、消费者名与死信策略（死信 topic、最大重投次数、初始订阅）。消息按会话分桶显示、每秒自算速率，可暂停渲染、限制保留条数（1–5000）、导出 JSON/CSV、清空
 - 模板、消费者会话配置各一张本地表，支持增删改查与复制，用过几次、最后一次什么时候用过都记着；发送历史那张只写与读，不做编辑
 
@@ -110,7 +120,7 @@ Topic 详情页的「消息浏览器」有三种模式，互不混淆（不是�
 
 - 顶部导航「快速压测」向指定 Topic 并发写入，实时统计吞吐、带宽、已消费条数与发送确认延迟（平均 / P50 / P95 / P99 / 最大，蓄水池抽样 2 万条）
 - 参数可调：生产者数量、总条数、消息大小、全局限速（逐条时间片，实测精度 ±1%）、单生产者并发（在途窗口 = maxPendingMessages + blockIfQueueFull）、压缩（LZ4/Zlib/Zstd）、批量化、是否同时消费积压
-- 压测跑在主进程，关闭弹窗不中断，重新打开仍是同一轮的实时进度；停止按钮先排空在途再叫停，终态与耗时保留在弹窗里
+- 压测跑在后台，关闭弹窗不中断，重新打开仍是同一轮的实时进度；停止按钮先排空在途再叫停，终态与耗时保留在弹窗里
 - 「同时消费」可勾选结束后清理订阅，走原生 `consumer.unsubscribe()`，且在关闭消费者之前执行
 
 ### 监控与拓扑
@@ -188,60 +198,52 @@ Topic 详情页的「消息浏览器」有三种模式，互不混淆（不是�
 
 | 层          | 选型                                                                 |
 | ----------- | -------------------------------------------------------------------- |
-| 桌面容器    | Electron 29                                                          |
+| 桌面容器    | Tauri 2（Rust 后台 + 系统 WebView2，安装包约 7 MB）                    |
+| 后台语言    | Rust 2021（tokio + reqwest + serde），五个 crate 分层                 |
 | 前端        | React 18 + TypeScript 5.6 + Vite 5                                   |
 | UI / 状态   | Ant Design 5、Zustand 4                                              |
 | 图表        | ECharts 5.4                                                          |
-| 本地存储    | better-sqlite3 9（SQLite，含增量迁移）                                |
-| Pulsar 通信 | axios（Admin REST）+ pulsar-client 1.18（原生消息收发）              |
-| 接入通道    | ssh2（SSH 隧道）、复用本机 kubectl（K8s 端口转发）                   |
-| 通知渠道    | nodemailer（邮件）+ 钉钉/企微/飞书/Slack Webhook（axios）            |
-| 文档渲染    | marked + dompurify（内置文档中心，渲染进程）                         |
-| 参数校验    | zod 3                                                                |
-| 打包        | electron-builder 24（Windows NSIS / macOS dmg / Linux AppImage+deb） |
-| 代码质量    | ESLint 9 + Prettier 3                                                |
+| 本地存储    | rusqlite（bundled SQLite，幂等基线 DDL + `PRAGMA table_info` 增量补列） |
+| Pulsar 通信 | reqwest（Admin REST）+ pulsar crate（原生消息收发，二进制协议直连）    |
+| 接入通道    | 拉起系统 `ssh -L`（SSH 隧道）、复用本机 `kubectl port-forward`         |
+| 通知渠道    | lettre（SMTP 邮件）+ 钉钉/企微/飞书/Slack Webhook                      |
+| 凭据加密    | AES-256-GCM，密钥由 Windows DPAPI 保护（不可用时默认拒绝降级为明文）    |
+| 文档渲染    | marked + dompurify（内置文档中心，渲染层）                            |
+| 参数校验    | zod 3（前端表单）+ Rust 侧 serde/校验                                 |
+| 打包        | tauri-bundler（Windows NSIS，currentUser 安装）                       |
+| 代码质量    | ESLint 9 + Prettier 3（前端）、`cargo test --workspace`（后台）        |
 
 ## 目录结构
 
 ```
 pulsar-manager/
+├── rust/
+│   ├── crates/
+│   │   ├── pm-core/           # 领域模型、错误、路径推导、日志 sink
+│   │   ├── pm-store/          # SQLite：基线 DDL、按表的 DAO、user_version 迁移
+│   │   ├── pm-pulsar/         # Admin REST 客户端（resource/metrics/policies）+ pulsar 原生收发
+│   │   ├── pm-services/       # 业务：集群、加密、策略、巡检（含汇总/定时）、告警、通知、
+│   │   │                      # 消息会话、生产者、模板、压测、更新、隧道、插件
+│   │   └── pm-tauri/          # 外壳：rpc 分发（按业务域拆 8 个模块）、托盘、单实例、日志、后台调度
+│   └── tools/protoc/          # 自带的 protoc（pulsar crate 的 build.rs 需要，离线也能编）
 ├── src/
-│   ├── main/                  # Electron 主进程：所有 broker I/O 都在这里
-│   │   ├── index.ts           # 入口、窗口、单实例锁、生命周期清理
-│   │   ├── config/            # 请求并发、重试、聚合上限等常量
-│   │   ├── database/          # SQLite schema 与数据访问
-│   │   ├── ipc/               # IPC handler（按域拆分）+ 主→渲染推送
-│   │   ├── services/          # Admin REST 客户端、指标聚合、原生客户端、SSH 隧道、K8s 转发、巡检、
-│   │   │                      # 告警引擎、通知派发、加密、更新
-│   │   └── utils/             # 日志
-│   ├── preload.ts             # 沙箱 preload：唯一暴露给渲染进程的接口面
-│   ├── shared/                # 跨进程共享的领域类型与判定逻辑（巡检口径/汇总/通知判定等，单一事实来源）
-│   └── renderer/              # React 渲染进程
-│       ├── components/        # 布局、资源树、拓扑、编辑器（CodeMirror 封装）、生产/消费表单、各类弹窗
-│       ├── hooks/             # 资源缓存、ECharts、快捷键、全屏、尺寸监听、列宽拖拽
-│       ├── pages/             # 首页、集群配置、Topic/租户/命名空间详情、消息浏览器、生产者工作台、
-│       │                      # 消费者工作台、监控、巡检、告警中心、通知渠道、文档中心、配置中心、插件市场、快捷键
-│       ├── store/             # Zustand：集群、Tab、主题、命令、快捷键、应用设置、插件、告警
-│       └── utils/             # 格式化、导出、拓扑配色、按键解析、统一筛选匹配、文档中心锚点
+│   ├── renderer/              # React 页面（19 个页面、组件、hooks、store、utils）
+│   │   ├── api-contract.ts    # 前后端契约唯一真源：150 个方法 + window.electronAPI 类型
+│   │   └── tauri-runtime.ts   # 提供 BridgeTransport，把契约工厂的返回值挂到 window
+│   └── shared/                # 领域类型、通道常量、巡检口径、模板引擎等纯逻辑（两端共用）
 ├── docs/pulsar/               # 内置文档中心的 8 篇 Pulsar 资料（随构建打进渲染包）
 ├── docs/design/               # 项目设计稿与实施方案
 ├── docs/guides/               # 使用与扩展指南（含一键体验指南、插件编写说明）
+├── docs/rust/                 # Rust 版实现说明与迁移方案
 ├── docs/screenshots/          # 界面截图素材与采集清单
 ├── docs/reference/            # 数据来源等内部参考说明
-├── build/                     # 应用图标产物（icon.ico / icon.png，由脚本生成，入库）
 ├── .gitee/ISSUE_TEMPLATE/     # Issue 模板（Bug 报告 / 功能建议）
 ├── CONTRIBUTING.md            # 贡献指南
 ├── docker-compose.yml         # 一键体验：standalone Pulsar 示例集群
-├── release.sh                 # 一键出包 + 发布 Gitee 发行版
-├── scripts/make-icon.mjs      # 图标唯一来源：纯 Node 画图标并生成 build/* 与 src/main/app-icon.ts
-├── scripts/after-pack.js      # 打包阶段用 app-builder rcedit 写 exe 版本信息与图标
-├── scripts/release-publish.mjs# 调 Gitee API 建/更新发行版并上传附件
-├── scripts/tunnel-selftest/   # SSH 隧道端到端自检（本机起真 SSH 服务器 + 假 Pulsar 源站）
-├── scripts/dev-ssh-bridge.js  # 开发期本机 SSH 服务器，供隧道功能实机验证
-├── scripts/*-selftest.cjs     # 模板引擎 / worker / policies / topic / k8s / 巡检 / 定时 / 汇总 / 通知 / 文档 等自测
-├── electron-builder.json      # 打包配置
+├── scripts/make-icon.mjs      # 图标唯一来源：纯 Node 画图标，产出 rust/crates/pm-tauri/icons/*
+├── scripts/*selftest.*        # 模板引擎与内置文档中心两个不依赖后端的自测
 ├── vite.config.ts             # 前端构建 + 生产 CSP 注入
-└── tsconfig.node.json         # 主进程/preload 的 TS 配置（CommonJS）
+└── tsconfig.node.json         # src/shared 的 CommonJS 产物（供文档中心自测 require）
 ```
 
 `docs/design/` 下另有一份[《详细设计说明书》](./docs/design/Pulsar%20桌面管理工具详细设计说明书.md)和一份[《UI 详细设计规范》](./docs/design/Pulsar%20桌面管理工具%20UI%20详细设计规范（最终完整版）.md)，是项目最初的设计输入，部分细节已被后续实现取代。
@@ -260,92 +262,94 @@ docker compose up -d        # 启动 standalone Pulsar（broker 6650 / admin 808
 
 ### 环境要求
 
-- Node.js 20 或更高（开发在 v24 上验证）
-- npm 源已在 `.npmrc` 中指向 npmmirror，Electron 二进制也走国内镜像
-- `pulsar-client` 是原生模块（node-addon-api），安装时先下载预编译产物（Windows 为 `napi-win32-unknown-x64`），需要能访问镜像或 Apache 归档。预编译包拿不到时 npm 会退回 `node-gyp` 源码编译，这一步**必须有** MSVC 与 Python 工具链；`ssh2` 的可选加速模块 `cpu-features` 编不过也会让 `npm install` 整体失败（它对本应用无用），此时用 `npm install --ignore-scripts` 装依赖，再单独跑 `npm rebuild better-sqlite3 --update-binary` 与 `npx electron-builder install-app-deps`
+- Rust（开发在 1.98 上验证）与本机 C++ 工具链：`rusqlite` 用 bundled SQLite，Windows 上需要 MSVC（`cargo` + Visual Studio Build Tools）
+- Node.js 20 或更高（开发在 v24 上验证）——只用于前端构建、图标脚本与两个自测，**运行时不再需要 Node**
+- `pulsar` crate 的 `build.rs` 需要 protoc。仓库已自带 Windows 版（`rust/tools/protoc/bin/protoc.exe`），由 `rust/.cargo/config.toml` 的 `[PROTOC]` 注入，离线也能编；其他平台装一个 protoc 或替换该目录
+- Windows 需要 WebView2 运行时（Win10 1803+ 一般自带；缺失时外壳会用系统对话框说明并给出日志路径）
+- npm 源已在 `.npmrc` 中指向 npmmirror；crates.io 镜像按需自行配在 `rust/.cargo/config.toml`
 
 ### 安装与开发
 
 ```bash
-npm install          # postinstall 会执行 electron-builder install-app-deps，把 better-sqlite3 重建到 Electron ABI
-npm run dev          # 并行启动 Vite(5173) 与 Electron
+npm install           # 只装前端依赖，没有原生模块要重建
+npm run app:dev       # 先 build:renderer，再 cargo run -p pm-tauri 起外壳
 ```
 
-也可以分开跑：`npm run dev:renderer`（只起前端）、`npm run dev:main`（编译主进程后启动 Electron）。未打包运行时窗口一律加载 `http://localhost:5173`，所以 `dev:main` 必须和 Vite 一起用；先起 main、Vite 还在编译的话首帧会连不上，主进程会重试到服务就绪。
+外壳读的是 `dist/renderer`（`tauri.conf.json` 的 `frontendDist`），**改完页面必须重新 `npm run build:renderer` 再刷新窗口**，不然看到的还是上一版产物。只想调样式时可以 `npm run dev` 起 Vite(5173) 单独看页面，但它没有 `window.electronAPI`，所有数据请求会报「未连接」——这是预期行为，不是坏了。
 
 ### 构建与打包
 
 ```bash
-npm run build:main   # tsc -p tsconfig.node.json → dist/src/main、dist/src/preload.js
-npm run build        # 清 dist → tsc -b → build:main → vite build
-npm run electron:pack  # 先完整构建，再出免安装目录 release/win-unpacked
-npm run electron:dist  # 先完整构建，再出 NSIS 安装包 release/Pulsar管理工具-安装包-<version>.exe
-npm run icon           # 重新生成应用图标（build/icon.ico、build/icon.png、src/main/app-icon.ts）
+npm run build        # clean → tsc -b → build:shared → vite build（产出 dist/renderer）
+npm run app:build    # build:renderer + tauri build，出 NSIS 安装包
+npm run icon         # 重新生成应用图标（rust/crates/pm-tauri/icons/icon.ico 与 icon.png）
 ```
 
-改应用图标只改 `scripts/make-icon.mjs` 然后跑 `npm run icon`，三个产物都要入库；直接编辑 `src/main/app-icon.ts` 会在下次生成时被覆盖。
+产物在 `rust/target/release/bundle/nsis/Pulsar Manager_<版本>_x64-setup.exe`（约 7 MB），单文件 exe 在 `rust/target/release/Pulsar Manager.exe`。
 
-数据库结构以 `src/main/database/schema.ts` 里的常量存在，而不是外部 `.sql` 文件：tsc 不拷贝非 TS 资源，走文件读取的话安装包里的其实是某次手工复制进 `dist` 的旧基线，干净环境构建甚至直接找不到文件而启动失败。
+改应用图标只改 `scripts/make-icon.mjs` 然后跑 `npm run icon`，产物要入库——`tauri.conf.json` 的 `bundle.icon` 指的就是它；ICO 容器必须用未压缩 DIB 目录项，Vista 之后允许的「目录项直接挂 PNG」体积小三倍，但按 DIB 解析的加载器（任务栏与属性面板走的就是它）会把 PNG 字节当位图读，画出来是一片彩色噪点。
 
-原生 `.node` 通过 `asarUnpack` 精确解包（better-sqlite3、pulsar-client 两个文件各自列出）。`npmRebuild` 保持 `false`，原生模块的 Electron ABI 适配由 `postinstall` 的 `install-app-deps` 在安装阶段一次完成——pulsar-client 走 N-API 跨 ABI 稳定，better-sqlite3 是 V8 ABI，必须按 Electron 头重建，缺了这一步打包态启动即崩。**开发态能跑不代表打包态能跑**，改过原生依赖后请在 `release/win-unpacked` 里启动验证一次。
+数据库结构以常量写在 `rust/crates/pm-store/src/schema.rs`，而不是外部 `.sql` 文件：基线 DDL 每次启动整份幂等执行，再按 `PRAGMA table_info` 补齐新增列。走文件读取的话产物里带的其实是某次手工复制的旧基线，干净环境甚至直接找不到文件而启动失败。
 
-### 提交前的四道门
+### 提交前的几道门
 
 ```bash
-npx tsc -b --force   # 类型
-npx eslint src       # 规范（max-len 120 在 prettier 之后重新开启）
-npm run format:check # 格式，不符时先 npm run format
-npm run build:main && npm run build
+npm run typecheck      # tsc -b --force
+npm run lint           # ESLint（max-len 120 在 prettier 之后重新开启）
+npm run format:check   # 不符时先 npm run format
+npm run selftest       # 模板引擎（不连集群）
+npm run selftest:docs  # 内置文档中心：目录锚点、跨篇检索、已订正参数名不回流
+npm run test:rust      # cargo test --workspace（约 60 个单测：判定、折叠、diff、加解密、策略）
+npm run build          # 出 dist/renderer，确认 Vite 与 CSP 注入没问题
 ```
+
+后台改过 `pm-*` 任何一个 crate，提交前至少要过 `npm run test:rust`；改过 `api-contract.ts` 的通道名，`cargo test` 不会替你发现 Rust 侧的漏配——那条通道的 Rust 分支不存在时只会运行时报「未知方法」，所以加方法请连 `pm-tauri/src/rpc/*.rs` 一起改。
 
 ### 发版
 
-一条命令跑完静态门、出包、打标签、发布到 Gitee 发行版：
+Electron 时代的一键发版脚本（`release.sh` + `scripts/release-publish.mjs` + `verify-package.mjs`）已随发版链一起删除，**Rust 版的一键发版脚本待重做**。当前手工流程：
 
 ```bash
-./release.sh                          # 标签取 package.json 的 version（1.0.0 -> v1.0.0）
-./release.sh v1.1.0                   # 指定标签
-./release.sh v1.1.0 "标题" notes.md   # 指定标题与正文
+npm run app:build
+EXE="rust/target/release/bundle/nsis/Pulsar Manager_1.6.0_x64-setup.exe"
+sha256sum "$EXE"
 ```
 
-- **凭证**：依次取环境变量 `GITEE_TOKEN`、仓库根目录的 `.gitee_token` 文件（已在 `.gitignore` 里，严禁入库）、Windows 凭据管理器中 `gitee.com` 那条记录——第三份与 `git push` 用的是同一枚私人令牌，Gitee 的 API 同样认它，所以本机日常发版不需要额外准备凭证。令牌绝不写进代码或加密打包进仓库：`release.sh` 与 `scripts/` 会随 dist 进 asar，内嵌（哪怕加密）等于把凭据交给每个装了安装包的人；在 <https://gitee.com/profile/personal_access_tokens> 创建时勾选 projects 权限。脚本在出包之前就用 `GET /api/v5/user` 验一次令牌，避免构建两三分钟后才在第 4 步吃 401。
-- **前置条件**：工作区干净，且本地 HEAD 与 `origin/master` 一致——发行版必须对应一个已推送的提交。
-- **产物与发布位置**：`release/Pulsar管理工具-安装包-<version>.exe` 只上传到公开的分发仓 `pulsar-manager-dist`（不存在时脚本自动创建，首次会推一个只含 README 的提交当发行版锚点，因为 Gitee 的发行版必须挂在真实提交上）。**分发仓是唯一的发版处**：源码仓只留提交与标签，脚本会把它上面残留的历史发行版连附件一起删掉——旧渠道每个版本都挂一份 80MB 的包，八份就是几百 MB 白占私有仓容量，而且同一版本两份包迟早会对不上号。完整构建日志在 `release/release.log`。
-- **分发仓只保留最近 3 个版本的安装包**（`GITEE_DIST_KEEP` 可调）：一个包 81MB，堆十几份就撞 Gitee 的仓库容量上限。删的是发行版及其附件，标签留着不影响脚本重复执行。
-- **可重复执行**：标签已存在且指向当前提交就复用（发行版转为更新，同名附件先删再传）；指向别的提交则直接报错，不会把新包挂到旧标签上。任何一步失败，修好后重跑即可，不会产生重复发行版或重复附件。
-- 中文标题与正文由 `release.sh` 写入 UTF-8 临时文件再交给 `scripts/release-publish.mjs`，**不走命令行参数**——Windows 控制台是 GBK，直接传参会把中文变成乱码。
-- **自定义正文必须带 `- SHA256：`<64 位>`` 这一行**（应用内「检查更新」的校验值只从发行说明正文里取，见 `update-service.ts` 的 `sha256FromNotes`）。安装包要打完包才有 SHA，正文却是发版前写好的，所以正文里可以直接写 `@SHA256@`，脚本在算完校验值后替换掉；漏了这行脚本在上传前就 `die`，不会把一条"所有旧客户端读得到版本却拒绝下载"的更新发出去。
-- **出包门禁**：`scripts/verify-package.mjs` 除了查 exe / app.asar / 原生模块在不在，还会读主程序 exe 的属性面板（文件说明、产品名称、公司、版权、原始文件名称、文件版本、产品版本）并逐项核对——这些字段由 `scripts/after-pack.js` 写入，版本值与 `package.json` 同源，所以「设置 → 关于」里看到的版本、exe 属性里的版本和发行版标签是同一个数。
+发布到公开分发仓 [lingfeng983/pulsar-manager-dist](https://gitee.com/lingfeng983/pulsar-manager-dist/releases) 的对应标签，**发行说明正文里必须有一行 `- SHA256：`<64 位十六进制>``**。
+
+- 应用内「检查更新」的校验值**只从发行说明正文里取**（`rust/crates/pm-services/src/update.rs` 的 `sha256_from_notes`）：漏了这行，所有旧客户端会读得到新版本却拒绝下载；写错值，每个用户都下载成功却装不上。正文里带的那个 64 位必须与刚打出来的安装包一致。
+- **分发仓必须是公开的**：匿名就能读，应用内没有任何令牌入口，用户不用配凭证；源码仓不发版，避免同一版本两份包对不上号。
+- 分发仓只保留最近几个版本的安装包（Gitee 有仓库容量上限）；删发行版与附件不影响标签。
+- 附件大小门禁要重新按 Rust 产物校准：NSIS 包约 7 MB，不再需要原来 30 MB 下限（那是用来拦截被文件锁截断的 Electron 包）与 95 MB 上限。
+- 版本号有三个来源必须一致：`package.json`、`rust/Cargo.toml` 的 workspace version、`tauri.conf.json` 的 version。「设置 → 关于」与在线更新比对的都是它（`update:getVersion` 走后台返回应用版本，不是运行时版本）。
 
 ## 架构约束
 
 这几条是踩过坑之后定下的，改代码前请先读：
 
-1. **broker I/O 只能在主进程。** 生产构建的页面通过 `file://` 加载，CSP 是 `connect-src 'self'`（由 `vite.config.ts` 在构建时注入 meta）。把任何 broker 请求挪到渲染进程，会出现"开发正常、打包后静默失败"。
-2. **沙箱 preload 不能 require 相对模块。** `sandbox: true` 下 preload 只能 require 白名单模块（`electron` 等）。一旦编译产物里出现 `require("./shared/types")`，Electron 会**静默跳过整个 preload**，`window.electronAPI` 直接消失且不打任何日志。因此通道名在 preload 里写字面量，并用 `typeof import('./shared/types')` 的字面量类型钉住，改名即编译失败。
-3. **推送载荷只能是纯 JSON。** 主→渲染走 `msg:consume-batch` / `msg:read-batch` / `msg:session-end`，类实例传不过沙箱边界。
-4. **`Reader.readNext(timeout)` 在超时真的到期时会段错误**（pulsar-client 1.18.0 实测，进程 exit=139）。所以 Reader 循环用 `hasNext()` 门控 + 250ms 空轮询 + 不带超时的 `readNext()`；停止会话时等的是"在途读取落地 + 资源关闭"的整体，不是直接 close。
-5. **不要用 Admin REST 发消息或 peek 消息。** `POST /admin/v2/producers/{t}/{ns}/{topic}/send` 与 `.../subscription/{sub}/peek/{n}` 在真实 broker 上并不存在（返回 HTML 404）。消息收发只有原生客户端这一条路。
-6. **分区 topic 的删除走 `.../{topic}/partitions`**，`/partition/-1` 在部分版本上 404。
-7. **聚合有上限。** `AGGREGATION_LIMITS` 限制租户/命名空间/topic 数量，聚合内部扇出用 `mapWithConcurrency` 固定并发窗口（外层已持有信号量许可，内部再 acquire 会死锁）。
-8. **渲染层依赖必须留在 `devDependencies`。** antd / echarts / react 等由 Vite 打进 `dist/renderer`，主进程编译产物只 `require` axios、better-sqlite3、pulsar-client、ssh2、uuid、zod。把渲染层依赖挪回 `dependencies`，electron-builder 会把它们的源码再塞进 asar（实测 157 MiB），安装包随即越过 Gitee 附件 100 MB 上限而被拒。
-9. **`batchingEnabled` 与 `chunkingEnabled` 不能同时为 true。** 原生绑定（pulsar-client 1.18 的 C++ 层）在这两项都开时直接 abort 整个主进程，实测没有 JS 异常也没有 crashpad 转储。三处同时挡：Zod 校验 `refine` 拒绝、构造 producer 时 `chunkingEnabled && !batchingEnabled`、界面上开了批发送就把分块开关置灰。
-10. **代码框的颜色与字号只能写 CSS 变量。** CodeMirror 主题经 style-mod 原样塞进生成的样式表，变量在浏览器里按当前 `<html>` 解析，所以三套主题与四档字号都自动跟随；写成 `#fff` 或固定 px，实测就是"整页变暗了只有编辑器还白底"。
-11. **版本号的唯一来源是 `package.json`，展示它的两处都必须走它。** 「设置 → 关于」读 `update:getVersion`（主进程 `app.getVersion()`）——这条以前是 preload 本地拼的 `process.versions.app`，那是 Electron 运行时版本，发多少个版本它都不变；exe 的属性面板由 `scripts/after-pack.js` 用 `app-builder rcedit` 写（`electron-builder.json` 的 `win.signAndEditExecutable` 为 false，因为 electron-builder 自带的那步会把 `OriginalFilename` 清空、且只写 productName），改完在 `verify-package` 里逐项核对，装到用户机器上才不会是"Electron / GitHub, Inc. / electron.exe"。`rcedit` 要先解出 `winCodeSign` 包，子进程 PATH 里必须有 `7zip-bin` 的 `7za`，直接调用 app-builder 时没人塞就会报 `exec: "7za": executable file not found`。
-12. **图标只有 `scripts/make-icon.mjs` 一个来源，跑 `npm run icon` 出三个产物。** 任务栏、托盘、exe、页面 favicon 以前是四份各画各的：托盘是主进程内联的 16×16 紫色闪电，`BrowserWindow` 压根没传 `icon`（开发态于是显示 electron.exe 的原子），favicon 又是 index.html 里另一颗紫色 SVG——用户看到的"任务栏和托盘不一致"就是这么来的。现在窗口与托盘都取 `src/main/app-icon.ts` 的 `APP_ICONS`（生成物，勿手改），Windows 上还要 `app.setAppUserModelId('com.pulsar.manager')`：任务栏按 AppUserModelID 分组取图标，不设置时窗口自己传的 icon 会被分组那份盖掉。**ICO 容器必须用未压缩 DIB 目录项**，Vista 之后允许的"目录项直接挂 PNG"体积小三倍，但实测按 DIB 解析的加载器（`System.Drawing.Icon` 这一类，任务栏与属性面板走的就是它）会把 PNG 字节当位图读，画出来是一片彩色噪点。
+1. **broker I/O 只能在 Rust 后台。** 生产页面由 Tauri 外壳加载，CSP 是 `connect-src 'self' ipc: http://ipc.localhost`（由 `vite.config.ts` 在构建时注入 meta）。把任何 broker 请求挪到页面，会出现"开发正常、打包后静默失败"。
+2. **契约只有一个真源，通道名却写在两处。** `src/renderer/api-contract.ts` 定方法与类型，`rust/crates/pm-tauri/src/rpc/*.rs` 按同一个字符串匹配（`cluster:list`、`msg:consume-batch`…）。类型层能钉住前端内部的一致性，钉不住 Rust 侧——漏配不会编译失败，只会在运行时报「未知方法」。加方法请两边一起改。
+3. **推送载荷只能是纯 JSON。** 后台 → 页面走 `msg:consume-batch` / `msg:read-batch` / `msg:session-end` 等通道（`src/shared/types.ts` 里的 `MESSAGE_STREAM_CHANNELS`），类实例传不过去；消息按 50 条 / 300ms / 8MB 合批，不是一条一次 IPC。
+4. **不要用 Admin REST 发消息或 peek 消息。** `POST /admin/v2/producers/{t}/{ns}/{topic}/send` 与 `.../subscription/{sub}/peek/{n}` 在真实 broker 上并不存在（返回 HTML 404）。消息收发只有 `pm-pulsar::native`（pulsar crate）这一条路。
+5. **分区 topic 的删除走 `.../{topic}/partitions`**，`/partition/-1` 在部分版本上 404。
+6. **聚合有上限、扇出有并发窗口。** 拓扑与资源树的规模上限见 `pm-core` 的 `TopologyLimits`；`pm-pulsar::client` 持有一个 `Semaphore(8)` 限制同一集群的并发请求。外层已经拿着许可的代码再去 acquire 就是死锁——内部并发要复用同一处，不要嵌套。
+7. **`batchingEnabled` 与 `chunkingEnabled` 在界面上互斥。** 这条约束来自 Node 时代：pulsar-client 1.18 的 C++ 层在两项同时为 true 时直接 abort 整个进程，没有 JS 异常也没有转储。Rust 侧没有实测过同时开启的行为，所以界面仍然把分块置灰、读历史配置时强制归一，别顺手放开。
+8. **代码框的颜色与字号只能写 CSS 变量。** CodeMirror 主题经 style-mod 原样塞进生成的样式表，变量在浏览器里按当前 `<html>` 解析，所以三套主题与四档字号都自动跟随；写成 `#fff` 或固定 px，实测就是"整页变暗了只有编辑器还白底"。
+9. **版本号有三个必须同步的落点。** `package.json`、`rust/Cargo.toml` 的 workspace version、`rust/crates/pm-tauri/tauri.conf.json`。「设置 → 关于」与在线更新比对用的 `update:getVersion` 取的是 `env!("CARGO_PKG_VERSION")`（不再写死常量），exe 的产品名与版本由 Tauri 从 `tauri.conf.json` 写入，所以三处不一致时界面上的版本会和安装包对不上。
+10. **图标只有 `scripts/make-icon.mjs` 一个来源。** 跑 `npm run icon` 产出 `rust/crates/pm-tauri/icons/icon.ico` 与 `icon.png`，两个产物都要入库，`tauri.conf.json` 的 `bundle.icon` 指它。**ICO 容器必须用未压缩 DIB 目录项**：Vista 之后允许的"目录项直接挂 PNG"体积小三倍，但按 DIB 解析的加载器（任务栏与属性面板走的就是它）会把 PNG 字节当位图读，画出来是一片彩色噪点。
 
 ## 本地数据
 
-- SQLite 位于 `app.getPath('userData')/pulsar-manager.db`，存集群配置、SSH/K8s 转发配置、操作日志、界面设置与快捷键绑定、报文模板、消费者会话配置、发送历史、巡检报告与历史、告警规则与事件、通知渠道与投递记录；表结构以 `PRAGMA user_version` 跟踪并增量迁移
-- 已安装的插件是 `app.getPath('userData')/plugins/*.json`（或 `plugins/<目录>/plugin.json`），启用状态记在 `user_settings` 的 `disabledPlugins` 里
-- 调试时可以另起一个实例：`npx electron . --user-data-dir=<临时目录>`（单实例锁按 userData 路径判定）
+- SQLite 位于 `%APPDATA%\pulsar-manager\pulsar-manager.db`（其他平台是 `$HOME/.config/pulsar-manager/…`，与原 Electron 版 `app.getPath('userData')` 同目录，所以老数据直接能读），存集群配置、SSH/K8s 转发配置、操作日志、界面设置与快捷键绑定、报文模板、消费者会话配置、发送历史、巡检报告与历史、告警规则与事件、通知渠道与投递记录；表结构以 `PRAGMA user_version` 跟踪并增量迁移
+- 已安装的插件是 `<userData>/plugins/*.json`（或 `plugins/<目录>/plugin.json`），启用状态记在 `user_settings` 的 `disabledPlugins` 里
+- 调试时想用一个干净的库：设 `PULSAR_MANAGER_DB=<临时路径>` 再起外壳（单实例锁按 userData 路径判定，同一份数据不会跑出两套后台任务）
 
 ## 已知限制
 
 以下是**当前确实没做**的部分，界面不会假装它们可用：
 
-- **SSH 隧道的边界**：启用后应用在本机起两条随机端口转发（Admin 与 Broker 各一条），集群地址自动改写到隧道上，TLS 仍按用户填写的原始主机名校验证书。两点限制：原生客户端（消息收发）无法指定 SNI，所以「TLS + SSH 隧道」会被明确拒绝，请改用 `pulsar://` 明文经隧道；topic lookup 之后 broker 回源的地址若本机不可达，原生收发仍需直连或代理
-- **在线更新走公开分发仓库**：设置→检查更新 读取 `lingfeng983/pulsar-manager-dist`（公开，只放发行版与安装包）的最新发行版，比对版本号后下载 exe 附件并校验 SHA256，再静默安装重启。公开仓库匿名就能读，应用内没有任何令牌入口，用户不用配任何东西；源码仓库保持私有也不发版。仓库地址写死在两处：应用侧 `src/main/services/update-service.ts`，发版侧 `release.sh` 的 `DIST_REPO`（可用 `GITEE_DIST_REPO` 覆盖）——换仓库两处必须一起改，否则发出去的包读不到新版本。
+- **SSH 隧道 / K8s 转发的边界**：隧道管理器本身在 Rust 侧已实现（拉起系统的 `ssh -L` 与 `kubectl port-forward`，见 `pm-services/src/tunnel.rs` 与「接入通道」页面），但**集群配置里勾选「走 SSH 隧道 / K8s 端口转发」这条自动改写地址的路径还没接上**：`pm-services/src/cluster.rs` 的 `reject_unported_reachability` 会对这类集群直接返回「暂未实现」的可执行提示，而不是悄悄直连卡到超时。当前用法：在本机（或应用的隧道面板）手动建好转发，再在集群配置里直接填本地可达地址。另两点限制：SSH 只支持密钥认证——`ssh` 从终端读密码，桌面进程里无法自动完成，密码登录会明确报错请改用密钥或 agent；原生收发路径不做隧道可达性检查，地址不可达时表现为连接超时。
+- **在线更新走公开分发仓库**：设置→检查更新 读取 `lingfeng983/pulsar-manager-dist`（公开，只放发行版与安装包）的最新发行版，比对版本号后下载 exe 附件并校验 SHA256，再静默安装重启。公开仓库匿名就能读，应用内没有任何令牌入口，用户不用配任何东西；源码仓库保持私有也不发版。仓库地址写死在应用侧 `rust/crates/pm-services/src/update.rs` 的 `REPO` 常量里，发版侧目前靠手工发布（一键脚本待重做）——换仓库两处必须一起改，否则发出去的包读不到新版本。
 - **快速压测的延迟口径**：统计的是 `send()` 调用到 broker 确认的时间，包含客户端在途队列的排队；单生产者并发调大时 P50 会显著上升，这不是 broker 变慢
 - **发送历史只存前缀**：每次发送（单发、直接发送、连续发送的每一轮）都往 `send_history` 落一行，生产者工作台的「发送历史」按 集群 + topic 读最近 200 条；正文只留前 400 字符与平均单条字节数，整篇载荷当时就在原生层释放，所以历史不能拿来重发
 - **跨集群巡检汇总是快照对比**：汇总页读的是各集群最近一份历史报告，屏幕上的数字可能已是几小时前的；页面按新鲜度分级提示，并以报告生成时间为准，导出文档会写明"这不是同一时刻的快照"

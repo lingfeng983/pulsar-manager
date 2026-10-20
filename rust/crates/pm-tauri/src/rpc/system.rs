@@ -9,7 +9,9 @@ use serde_json::{json, Map, Value};
 
 use crate::bridge::{blocking, Shared};
 
-pub const APP_VERSION: &str = "1.6.0";
+/// 版本号取 Cargo workspace 的那一份，别写死：写死后升版会漏改，
+/// 而「设置 → 关于」和在线更新的版本比对读的都是它。
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// 与 TS 版 `APP_CONFIG_DEFAULTS` 完全一致。库里没有的键就用这里的值，
 /// 一个脏行不能让整份配置带崩。

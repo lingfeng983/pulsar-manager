@@ -1,5 +1,8 @@
 # Pulsar 桌面管理工具详细设计说明书
 
+> **架构现状说明（设计稿）**：本文是项目早期的设计输入/实施计划，里面写的 Electron 主进程、`src/main/**`、沙箱 preload、electron-builder、Zod IPC 校验等实现**已随 Electron 版一起删除**。当前实现是 Rust 后台（Tauri 2）+ 同一套 React 前端，见 README 的「架构」与 docs/rust/README.md。历史细节保留原文不改，是为了留下当时的取舍理由。
+
+
 ## 0\. 文档概述
 
 ### 0\.1 文档目的

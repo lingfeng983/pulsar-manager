@@ -1,30 +1,59 @@
-// 由 scripts/gen-tauri-bridge.mjs 生成，请勿手改。
-// 唯一真源：src/preload.ts —— 改完 preload 后重新运行 `node scripts/gen-tauri-bridge.mjs`。
+// 前后端契约的唯一真源：150 个方法的名称、参数顺序与返回类型都写在这里。
+//
+// 前身是 Electron 的 src/preload.ts 加一份代码生成器（把 ipcRenderer.invoke 换成
+// transport.invoke）。Electron 侧删除后，生成的那份就是实际在跑的那份，于是把它
+// 提为手维护的契约文件，生成器与 preload 一起退役——少一处「改了 A 还得重跑 B 才有
+// 效」的同步点。
+//
+// 改这里之后不需要再动别的文件：`window.electronAPI` 的全局类型就在本文件末尾，
+// tauri-runtime 只负责提供一个 BridgeTransport 并把 createBridge 的返回值挂上去。
+// 名字里的 electron 是历史包袱，保留是为了不动 40 多个页面。
 import type {
+    APIResponse,
+    AggregatedStats,
+    BacklogInfo,
+    BrokerInfo,
+    ClusterConfig,
     ClusterConfigDraft,
+    ClusterTopology,
     AppSettings,
     ConsumerConfigCopyParams,
     ConsumerConfigUpsertParams,
+    ConsumerSessionConfig,
     ConfigBundle,
+    ConfigImportResult,
+    ConfigMeta,
     ConsumeStartParams,
     ConsumerAckParams,
+    ConsumerSessionInfo,
     LoadTestParams,
     LoadTestProgress,
     MessageBatch,
     MessageSendParams,
+    MessageTemplate,
     MessageTemplateUpsertParams,
     NamespacePolicyClearParams,
     NamespacePolicyScopeParams,
     NamespacePolicySetParams,
+    NamespacePolicySyncApplyResult,
     NamespacePolicySyncParams,
+    NamespacePolicySyncPlanResult,
+    NamespacePolicyView,
+    OperationLog,
     PeekParams,
+    PluginEntry,
+    PluginListResult,
     ProducerFlowParams,
     ProducerRunStats,
     ProducerSendOnceParams,
     ProducerSendParams,
+    PeekResult,
+    ProducerSendResult,
+    ProducerSessionInfo,
     ProducerSetRateParams,
     ProducerStartParams,
     ReadStartParams,
+    SendHistoryEntry,
     SendHistoryListParams,
     SessionEndEvent,
     SSHConfig,
@@ -32,35 +61,63 @@ import type {
     SubscriptionPathParams,
     WorkbenchCopyParams,
     WorkbenchScopeParams,
+    Tenant,
+    Topic,
+    TopicConfig,
     TopicConfigPatch,
     TopicPolicyClearParams,
     TopicPolicyScopeParams,
     TopicPolicySetParams,
+    TopicPolicySyncApplyResult,
     TopicPolicySyncParams,
+    TopicPolicySyncPlanResult,
+    TopicPolicyView,
+    TopicStats,
+    BrokerSchemaInfo,
     BrokerSchemaType,
     SchemaCompatibilityPolicy,
     PulsarAuthAction,
+    PermissionMap,
+    MetricsSnapshot,
     MetricsSnapshotInput,
     MetricsSnapshotQuery,
     AlertPush,
+    AlertEvent,
     AlertEventQuery,
+    AlertRule,
     AlertRuleUpsertParams,
+    AlertProbeResult,
+    PulsarBuiltinDefinition,
     PulsarResourceKind,
     PulsarRuntimeCreateParams,
+    PulsarRuntimeItem,
+    PulsarTriggerResult,
+    PulsarWorkerState,
+    PickedArchiveFile,
     InspectionRunParams,
+    InspectionHistoryRow,
+    InspectionProfile,
     InspectionProfileDraft,
+    InspectionRunResult,
+    InspectionSchedule,
     InspectionScheduleDraft,
     InspectionScheduledPush,
     InspectionFleetRunParams,
+    InspectionFleetSummary,
+    InspectionFleetRunResult,
     InspectionFleetProgress,
+    NotifyChannel,
     NotifyChannelDraft,
+    NotifyDelivery,
+    MailProfile,
     MailProfileDraft,
+    NotifyDispatchResult,
     TopologyLimits,
 } from '../shared/types';
 
-// sandbox 的 preload 只能 require 白名单模块（electron 等），相对路径的运行时 import
-// 会让 Electron 静默跳过整个 preload——桥接对象凭空消失且不打日志，极难定位。
-// 通道名因此只能在本地写死，并用 shared/types 的字面量类型钉住：那边改名这边就编译失败。
+// 通道名在这里写死，并用 shared/types 的字面量类型钉住：那边改名这边就编译失败。
+// Rust 侧的 rpc 分发按同一个字符串匹配，两边不同步不会让 typecheck 报错，只会在运行时
+// 变成「未知方法」，所以把一致性押在类型上而不是押在人工比对上。
 type StreamChannel = typeof import('../shared/types').MESSAGE_STREAM_CHANNELS;
 const CONSUME_BATCH_CHANNEL: StreamChannel['consumeBatch'] = 'msg:consume-batch';
 const READ_BATCH_CHANNEL: StreamChannel['readBatch'] = 'msg:read-batch';
@@ -72,18 +129,16 @@ const INSPECTION_SCHEDULE_CHANNEL: typeof import('../shared/types').INSPECTION_S
     'inspection:scheduled';
 const INSPECTION_FLEET_CHANNEL: typeof import('../shared/types').INSPECTION_FLEET_CHANNEL = 'inspection:fleet-progress';
 
-// 主进程 → 渲染进程的下行订阅。返回反订阅闭包：组件卸载时必须能摘掉监听，
-// 否则切了标签页还在往旧组件推数据。载荷只允许纯 JSON（sandbox 下传不了类实例）。
-
-// 暴露安全的 API 给渲染进程
+// 后台 → 页面的下行订阅。返回反订阅闭包：组件卸载时必须能摘掉监听，
+// 否则切了标签页还在往旧组件推数据。载荷只允许纯 JSON。
 
 export interface BridgeTransport {
-    /** 与 ipcRenderer.invoke 同形：通道名 + 位置参数，返回已解包的 payload。 */
+    /** 一次请求-响应：通道名（`域:方法`）+ 位置参数，返回已解包的 payload。 */
     invoke: (channel: string, ...args: unknown[]) => Promise<unknown>;
-    /** 部分订阅是手写的 on/removeListener 配对，签名保留 Electron 的 (event, payload)。 */
+    /** 少数订阅是手写的 on/off 配对，签名保留 (event, payload) 两参形式以复用页面代码。 */
     on: (channel: string, listener: (...args: any[]) => void) => void;
     off: (channel: string, listener: (...args: any[]) => void) => void;
-    /** 主进程 → 渲染进程下行订阅，返回反订阅闭包。 */
+    /** 后台 → 页面的事件推送，返回反订阅闭包。 */
     subscribe: <T>(channel: string, callback: (payload: T) => void) => () => void;
 }
 
@@ -615,8 +670,8 @@ export function createBridge(transport: BridgeTransport) {
 
         // 在线更新
         update: {
-            // 走主进程取 app.getVersion()：这里以前返回 process.versions.app，那是 Electron
-            // 运行时版本，跟 package.json 的版本号没有任何关系
+            // 走后台取 app 版本（Rust 侧读 tauri 的包版本）：这里以前返回 process.versions.app，
+            // 那是运行时版本，跟 package.json / Cargo.toml 的版本号没有任何关系
             getVersion: () => transport.invoke('update:getVersion'),
             check: () => transport.invoke('update:check'),
             download: (url: string) => transport.invoke('update:download', url),
@@ -631,4 +686,448 @@ export function createBridge(transport: BridgeTransport) {
             },
         },
     };
+}
+
+declare global {
+    interface Window {
+        electronAPI: {
+            cluster: {
+                list: () => Promise<APIResponse<ClusterConfig[]>>;
+                checkStatus: () => Promise<APIResponse<ClusterConfig[]>>;
+                add: (config: ClusterConfigDraft) => Promise<APIResponse<ClusterConfig>>;
+                update: (id: string, config: ClusterConfigDraft) => Promise<APIResponse<ClusterConfig>>;
+                delete: (id: string) => Promise<APIResponse<void>>;
+                testConnection: (
+                    config: ClusterConfigDraft,
+                ) => Promise<
+                    APIResponse<{connected: boolean; version?: string; sshConfigId?: string; k8sConfigId?: string}>
+                >;
+            };
+            resources: {
+                getTenants: (clusterId: string) => Promise<APIResponse<Tenant[]>>;
+                getNamespaces: (clusterId: string, tenant: string) => Promise<APIResponse<string[]>>;
+                getTopics: (clusterId: string, tenant: string, namespace: string) => Promise<APIResponse<Topic[]>>;
+                getTopicStats: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                    topic: string,
+                    persistent?: boolean,
+                ) => Promise<APIResponse<TopicStats>>;
+                getTopicConfig: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                    topic: string,
+                    persistent?: boolean,
+                ) => Promise<APIResponse<TopicConfig>>;
+                updateTopicConfig: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                    topic: string,
+                    config: TopicConfigPatch,
+                    persistent?: boolean,
+                ) => Promise<APIResponse<void>>;
+                getSubscriptions: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                    topic: string,
+                    persistent?: boolean,
+                ) => Promise<APIResponse<string[]>>;
+                getTenantInfo: (
+                    clusterId: string,
+                    tenant: string,
+                ) => Promise<APIResponse<{adminRoles: string[]; allowedClusters: string[]}>>;
+                createSubscription: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                    topic: string,
+                    name: string,
+                    initialPosition?: 'Latest' | 'Earliest',
+                    persistent?: boolean,
+                ) => Promise<APIResponse<void>>;
+                deleteSubscription: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                    topic: string,
+                    name: string,
+                    persistent?: boolean,
+                ) => Promise<APIResponse<void>>;
+                resetCursor: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                    topic: string,
+                    subscription: string,
+                    position: 'earliest' | 'latest' | 'timestamp',
+                    timestamp?: number,
+                    persistent?: boolean,
+                ) => Promise<APIResponse<void>>;
+                skipMessages: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                    topic: string,
+                    subscription: string,
+                    count: number,
+                    persistent?: boolean,
+                ) => Promise<APIResponse<void>>;
+                deleteTopic: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                    topic: string,
+                    persistent?: boolean,
+                ) => Promise<APIResponse<void>>;
+                getSchema: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                    topic: string,
+                    persistent?: boolean,
+                ) => Promise<APIResponse<BrokerSchemaInfo | null>>;
+                getSchemaStrategy: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                    topic: string,
+                    persistent?: boolean,
+                ) => Promise<APIResponse<{strategy: string | null; scope: 'topic' | 'namespace'}>>;
+                setSchemaStrategy: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                    topic: string,
+                    strategy: SchemaCompatibilityPolicy,
+                    persistent?: boolean,
+                ) => Promise<APIResponse<void>>;
+                createSchemaVersion: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                    topic: string,
+                    type: BrokerSchemaType,
+                    definition: string,
+                    persistent?: boolean,
+                ) => Promise<APIResponse<BrokerSchemaInfo>>;
+                deleteSchema: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                    topic: string,
+                    persistent?: boolean,
+                ) => Promise<APIResponse<void>>;
+                getNamespacePermissions: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                ) => Promise<APIResponse<PermissionMap>>;
+                grantNamespacePermission: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                    role: string,
+                    actions: PulsarAuthAction[],
+                ) => Promise<APIResponse<void>>;
+                revokeNamespacePermission: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                    role: string,
+                ) => Promise<APIResponse<void>>;
+                getTopicPermissions: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                    topic: string,
+                    persistent?: boolean,
+                ) => Promise<APIResponse<PermissionMap>>;
+                grantTopicPermission: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                    topic: string,
+                    role: string,
+                    actions: PulsarAuthAction[],
+                    persistent?: boolean,
+                ) => Promise<APIResponse<void>>;
+                revokeTopicPermission: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                    topic: string,
+                    role: string,
+                    persistent?: boolean,
+                ) => Promise<APIResponse<void>>;
+                getPulsarClusters: (clusterId: string) => Promise<APIResponse<string[]>>;
+                createTenant: (
+                    clusterId: string,
+                    name: string,
+                    adminRoles: string[],
+                    allowedClusters: string[],
+                ) => Promise<APIResponse<void>>;
+                updateTenant: (
+                    clusterId: string,
+                    tenant: string,
+                    adminRoles: string[],
+                    allowedClusters: string[],
+                ) => Promise<APIResponse<void>>;
+                deleteTenant: (clusterId: string, tenant: string) => Promise<APIResponse<void>>;
+                createNamespace: (clusterId: string, tenant: string, name: string) => Promise<APIResponse<void>>;
+                deleteNamespace: (clusterId: string, tenant: string, namespace: string) => Promise<APIResponse<void>>;
+                createTopic: (
+                    clusterId: string,
+                    tenant: string,
+                    namespace: string,
+                    name: string,
+                    persistent?: boolean,
+                    partitions?: number,
+                ) => Promise<APIResponse<void>>;
+            };
+            messages: {
+                send: (params: MessageSendParams) => Promise<APIResponse<{messageId: string}>>;
+                startConsume: (params: ConsumeStartParams) => Promise<APIResponse<{sessionId: string}>>;
+                stopConsume: (sessionId: string) => Promise<APIResponse<{stopped: boolean}>>;
+                startRead: (params: ReadStartParams) => Promise<APIResponse<{sessionId: string}>>;
+                stopRead: (sessionId: string) => Promise<APIResponse<{stopped: boolean}>>;
+                getBacklog: (params: SubscriptionPathParams) => Promise<APIResponse<BacklogInfo>>;
+                peek: (params: PeekParams) => Promise<APIResponse<PeekResult>>;
+                onConsumeBatch: (callback: (batch: MessageBatch) => void) => () => void;
+                onReadBatch: (callback: (batch: MessageBatch) => void) => () => void;
+                onSessionEnd: (callback: (event: SessionEndEvent) => void) => () => void;
+            };
+            producer: {
+                startSession: (params: ProducerStartParams) => Promise<APIResponse<ProducerSessionInfo>>;
+                send: (params: ProducerSendParams) => Promise<APIResponse<ProducerSendResult>>;
+                sendOnce: (params: ProducerSendOnceParams) => Promise<APIResponse<ProducerSendResult>>;
+                flush: (sessionId: string) => Promise<APIResponse<{flushed: boolean}>>;
+                startFlow: (params: ProducerFlowParams) => Promise<APIResponse<ProducerSessionInfo>>;
+                stopFlow: (sessionId: string) => Promise<APIResponse<ProducerRunStats | null>>;
+                setRate: (params: ProducerSetRateParams) => Promise<APIResponse<ProducerSessionInfo>>;
+                onStats: (callback: (stats: ProducerRunStats) => void) => () => void;
+                stop: (sessionId: string) => Promise<APIResponse<{stopped: boolean}>>;
+                listSessions: (clusterId?: string) => Promise<APIResponse<ProducerSessionInfo[]>>;
+            };
+            consumer: {
+                start: (params: ConsumeStartParams) => Promise<APIResponse<ConsumerSessionInfo>>;
+                stop: (sessionId: string) => Promise<APIResponse<{stopped: boolean}>>;
+                listSessions: (clusterId?: string) => Promise<APIResponse<ConsumerSessionInfo[]>>;
+                ack: (params: ConsumerAckParams) => Promise<APIResponse<ConsumerSessionInfo>>;
+                nack: (params: ConsumerAckParams) => Promise<APIResponse<ConsumerSessionInfo>>;
+            };
+            template: {
+                list: (params: WorkbenchScopeParams) => Promise<APIResponse<MessageTemplate[]>>;
+                create: (params: MessageTemplateUpsertParams) => Promise<APIResponse<MessageTemplate>>;
+                update: (params: MessageTemplateUpsertParams) => Promise<APIResponse<MessageTemplate>>;
+                delete: (id: string) => Promise<APIResponse<{deleted: boolean}>>;
+                copy: (params: WorkbenchCopyParams) => Promise<APIResponse<MessageTemplate>>;
+            };
+            consumerConfig: {
+                list: (params: WorkbenchScopeParams) => Promise<APIResponse<ConsumerSessionConfig[]>>;
+                create: (params: ConsumerConfigUpsertParams) => Promise<APIResponse<ConsumerSessionConfig>>;
+                update: (params: ConsumerConfigUpsertParams) => Promise<APIResponse<ConsumerSessionConfig>>;
+                delete: (id: string) => Promise<APIResponse<{deleted: boolean}>>;
+                copy: (params: ConsumerConfigCopyParams) => Promise<APIResponse<ConsumerSessionConfig>>;
+            };
+            sendHistory: {
+                list: (params: SendHistoryListParams) => Promise<APIResponse<SendHistoryEntry[]>>;
+                get: (id: number) => Promise<APIResponse<SendHistoryEntry | null>>;
+            };
+            benchmark: {
+                start: (params: LoadTestParams) => Promise<APIResponse<{runId: string; topic: string}>>;
+                stop: (runId: string) => Promise<APIResponse<{stopped: boolean}>>;
+                onProgress: (callback: (progress: LoadTestProgress) => void) => () => void;
+            };
+            metrics: {
+                getAggregatedStats: (clusterId: string) => Promise<APIResponse<AggregatedStats>>;
+                getBrokers: (clusterId: string) => Promise<APIResponse<BrokerInfo>>;
+                recordSnapshot: (snapshot: MetricsSnapshotInput) => Promise<APIResponse<null>>;
+                listSnapshots: (query: MetricsSnapshotQuery) => Promise<APIResponse<MetricsSnapshot[]>>;
+            };
+            // 告警：规则与事件全部来自本地 SQLite，评估在主进程定时器里跑
+            alert: {
+                listRules: (clusterId?: string) => Promise<APIResponse<AlertRule[]>>;
+                upsertRule: (params: AlertRuleUpsertParams) => Promise<APIResponse<AlertRule | null>>;
+                deleteRule: (id: string) => Promise<APIResponse<number>>;
+                testRule: (id: string) => Promise<APIResponse<AlertProbeResult>>;
+                listEvents: (query: AlertEventQuery) => Promise<APIResponse<AlertEvent[]>>;
+                ackEvents: (ids: number[]) => Promise<APIResponse<number>>;
+                deleteEvents: (ids: number[]) => Promise<APIResponse<number>>;
+                countOpen: () => Promise<APIResponse<number>>;
+                onEvent: (callback: (push: AlertPush) => void) => () => void;
+            };
+            worker: {
+                getState: (clusterId: string, force?: boolean) => Promise<APIResponse<PulsarWorkerState>>;
+                listItems: (params: {
+                    clusterId: string;
+                    kind: PulsarResourceKind;
+                    tenant: string;
+                    namespace: string;
+                }) => Promise<APIResponse<PulsarRuntimeItem[]>>;
+                getItem: (params: {
+                    clusterId: string;
+                    kind: PulsarResourceKind;
+                    tenant: string;
+                    namespace: string;
+                    name: string;
+                }) => Promise<APIResponse<PulsarRuntimeItem>>;
+                createItem: (params: PulsarRuntimeCreateParams) => Promise<APIResponse<string>>;
+                controlItem: (params: {
+                    clusterId: string;
+                    kind: PulsarResourceKind;
+                    tenant: string;
+                    namespace: string;
+                    name: string;
+                    action: 'start' | 'stop' | 'restart';
+                    instanceId?: number;
+                }) => Promise<APIResponse<void>>;
+                deleteItem: (params: {
+                    clusterId: string;
+                    kind: PulsarResourceKind;
+                    tenant: string;
+                    namespace: string;
+                    name: string;
+                }) => Promise<APIResponse<void>>;
+                trigger: (params: {
+                    clusterId: string;
+                    tenant: string;
+                    namespace: string;
+                    name: string;
+                    topic: string;
+                    data?: string;
+                }) => Promise<APIResponse<PulsarTriggerResult>>;
+                listBuiltins: (
+                    clusterId: string,
+                    kind: PulsarResourceKind,
+                ) => Promise<APIResponse<PulsarBuiltinDefinition[]>>;
+                reloadBuiltins: (clusterId: string, kind: PulsarResourceKind) => Promise<APIResponse<void>>;
+            };
+            namespacePolicy: {
+                get: (params: NamespacePolicyScopeParams) => Promise<APIResponse<NamespacePolicyView>>;
+                set: (params: NamespacePolicySetParams) => Promise<APIResponse<void>>;
+                clear: (params: NamespacePolicyClearParams) => Promise<APIResponse<void>>;
+                syncPlan: (params: NamespacePolicySyncParams) => Promise<APIResponse<NamespacePolicySyncPlanResult>>;
+                syncApply: (params: NamespacePolicySyncParams) => Promise<APIResponse<NamespacePolicySyncApplyResult>>;
+            };
+            topicPolicy: {
+                get: (params: TopicPolicyScopeParams) => Promise<APIResponse<TopicPolicyView>>;
+                set: (params: TopicPolicySetParams) => Promise<APIResponse<void>>;
+                clear: (params: TopicPolicyClearParams) => Promise<APIResponse<void>>;
+                syncPlan: (params: TopicPolicySyncParams) => Promise<APIResponse<TopicPolicySyncPlanResult>>;
+                syncApply: (params: TopicPolicySyncParams) => Promise<APIResponse<TopicPolicySyncApplyResult>>;
+            };
+            inspection: {
+                run: (params: InspectionRunParams) => Promise<APIResponse<InspectionRunResult>>;
+                history: (params: {clusterId: string; limit?: number}) => Promise<APIResponse<InspectionHistoryRow[]>>;
+                detail: (params: {id: string}) => Promise<APIResponse<InspectionRunResult>>;
+                clear: (params: {clusterId: string}) => Promise<APIResponse<number>>;
+                profile: {
+                    get: (params: {clusterId: string}) => Promise<APIResponse<InspectionProfile | null>>;
+                    save: (params: InspectionProfileDraft) => Promise<APIResponse<InspectionProfile>>;
+                };
+                schedule: {
+                    get: (params: {clusterId: string}) => Promise<APIResponse<InspectionSchedule | null>>;
+                    save: (params: InspectionScheduleDraft) => Promise<APIResponse<InspectionSchedule>>;
+                };
+                summary: {
+                    get: () => Promise<APIResponse<InspectionFleetSummary>>;
+                    run: (params: InspectionFleetRunParams) => Promise<APIResponse<InspectionFleetRunResult>>;
+                };
+                onScheduled: (callback: (push: InspectionScheduledPush) => void) => () => void;
+                onFleetProgress: (callback: (progress: InspectionFleetProgress) => void) => () => void;
+            };
+            notify: {
+                channel: {
+                    list: () => Promise<APIResponse<NotifyChannel[]>>;
+                    save: (draft: NotifyChannelDraft) => Promise<APIResponse<NotifyChannel>>;
+                    delete: (params: {id: string}) => Promise<APIResponse<{deleted: boolean}>>;
+                    enable: (params: {id: string; enabled: boolean}) => Promise<APIResponse<{updated: boolean}>>;
+                    test: (params: {id: string}) => Promise<APIResponse<NotifyDispatchResult>>;
+                };
+                delivery: {
+                    list: (params?: {limit?: number}) => Promise<APIResponse<NotifyDelivery[]>>;
+                };
+                mail: {
+                    list: () => Promise<APIResponse<MailProfile[]>>;
+                    save: (draft: MailProfileDraft) => Promise<APIResponse<MailProfile>>;
+                    delete: (params: {id: string}) => Promise<APIResponse<{deleted: boolean; channelsUsing: number}>>;
+                    test: (params: {id: string; to?: string}) => Promise<APIResponse<{ok: boolean; message: string}>>;
+                };
+            };
+            topology: {
+                getClusterTopology: (
+                    clusterId: string,
+                    limits?: TopologyLimits,
+                ) => Promise<APIResponse<ClusterTopology>>;
+            };
+            ssh: {
+                connect: (
+                    config: SSHConfig,
+                ) => Promise<APIResponse<{tunnelId: string; localPort: number; localBrokerPort: number}>>;
+                disconnect: (tunnelId: string) => Promise<APIResponse<void>>;
+            };
+            k8s: {
+                connect: (
+                    config: K8sForwardConfig,
+                ) => Promise<APIResponse<{forwardId: string; localAdminPort: number; localBrokerPort: number}>>;
+                disconnect: (forwardId: string) => Promise<APIResponse<void>>;
+            };
+            theme: {
+                set: (theme: string) => Promise<APIResponse<void>>;
+                get: () => Promise<APIResponse<string>>;
+            };
+            settings: {
+                get: (key: string) => Promise<APIResponse<string | undefined>>;
+                set: (key: string, value: string) => Promise<APIResponse<void>>;
+            };
+            config: {
+                getAll: () => Promise<APIResponse<AppSettings>>;
+                update: (patch: Partial<AppSettings>) => Promise<APIResponse<AppSettings>>;
+                reset: () => Promise<APIResponse<AppSettings>>;
+                meta: () => Promise<APIResponse<ConfigMeta>>;
+                export: () => Promise<APIResponse<ConfigBundle>>;
+                import: (bundle: ConfigBundle) => Promise<APIResponse<ConfigImportResult>>;
+                clearLogs: () => Promise<APIResponse<{deleted: number}>>;
+            };
+            logs: {
+                getRecent: (limit?: number) => Promise<APIResponse<OperationLog[]>>;
+            };
+            file: {
+                // 用户取消时 data 为 null，这不是失败
+                pickArchive: () => Promise<APIResponse<PickedArchiveFile | null>>;
+            };
+            plugin: {
+                list: () => Promise<APIResponse<PluginListResult>>;
+                installOfficial: (id: string) => Promise<APIResponse<PluginEntry>>;
+                import: (text: string) => Promise<APIResponse<PluginEntry>>;
+                uninstall: (id: string) => Promise<APIResponse<{id: string}>>;
+                setEnabled: (id: string, enabled: boolean) => Promise<APIResponse<PluginEntry>>;
+                revealDir: () => Promise<APIResponse<{dir: string; failure: string | null}>>;
+            };
+            update: {
+                getVersion: () => Promise<APIResponse<string>>;
+                check: () => Promise<
+                    APIResponse<{
+                        currentVersion: string;
+                        latestVersion: string;
+                        hasUpdate: boolean;
+                        releaseName?: string;
+                        releaseNotes?: string;
+                        downloadUrl?: string;
+                        fileName?: string;
+                        size?: number;
+                    }>
+                >;
+                download: (url: string) => Promise<APIResponse<{file: string}>>;
+                install: () => Promise<APIResponse<void>>;
+                onProgress: (
+                    callback: (progress: {received: number; total: number; done?: boolean; error?: string}) => void,
+                ) => () => void;
+            };
+        };
+    }
 }

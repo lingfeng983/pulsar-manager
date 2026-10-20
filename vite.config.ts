@@ -2,10 +2,9 @@ import {defineConfig} from 'vite';
 import react from '@vitejs/plugin-react';
 import {fileURLToPath, URL} from 'node:url';
 
-// 生产构建的页面通过 file:// 加载，onHeadersReceived 下发的 CSP 响应头
-// 在这种协议下不生效，所以把等价的策略写进 index.html 的 meta。
-// 只在 build 时注入：dev 走 http 且 Vite HMR 需要 inline/eval，
-// 由主进程按 dev 规则下发响应头即可。
+// 生产构建的页面由 Tauri 外壳加载，拿不到 onHeadersReceived 这类响应头通道，
+// 所以把等价的 CSP 写进 index.html 的 meta——这是生产页面唯一的内容安全策略来源。
+// 只在 build 时注入：dev 走 http 且 Vite HMR 需要 inline/eval。
 const PROD_CSP = [
     "default-src 'self'",
     "script-src 'self'",
@@ -13,7 +12,6 @@ const PROD_CSP = [
     "img-src 'self' data:",
     "font-src 'self' data:",
     // ipc: http://ipc.localhost 是 Tauri 在 Windows 上的 IPC 端点。
-    // Electron 用 file:// 加载页面时这一条不会命中，留着不影响安全边界。
     "connect-src 'self' ipc: http://ipc.localhost",
 ].join('; ');
 

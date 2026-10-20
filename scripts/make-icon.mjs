@@ -1,11 +1,12 @@
-// 应用图标的唯一来源：一个脚本画出全部尺寸，产出 build/icon.ico 与 src/main/app-icon.ts。
+// 应用图标的唯一来源：一个脚本画出全部尺寸，产出 Tauri 外壳用的图标目录
+// （rust/crates/pm-tauri/icons/icon.ico 与 icon.png）。
 //
-// 为什么手写光栅化而不是装 sharp / electron-icon-builder：图标只有"圆角方块 + 闪电"两个
+// 为什么手写光栅化而不是装 sharp / tauri icon：图标只有"圆角方块 + 闪电"两个
 // 形状，纯 Node（zlib + 手写 PNG/ICO 容器）就能出图，不必为一张图标引入原生依赖或下载
-// 外部工具链；也保证 build/icon.ico 是可复现的——改设计改脚本重跑一次即可，不会出现
+// 外部工具链；也保证 icon.ico 是可复现的——改设计改脚本重跑一次即可，不会出现
 // "谁手里那份 PS 源文件才是真的"。
 //
-// 用法：npm run icon   （改完脚本必须重跑，两个产物都要入库）
+// 用法：npm run icon   （改完脚本必须重跑，产物要入库；tauri.conf.json 的 bundle.icon 指它）
 import {deflateSync} from 'node:zlib';
 import {mkdirSync, writeFileSync} from 'node:fs';
 import path from 'node:path';
@@ -227,39 +228,17 @@ function encodeIco(images) {
     return Buffer.concat([header, ...entries, ...images.map(i => i.dib)]);
 }
 
-const outDir = path.resolve('build');
+const outDir = path.resolve('rust/crates/pm-tauri/icons');
 mkdirSync(outDir, {recursive: true});
-mkdirSync(path.resolve('src/main'), {recursive: true});
 
 const bitmaps = SIZES.map(size => {
     const rgba = render(size);
     return {size, png: encodePng(size, rgba), dib: encodeDib(size, rgba)};
 });
 writeFileSync(path.join(outDir, 'icon.ico'), encodeIco(bitmaps));
-// 256px 那份同时给 macOS / Linux 与「关于」弹窗用
+// 256px 那份给托盘、Linux/macOS 与「关于」弹窗用
 writeFileSync(path.join(outDir, 'icon.png'), bitmaps.find(i => i.size === 256).png);
 
-const dataUrl = size => {
-    const image = bitmaps.find(i => i.size === size);
-    return `data:image/png;base64,${image.png.toString('base64')}`;
-};
-
-writeFileSync(
-    path.resolve('src/main/app-icon.ts'),
-    `// 由 scripts/make-icon.mjs 生成，不要手改：改设计改脚本后跑 npm run icon。
-/* eslint-disable max-len -- base64 一行就是一张图，换行会改变数据 */
-// 主进程里所有图标（窗口 / 任务栏 / 托盘）都从这里取，避免"托盘换了任务栏没换"。
-// 内联而不是读资源文件：打包时 files 只含 dist/**，资源路径要跨 asar 边界，
-// 而这两个尺寸的组合也就几十 KB。
-export const APP_ICONS = {
-    /** 托盘：Windows 按 16px 画，给小图才不糊。 */
-    tray: '${dataUrl(16)}',
-    /** 窗口与任务栏：给到 256px，由系统按显示比例缩。 */
-    window: '${dataUrl(256)}',
-};
-`,
-);
-
 console.log(
-    `已生成 build/icon.ico（${SIZES.join('/')} px，圆角方块 ${hex(TOP_COLOR)}→${hex(BOTTOM_COLOR)} + 白色闪电）、build/icon.png 与 src/main/app-icon.ts`,
+    `已生成 ${outDir}/icon.ico（${SIZES.join('/')} px，圆角方块 ${hex(TOP_COLOR)}→${hex(BOTTOM_COLOR)} + 白色闪电）与 icon.png`,
 );

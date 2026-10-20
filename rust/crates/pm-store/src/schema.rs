@@ -1,4 +1,5 @@
-//! 数据库基线 DDL：与 `src/main/database/schema.ts` 逐表对齐。
+//! 数据库基线 DDL：与原 Electron 版的 schema.ts 逐表对齐（那份已随 Electron 删除，
+//! 对照请查 git 历史），为的是两版能互开同一个库文件。
 //!
 //! 所有语句必须幂等——每次启动都会整份执行一遍，再按 `user_version` 补列。
 /// 与 TS 侧 `SCHEMA_VERSION` 一致：Rust 版读完老库后仍写回同一个版本号，

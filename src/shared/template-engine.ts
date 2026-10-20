@@ -10,9 +10,10 @@
 //    而 JSON 报文里 number/boolean 字段的类型通常就是接口约定的一部分。
 // 3. 键名不支持占位符。
 //
-// 本模块禁止 import 任何 Node / Electron / 第三方包：它同时被 tsconfig.node.json
-// （主进程，CommonJS）与 tsconfig.json（渲染层，ESNext + strict）编译，只有
-// src/shared/ 是两者共同的 include 范围。日期格式化因此自带一个极小的 pattern 实现，
+// 本模块禁止 import 任何 Node / 第三方包：它同时被 tsconfig.node.json（自测走
+// CommonJS 产物）与 tsconfig.json（渲染层，ESNext + strict）编译，只有
+// src/shared/ 是两者共同的 include 范围。页面与后台因此用的是同一份实现，
+// 「预览即实发」才是可证的。日期格式化自带一个极小的 pattern 实现，
 // 而不是复用渲染层的 dayjs。
 
 export interface TemplateVariable {

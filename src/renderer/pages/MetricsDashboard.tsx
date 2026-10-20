@@ -311,7 +311,7 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
     const [metricsHistory, setMetricsHistory] = useState<MultiMetricsHistory>(EMPTY_HISTORY);
     const [error, setError] = useState<string | null>(null);
     const [peakMsgRate, setPeakMsgRate] = useState(0);
-    const intervalRef = useRef<NodeJS.Timeout | null>(null);
+    const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
     // 单调递增的请求代次：切换集群后，旧集群的晚到响应不能覆盖新集群的数据
     const loadRequestRef = useRef(0);
     // 外层页签切走后组件仍挂载（display:none），定时器得跟着激活态停掉

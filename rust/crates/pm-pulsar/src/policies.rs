@@ -1,6 +1,7 @@
 //! 策略端点：命名空间级、topic 级，以及两者的批量同步。
 //!
-//! 口径严格对齐 `src/main/services/namespace-policy-api.ts` 与 `topic-policy-api.ts`：
+//! 口径严格对齐原 Electron 版的 namespace-policy-api.ts 与 topic-policy-api.ts
+//! （那两份已随 Electron 一起删除，需要逐行对照时在 git 历史里查）：
 //! - 命名空间：读一份 Policies 大对象 + 五个限速专用端点，按字段表逐个写；
 //! - topic：broker 不返回整份对象，一个字段一条端点，N 条 GET 拼一份视图；
 //! - 写请求的动词与形状由字段表决定，用错动词只会得到不带提示的 405。

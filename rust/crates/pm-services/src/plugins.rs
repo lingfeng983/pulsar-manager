@@ -19,8 +19,9 @@ use serde_json::{json, Map, Value};
 /// 与 Electron 版同一个设置键：被停用（但仍安装着）的插件 id 列表。
 const DISABLED_KEY: &str = "disabledPlugins";
 
-/// 官方目录。内容取自 `src/main/services/official-plugins.ts`，只在这里落一份，
-/// 改官网目录时两边都要同步——这是刻意的冗余：它随安装包发布，不该被运行时文件改写。
+/// 官方目录。内容取自原 Electron 版的 official-plugins.ts（已随 Electron 删除，
+/// 需要对照时查 git 历史），只在这里落一份，
+/// 改官网目录时这里与文档要同步——这是刻意的冗余：它随安装包发布，不该被运行时文件改写。
 const OFFICIAL_PLUGINS_JSON: &str = r#"[
     {
         "id": "pm-smoke-benchmarks",

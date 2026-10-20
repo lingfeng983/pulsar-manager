@@ -10,60 +10,55 @@
 
 ## 开发环境
 
-- Node.js 20 或更高（开发在 v24 上验证）
-- npm 源已在 `.npmrc` 中指向 npmmirror，Electron 二进制也走国内镜像
-- `pulsar-client` 是原生模块，安装失败的处理方式见 [README「环境要求」](./README.md#环境要求)
+- Rust（开发在 1.98 上验证）+ 本机 C++ 工具链（`rusqlite` 用 bundled SQLite，Windows 上需要 MSVC）
+- Node.js 20 或更高（开发在 v24 上验证）——只用于前端构建、图标脚本与两个自测，运行时不需要 Node
+- 首次编译 `pulsar` crate 需要 protoc；仓库自带 Windows 版（`rust/tools/protoc`），其他平台见 [README「环境要求」](./README.md#环境要求)
 - 没有现成 Pulsar 集群？用根目录的 `docker-compose.yml` 起一个 standalone Pulsar（见 [一键体验指南](./docs/guides/一键体验指南.md)）
 
 ```bash
 npm install
-npm run dev          # 并行启动 Vite(5173) 与 Electron
+npm run app:dev      # 先 build:renderer，再起 Rust 外壳（cargo run -p pm-tauri）
 ```
 
 ## 代码约定（改代码前必读）
 
-- **broker I/O 只能写在 `src/main/services/`**；服务层不得 `import src/main/ipc/*`。生产构建的页面 CSP 是 `connect-src 'self'`，把 broker 请求挪到渲染进程会出现"开发正常、打包后静默失败"
-- **判定、折叠、diff 这类纯逻辑**要留在可以不连集群的情况下被 `scripts/*-selftest.cjs` 自测覆盖
-- **`src/preload.ts` 有两处要同步改**：`exposeInMainWorld` 的实现对象与 `declare global` 的类型声明
-- **新增数据库列**要写进 `migrate()` 并用 `PRAGMA table_info` 判存在；基线 DDL 每次启动都重跑，直接 ALTER 会让新库 duplicate column 顶掉整个启动事务
+- **broker I/O 只写在 `rust/crates/pm-pulsar/`**；`pm-services` 不得依赖 tauri，也不得 import `pm-tauri`。生产页面由 Tauri 外壳加载、CSP 只允许 `self` 与 `ipc:`，把 broker 请求挪到页面会出现"开发正常、打包后静默失败"
+- **页面 → 后台只有一个入口**：`rpc(method, args)`（`pm-tauri/src/bridge.rs`），按业务域链式分发到 `pm-tauri/src/rpc/*.rs`。加方法要同时改 `src/renderer/api-contract.ts` 与对应 Rust 模块——类型层钉不住 Rust 侧的字符串，漏配只在运行时报「未知方法」
+- **`src/renderer/api-contract.ts` 是契约唯一真源**：方法名、参数顺序、返回类型与 `window.electronAPI` 的 `declare global` 都在这一个文件里，改完不需要重跑任何代码生成
+- **判定、折叠、diff 这类纯逻辑**要留在可以不连集群的情况下被单测覆盖：Rust 侧写 `#[test]`（`npm run test:rust`），前端侧是 `npm run selftest` / `selftest:docs`
+- **新增数据库列**要写进 `pm-store` 的基线 DDL，并用 `column_exists()`（`PRAGMA table_info`）判存在；基线 DDL 每次启动都重跑，直接 ALTER 会让新库 duplicate column 顶掉整个启动事务
 - 完整架构约束见 [README「架构约束」](./README.md#架构约束)，都是踩过坑之后定下的
 
-## 提交前的四道门
+## 提交前要过的门
 
 ```bash
-npx tsc -b --force   # 类型
-npx eslint src       # 规范（max-len 120 在 prettier 之后重新开启）
-npm run format:check # 格式，不符时先 npm run format
-npm run build:main && npm run build
+npm run typecheck      # tsc -b --force
+npm run lint           # ESLint（max-len 120 在 prettier 之后重新开启）
+npm run format:check   # 格式，不符时先 npm run format
+npm run build          # 出 dist/renderer（含生产 CSP 注入）
+npm run test:rust      # cargo test --workspace：巡检判定、策略 diff、加密、模板、折叠
 ```
 
-涉及对应模块时，再跑相关自测：
+前端侧还有两个不依赖后台的自测：
 
 ```bash
-npm run selftest            # 模板引擎
-npm run selftest:worker     # 函数/连接器
-npm run selftest:policies   # 命名空间策略
-npm run selftest:topic      # Topic 策略
-npm run selftest:k8s        # K8s 端口转发
-npm run selftest:inspection # 巡检判定
-npm run selftest:schedule   # 定时巡检
-npm run selftest:summary    # 跨集群汇总
-npm run selftest:docs       # 文档中心
-npm run selftest:notify     # 通知渠道
+npm run selftest       # 报文模板引擎（预览与实发同源这条，靠它证伪）
+npm run selftest:docs  # 内置文档中心：目录锚点、跨篇检索、已订正参数名不回流
 ```
 
-改过原生依赖（better-sqlite3 等）后，请在 `release/win-unpacked` 里启动验证一次打包态，开发态能跑不代表打包态能跑。
+改过 `rust/` 下任何 crate，`npm run test:rust` 是硬门；改过打包相关（`tauri.conf.json`、图标、NSIS 配置），请跑一次 `npm run app:build` 并**装上产物验证**——开发态能跑不代表打包态能跑，WebView2 与自定义协议下的行为差异只在安装包态暴露。
 
 ## 提交约定
 
 - 只按名暂存，不用 `git add -A`
 - `docs/pulsar/01-*.md` 到 `docs/pulsar/08-*.md` 是应用内置文档中心的资源，由 `src/renderer/utils/doc-kb-source.ts` 用 Vite `?raw` 打进渲染包，必须入库；缺文件不会让构建失败，但页面会退化成空态。`docs/` 下其余草稿与设计稿不在这个约束内
+- `rust/target/` 已被忽略，不要提交产物；`rust/tools/protoc/` 是自带的 protoc，属预期入库内容
 - 提交信息用中文长正文说明「为什么这样改」，用 `git commit -F -`
 - 未经明确要求不 push；本机 git 全局 `credential.helper` 被置空，push 需要显式覆盖，且绝不回显 `git credential fill`
 
 ## 发版
 
-发版由维护者执行，流程见 [README「发版」](./README.md#发版)。一句话：`./release.sh` 会跑完静态门、出包、打标签、发布到 Gitee 分发仓（`pulsar-manager-dist`，只放发行版与安装包，仅保留最近 3 个版本）。
+发版由维护者执行，流程与硬性规则见 [README「发版」](./README.md#发版)。要点：Electron 时代的一键 `release.sh` 已随发版链删除，**Rust 版一键发版脚本待重做**；手工出包后发布到公开分发仓 `pulsar-manager-dist`，发行说明正文**必须带一行 `- SHA256：`<64 位>``**（应用内更新只从正文取校验值，缺了这条等于给所有旧客户端发一条读得到却装不上的更新）。
 
 ## 行为准则
 

@@ -41,9 +41,7 @@ export function useVirtualTable(rowCount: number): VirtualBox {
         const measure = () => {
             const top = Math.max(node.getBoundingClientRect().top, 0);
             const ceiling = window.innerHeight * MAX_RATIO;
-            const next = Math.round(
-                Math.min(Math.max(window.innerHeight - top - BOTTOM_GAP, MIN_HEIGHT), ceiling),
-            );
+            const next = Math.round(Math.min(Math.max(window.innerHeight - top - BOTTOM_GAP, MIN_HEIGHT), ceiling));
             setHeight(current => (current === next ? current : next));
         };
         measure();

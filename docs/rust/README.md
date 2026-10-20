@@ -1,11 +1,13 @@
 # Rust 桌面版（Tauri 外壳，复用同一套界面）
 
-`rust/` 是与 Electron 版并列的实现：**后台全部在 Rust 里**，界面直接复用本仓库的 React 前端，
-装在 Tauri 外壳里跑——只依赖系统自带的 WebView2，进程里没有 Chromium，也不打包 Node 运行时。
+本文写的是**当前唯一的实现**：后台全部在 Rust 里，界面直接复用本仓库的 React 前端，装在 Tauri 外壳里跑——
+只依赖系统自带的 WebView2，进程里没有 Chromium，也不打包 Node 运行时。
+（这里曾一度与 Electron 版并列存在；Electron 版连同 `src/main/**`、沙箱 preload、electron-builder
+与 `release.sh` 一起删除，需要对照时在 git 历史里查那个检查点提交。）
 
 之所以不是「纯 Rust 自绘界面」：自绘那一版（egui 壳，5000 多行）中途放弃并已删除——它的视觉和
 交互与现有界面差得太远，改不动也不该改。要「页面效果和原来完全一致」，唯一稳的路子是复用同一份
-前端代码，把 Electron 的主进程换成 Rust。
+前端代码，把后台换成 Rust。
 
 ## 结构
 
@@ -22,17 +24,21 @@ rust/
 
 ## 界面零改动的实现方式
 
-Electron 版里页面只认 `window.electronAPI`（由 `src/preload.ts` 注入）。Tauri 版没有 preload，
-于是：
+页面只认 `window.electronAPI`（名字是 Electron 时代留下的，改掉要动 40 多个页面，所以保留）。装配过程是：
 
-1. `scripts/gen-tauri-bridge.mjs` 从 `src/preload.ts` **生成**一份同名同签名的 `tauri-bridge.generated.ts`，
-   把每个 `ipcRenderer.invoke('x', ...)` 换成 `transport.invoke('x', ...)`；
+1. `src/renderer/api-contract.ts` 定义 `BridgeTransport`（`invoke` / `on` / `off` / `subscribe`）与
+   `createBridge(transport)`——150 个方法的名称、参数顺序、返回类型都在这里，
+   `window.electronAPI` 的 `declare global` 也写在同一个文件末尾；
 2. `src/renderer/tauri-runtime.ts` 在模块加载时用 `window.__TAURI__.core.invoke('rpc', {method, args})`
-   构造出 `window.electronAPI`，字段名 camelCase ↔ snake_case 的转换在这一层做；
+   与 `__TAURI__.event.listen` 拼出 transport，把 `createBridge` 的返回值挂到 window 上；
+   字段名 camelCase ↔ snake_case 的转换在这一层做；
 3. Rust 侧只有一个命令 `rpc(method, args)`，按业务域链式分发（`crates/pm-tauri/src/rpc/*.rs`），
    返回值统一是 `{success, data?, error?, code?}`，永不 reject。
 
-因此 `src/preload.ts` 仍是唯一的接口真源：改完 preload 重新生成即可，前端页面一行都不用动。
+因此 **`api-contract.ts` 是唯一的接口真源**。它原来由 `scripts/gen-tauri-bridge.mjs` 从
+`src/preload.ts` 生成；Electron 侧删除后，生成器与 preload 一起退役，这份文件改为手写——
+少一处「改了 A 还得重跑 B 才生效」的同步点。加方法时记得同时补 Rust 侧的分发分支：
+字符串对不上不会编译失败，只会运行时报「未知方法」。
 
 ## 性能：为「卡顿、滚动慢、消息延迟」做的四件事
 
@@ -50,8 +56,8 @@ Electron 版里页面只认 `window.electronAPI`（由 `src/preload.ts` 注入�
 ## 构建与打包
 
 ```bash
-npm run build:renderer                       # 前端产物 → dist/renderer（两个版本共用）
-cd rust/crates/pm-tauri && npx tauri build   # 产物见下
+npm run build:renderer                       # 前端产物 → dist/renderer
+npm run app:build                            # = build:renderer + tauri build
 ```
 
 产物：
@@ -59,7 +65,7 @@ cd rust/crates/pm-tauri && npx tauri build   # 产物见下
 - `rust/target/release/Pulsar Manager.exe` —— 单文件，前端资源已内嵌
 - `rust/target/release/bundle/nsis/Pulsar Manager_<版本>_x64-setup.exe` —— 安装包（约 7 MB）
 
-开发态：`cd rust && cargo run -p pm-tauri`（页面读 `dist/renderer`，改前端要重新 `npm run build:renderer`）。
+开发态：`npm run app:dev`（= `build:renderer` + `cd rust && cargo run -p pm-tauri`；页面读 `dist/renderer`，改前端要重新 `npm run build:renderer`）。
 
 首次构建需要 `protoc`。仓库已把 Windows 版放进 `rust/tools/protoc/bin/protoc.exe`，并通过
 `rust/.cargo/config.toml` 的 `[PROTOC]` 注入；其他平台装一个 protoc 或替换该文件即可。
@@ -74,7 +80,7 @@ cd rust/crates/pm-tauri && npx tauri build   # 产物见下
 | `PULSAR_MANAGER_DB=...` | 覆盖数据库路径（默认 `%APPDATA%\pulsar-manager\pulsar-manager.db`） |
 | `ALLOW_PLAINTEXT_KEY=1` | 系统密钥库不可用时允许退回明文密钥文件（不安全，需显式开启） |
 
-## 桌面外壳行为（与 Electron 版对齐）
+## 桌面外壳行为（对齐删除前的 Electron 版）
 
 | 行为 | 实现 |
 | --- | --- |
@@ -87,7 +93,7 @@ cd rust/crates/pm-tauri && npx tauri build   # 产物见下
 | 启动失败 | 用系统对话框说明原因并给出日志路径，而不是闪一下就没了 |
 | 退出收尾 | `RunEvent::Exit` 时统一收掉 ssh / kubectl 转发的子进程 |
 
-## 与 Electron 版的兼容性
+## 与旧 Electron 版的数据兼容性（Electron 版已删除）
 
 - **同一个数据库文件、同一个 `user_version = 17`**：Rust 版启动时执行与 `schema.ts` 逐列对齐的基线 DDL，
   再按 `PRAGMA table_info` 补齐 v6…v17 新增列，两个版本可以互相打开对方的库，无需迁移脚本。
@@ -104,7 +110,7 @@ cd rust/crates/pm-tauri && npx tauri build   # 产物见下
 
 ## 功能对等现状
 
-`src/preload.ts` 里的 150 个接口全部有实现（`crates/pm-tauri/src/rpc/` 下按域分布，扫描无缺口），
+`src/renderer/api-contract.ts` 里的 150 个接口全部有实现（`crates/pm-tauri/src/rpc/` 下按域分布，扫描无缺口），
 另有 5 个 Tauri 外壳层新增能力（单实例、托盘、外链、日志、包选择白名单）。
 
 | 能力 | 状态 |
@@ -122,13 +128,13 @@ cd rust/crates/pm-tauri && npx tauri build   # 产物见下
 | 通知渠道 / 邮件服务器 CRUD + 试发 + 投递记录 | 已实现（Webhook 与企业微信/钉钉/飞书，SMTP 走 lettre） |
 | 报文模板、消费配置、发送历史 | 已实现 |
 | 函数与连接器（worker）、本机包上传 | 已实现（选包走系统对话框 + 路径白名单） |
-| SSH 隧道 / K8s 端口转发 | 已实现（拉起系统 `ssh -L` / `kubectl port-forward`；SSH 需密钥登录，密码登录在桌面进程里无法自动完成） |
+| SSH 隧道 / K8s 端口转发 | **部分实现**：隧道管理器已写好（拉起系统 `ssh -L` / `kubectl port-forward`，`pm-services/src/tunnel.rs`，面板可起停；SSH 只支持密钥认证，密码登录会明确报错）。但**集群配置里勾选「走隧道/转发」这条自动改写地址的路径还没接上**——`cluster.rs` 的 `reject_unported_reachability` 会对这类集群返回「暂未实现」的可执行提示，当前请手动建好转发再填本地地址 |
 | 在线更新 | 已实现（Gitee 发行版、SHA256 校验、512 MB 闸） |
 | 插件（列表/安装/导入/卸载/启停/打开目录） | 已实现：插件是纯声明式 JSON，只贡献压测预设与 Topic 模板，不加载任何代码，因此整个机能 `pm_services::plugins` 模块独立复刻；同一目录、同一份官方目录、同一套校验规则 |
 
 未实现的项都不做「假成功」：要么在界面上明确标注，要么由后端返回可执行的错误原因。
 
-## 设计约束（和 Electron 版一致的坑）
+## 设计约束（从 Electron 版一路踩出来的坑）
 
 - **凭据写入语义**：`authParams = None` 表示「沿用已保存的」，空串表示「清除」。界面在已有密钥时
   只显示「已保存（不修改）」，避免每次保存把凭据抹掉。

@@ -1,5 +1,8 @@
 # Tauri 迁移方案（定稿）
 
+> **架构现状说明（迁移方案，已实施完毕）**：本文是项目早期的设计输入/实施计划，里面写的 Electron 主进程、`src/main/**`、沙箱 preload、electron-builder、Zod IPC 校验等实现**已随 Electron 版一起删除**。当前实现是 Rust 后台（Tauri 2）+ 同一套 React 前端，见 README 的「架构」与 docs/rust/README.md。历史细节保留原文不改，是为了留下当时的取舍理由。
+
+
 > 目标：保住现有 React 前端的视觉表现力，同时把 Electron 版的卡顿问题在架构层面解决。
 > 状态：待确认。本文只描述方案，不含实施记录。
 

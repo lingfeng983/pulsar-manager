@@ -11,7 +11,7 @@ interface State {
 
 /**
  * 任何一屏 React 渲染异常都会连带整棵组件树卸载，用户看到的是全白窗口且没有任何
- * 反馈（Electron 里连控制台都不好打开）。这里兜住并给出错误文本与重载入口。
+ * 反馈（WebView2 外壳里连控制台都不好打开）。这里兜住并给出错误文本与重载入口。
  */
 class ErrorBoundary extends React.Component<Props, State> {
     state: State = {error: null};
