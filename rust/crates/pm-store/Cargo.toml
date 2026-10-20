@@ -1,0 +1,10 @@
+[package]
+name = "pm-store"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pm-core = { workspace = true, features = ["sqlite"] }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true

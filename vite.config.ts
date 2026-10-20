@@ -12,7 +12,9 @@ const PROD_CSP = [
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data:",
     "font-src 'self' data:",
-    "connect-src 'self'",
+    // ipc: http://ipc.localhost 是 Tauri 在 Windows 上的 IPC 端点。
+    // Electron 用 file:// 加载页面时这一条不会命中，留着不影响安全边界。
+    "connect-src 'self' ipc: http://ipc.localhost",
 ].join('; ');
 
 function injectProdCsp() {

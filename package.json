@@ -1,11 +1,19 @@
 {
     "name": "pulsar-manager",
-    "version": "1.5.0",
-    "description": "Pulsar Desktop Management Tool",
+    "version": "1.6.0",
+    "description": "Apache Pulsar 桌面运维客户端：集群管理、消息收发、快速压测、监控巡检、告警通知一站式工具",
     "private": true,
     "main": "dist/src/main/index.js",
     "author": "Pulsar Manager Team",
     "license": "Apache-2.0",
+    "homepage": "https://gitee.com/lingfeng983/pulsar-manager",
+    "repository": {
+        "type": "git",
+        "url": "https://gitee.com/lingfeng983/pulsar-manager.git"
+    },
+    "bugs": {
+        "url": "https://gitee.com/lingfeng983/pulsar-manager/issues"
+    },
     "scripts": {
         "postinstall": "electron-builder install-app-deps",
         "dev": "concurrently \"npm run dev:main\" \"npm run dev:renderer\"",
@@ -14,6 +22,7 @@
         "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
         "build": "npm run clean && tsc -b && npm run build:main && vite build",
         "build:main": "tsc -p tsconfig.node.json",
+    "build:renderer": "vite build",
         "typecheck": "tsc -b --force",
         "selftest": "node scripts/template-engine-selftest.mjs",
         "selftest:worker": "npm run build:main && node scripts/worker-api-selftest.cjs",
@@ -55,6 +64,7 @@
         "@codemirror/view": "^6.43.14",
         "@eslint/js": "9.39.5",
         "@lezer/highlight": "^1.2.5",
+        "@tauri-apps/cli": "^2.12.3",
         "@types/better-sqlite3": "^7.6.9",
         "@types/react": "^18.3.12",
         "@types/react-dom": "^18.3.1",

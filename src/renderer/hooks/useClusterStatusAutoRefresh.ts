@@ -17,7 +17,36 @@ export function useClusterStatusAutoRefresh(): void {
         if (statusRefreshSeconds <= 0) {
             return;
         }
-        const timer = setInterval(() => void refreshClusterStatus(), statusRefreshSeconds * 1000);
-        return () => clearInterval(timer);
+        // 窗口在后台时停表：用户看不到的东西不该每 N 秒敲一次 broker，回来那一刻也不会
+        // 和恢复时的补探挤成一批并发。回到前台先补一次，看到的第一眼不是几分钟前的状态。
+        let timer: ReturnType<typeof setInterval> | null = null;
+        const start = () => {
+            if (timer === null) {
+                timer = setInterval(() => void refreshClusterStatus(), statusRefreshSeconds * 1000);
+            }
+        };
+        const stop = () => {
+            if (timer !== null) {
+                clearInterval(timer);
+                timer = null;
+            }
+        };
+        const onVisibility = () => {
+            if (document.visibilityState === 'hidden') {
+                stop();
+                return;
+            }
+            void refreshClusterStatus();
+            start();
+        };
+
+        if (document.visibilityState !== 'hidden') {
+            start();
+        }
+        document.addEventListener('visibilitychange', onVisibility);
+        return () => {
+            stop();
+            document.removeEventListener('visibilitychange', onVisibility);
+        };
     }, [statusRefreshSeconds, refreshClusterStatus]);
 }

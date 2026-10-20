@@ -1,0 +1,34 @@
+# 一键体验：standalone Pulsar 示例集群
+#
+# 用法：
+#   docker compose up -d          # 启动
+#   docker compose logs -f pulsar # 看日志
+#   docker compose down           # 停止并删除容器（保留数据卷）
+#   docker compose down -v        # 停止并连同数据卷一起删除
+#
+# 启动后在应用里添加集群：
+#   Admin 地址   http://127.0.0.1:8080
+#   Broker 地址  pulsar://127.0.0.1:6650
+#   （standalone 默认无需凭据）
+#
+# 详细步骤见 docs/guides/一键体验指南.md
+
+services:
+  pulsar:
+    image: apachepulsar/pulsar:3.3.0
+    container_name: pulsar-manager-demo
+    command: bin/pulsar standalone
+    ports:
+      - "6650:6650"   # broker 消息端口（pulsar://）
+      - "8080:8080"   # admin HTTP 端口（http://）
+    environment:
+      # 单机体验足够的内存；机器内存紧张时也可以再调小
+      PULSAR_MEM: "-Xms512m -Xmx1024m -XX:MaxDirectMemorySize=1024m"
+      # standalone 模式下让写入持久化到数据卷，down 后重启数据仍在
+      PULSAR_PID_DIR: /pulsar/data
+    volumes:
+      - pulsar-data:/pulsar/data
+    restart: unless-stopped
+
+volumes:
+  pulsar-data:

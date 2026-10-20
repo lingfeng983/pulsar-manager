@@ -1,0 +1,5 @@
+# pulsar crate 的 build.rs 需要 protoc 生成 protobuf 绑定。
+# 这里把 Google 官方编译的 protoc 钉在仓库内，避免每台机器各装一份
+# （也避免 CI / 离线环境因为没有 protoc 直接构建失败）。
+[env]
+PROTOC = { value = "tools/protoc/bin/protoc.exe", relative = true }

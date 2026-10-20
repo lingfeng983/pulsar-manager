@@ -41,6 +41,7 @@ import {
     forwardVerifyHost,
     sshTunnelManager,
     k8sForwardManager,
+    ipcErrorCode,
 } from './_shared';
 import {createLogger} from '../utils/logger';
 import {nativeClientManager} from '../services/pulsar-native-client';
@@ -300,7 +301,7 @@ export function registerClusterHandlers() {
             };
         } catch (error) {
             log.error('cluster:add failed', formatError(error));
-            return {success: false, error: formatError(error)};
+            return {success: false, error: formatError(error), code: ipcErrorCode(error)};
         }
     });
 
@@ -400,7 +401,7 @@ export function registerClusterHandlers() {
             };
         } catch (error) {
             log.error('cluster:update failed', formatError(error));
-            return {success: false, error: formatError(error)};
+            return {success: false, error: formatError(error), code: ipcErrorCode(error)};
         }
     });
 
@@ -497,7 +498,7 @@ export function registerClusterHandlers() {
             };
         } catch (error) {
             log.error('cluster:testConnection failed', formatError(error));
-            return {success: false, error: formatError(error)};
+            return {success: false, error: formatError(error), code: ipcErrorCode(error)};
         } finally {
             if (target) {
                 await releaseTestOnlyForward(target);

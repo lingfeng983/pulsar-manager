@@ -17,6 +17,13 @@ export interface APIResponse<T = unknown> {
     success: boolean;
     data?: T;
     error?: string;
+    /**
+     * 业务错误的机器可读标识（如冲突、参数不合法）。
+     *
+     * 为什么不能只靠 error 文案判断：文案会随版本改，而界面要根据它决定下一步动作
+     * ——这两件事不能靠字符串匹配去猜。
+     */
+    code?: string;
 }
 
 // ========== 集群与隧道配置 ==========

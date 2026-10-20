@@ -1,0 +1,51 @@
+[workspace]
+members = [
+    "crates/pm-core",
+    "crates/pm-store",
+    "crates/pm-pulsar",
+    "crates/pm-services",
+    "crates/pm-tauri",
+]
+resolver = "2"
+
+[workspace.package]
+version = "1.6.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+pm-core = { path = "crates/pm-core" }
+pm-store = { path = "crates/pm-store" }
+pm-pulsar = { path = "crates/pm-pulsar" }
+pm-services = { path = "crates/pm-services" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "charset", "query", "multipart"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "net"] }
+pulsar = { version = "6.9", default-features = false, features = ["tokio-runtime", "compression"] }
+futures = "0.3"
+aes-gcm = "0.11"
+# 授权码验签：与 Electron 版同一套 Ed25519 公钥
+ed25519-dalek = "2"
+# 机器码要读主机名 / CPU 型号 / 物理内存，与 Node 的 os.* 对齐
+sysinfo = "0.33"
+# 插件列表按名字排序要与 Electron 版一致：界面用的是 localeCompare(zh-CN)，
+# 中文得按拼音比，不能按 Unicode 码位
+pinyin = "0.10"
+base64 = "0.22"
+rand = "0.9"
+hex = "0.4"
+sha2 = "0.10"
+url = "2"
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "tokio1-rustls-tls"] }
+
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+strip = true

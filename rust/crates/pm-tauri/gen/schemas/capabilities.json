@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"主窗口需要订阅后端推送的消息、进度与告警事件","local":true,"windows":["main"],"permissions":["core:default","core:event:allow-listen","core:event:allow-unlisten","core:event:allow-emit"]}}

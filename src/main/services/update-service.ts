@@ -84,11 +84,20 @@ function sha256FromNotes(notes: string): string {
     return matched[1].toLowerCase();
 }
 
+/**
+ * 更新请求上带的客户端标识：只报版本号，不带任何本机信息。
+ */
+function clientVersionHeaders(): Record<string, string> {
+    return {'X-PM-Client': `pm/${app.getVersion()}`};
+}
+
 export async function checkForUpdate(): Promise<UpdateCheckResult> {
     const currentVersion = app.getVersion();
 
     const releasesResp = await axios.get(`${API_BASE}/repos/${GITEE_OWNER}/${GITEE_REPO}/releases`, {
         timeout: 15000,
+        // 客户端标识：自定义头而不是改 User-Agent，避免影响对端按 UA 做的任何分流
+        headers: clientVersionHeaders(),
     });
     const releases: Array<{tag_name?: string; name?: string; body?: string; id?: number | string}> = Array.isArray(
         releasesResp.data,
@@ -126,6 +135,7 @@ export async function checkForUpdate(): Promise<UpdateCheckResult> {
         `${API_BASE}/repos/${GITEE_OWNER}/${GITEE_REPO}/releases/${latest.id}/attach_files`,
         {
             timeout: 15000,
+            headers: clientVersionHeaders(),
         },
     );
     // 附件对象只有 id/name/size/uploader/browser_download_url 这五个字段（实测），

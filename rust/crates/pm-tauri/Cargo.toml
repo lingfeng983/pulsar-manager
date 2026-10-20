@@ -1,0 +1,20 @@
+[package]
+name = "pm-tauri"
+version.workspace = true
+edition.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-single-instance = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+pm-core = { workspace = true }
+pm-store = { workspace = true }
+pm-pulsar = { workspace = true }
+pm-services = { workspace = true }
+rfd = "0.15"

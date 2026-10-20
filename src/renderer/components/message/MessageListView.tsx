@@ -4,6 +4,7 @@ import type {TableColumnsType} from 'antd';
 import {DownOutlined, UpOutlined, ZoomInOutlined} from '@ant-design/icons';
 import type {Message} from '../../types';
 import {useResizableColumns} from '../../hooks/useResizableColumns';
+import {useVirtualTable} from '../../hooks/useVirtualTable';
 import {decodeMessageBatch, truncateText} from './messageFormat';
 
 // 收到消息的列表视图。与消息浏览器那张表同构，但多了一列 seq：
@@ -221,18 +222,25 @@ const MessageListView: React.FC<MessageListViewProps> = ({
     // 列宽能拖：Message ID 与正文这两个定宽在窄窗口里互相挤，拖开一个总比读不全好。
     const {resizableColumns, components} = useResizableColumns(columns);
 
+    // 界面保留条数最大能开到 5000，几千行 × 每行一堆 Tag/Tooltip/Button 是这台
+    // 客户端最主要的一次卡顿来源。行数超过阈值才切成虚拟滚动，几百条以内维持原样。
+    const box = useVirtualTable(messages.length);
+
     return (
-        <Table
-            dataSource={messages}
-            columns={resizableColumns}
-            components={components}
-            // messageId 在一条 topic 内唯一，是这里唯一稳定的行标识。拼上 index 的话，
-            // 新消息从头部插入会把所有旧行的 index 推后，整张表重挂（展开态与滚动位置都会丢）。
-            rowKey="messageId"
-            pagination={false}
-            size="small"
-            scroll={{x: 'max-content'}}
-        />
+        <div ref={box.ref}>
+            <Table
+                dataSource={messages}
+                columns={resizableColumns}
+                components={components}
+                // messageId 在一条 topic 内唯一，是这里唯一稳定的行标识。拼上 index 的话，
+                // 新消息从头部插入会把所有旧行的 index 推后，整张表重挂（展开态与滚动位置都会丢）。
+                rowKey="messageId"
+                pagination={false}
+                size="small"
+                scroll={box.scroll}
+                virtual={box.virtual}
+            />
+        </div>
     );
 };
 

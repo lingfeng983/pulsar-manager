@@ -1711,7 +1711,18 @@ function isTrustedSender(event: IpcMainInvokeEvent): boolean {
 
 // ========== IPC Handler 包装器 ==========
 
-export type IpcResult<T> = {success: true; data?: T} | {success: false; error: string};
+export type IpcResult<T> = {success: true; data?: T} | {success: false; error: string; code?: string};
+
+/**
+ * 业务错误的机器可读标识。
+ *
+ * 界面靠它把特定失败（如冲突、参数不合法）与普通错误分开处理，而不是匹配中文文案
+ * ——文案会随版本改，字符串匹配一改就全断。
+ */
+export function ipcErrorCode(error: unknown): string | undefined {
+    const code = (error as {code?: unknown} | null)?.code;
+    return typeof code === 'string' ? code : undefined;
+}
 
 /**
  * 注册一个 IPC handler 的公共骨架：来源校验 → 入参 zod 校验 → 数据库初始化 →
@@ -1755,7 +1766,7 @@ function registerResolvedHandler<S extends z.ZodTypeAny, R, T>(
             return {success: true, data};
         } catch (error) {
             log.error(`${channel} failed`, formatError(error));
-            return {success: false, error: formatError(error)};
+            return {success: false, error: formatError(error), code: ipcErrorCode(error)};
         }
     });
 }
@@ -1852,7 +1863,7 @@ export function registerHandler<T>(channel: string, run: (...args: any[]) => Pro
             return {success: true, data};
         } catch (error) {
             log.error(`${channel} failed`, formatError(error));
-            return {success: false, error: formatError(error)};
+            return {success: false, error: formatError(error), code: ipcErrorCode(error)};
         }
     });
 }

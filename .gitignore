@@ -29,3 +29,9 @@ release*/
 
 # CDP 实机验证的探针脚本与快照，只对本机有意义
 .tmp-verify/
+
+# Rust 原生版构建产物
+rust/target/
+
+# 第三方桌面助手的工作目录（本机截图与记忆），与项目无关
+.workbuddy/

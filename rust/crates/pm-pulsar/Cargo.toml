@@ -1,0 +1,13 @@
+[package]
+name = "pm-pulsar"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pm-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+pulsar.workspace = true
+futures.workspace = true

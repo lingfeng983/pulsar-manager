@@ -348,6 +348,11 @@ CREATE TABLE IF NOT EXISTS notify_deliveries (
 );
 
 -- 创建索引
+-- v17 曾被一个未发布的内部版本占用：那个版本的 license_state 是商业授权的单行状态表。
+-- 授权机制已整体移除，这里用幂等 DROP 清掉可能在旧库里留下的残留——基线每次启动都重跑，
+-- 任何见过那个版本的库跑完这句就回到与当前基线一致的结构，不需要动 user_version。
+DROP TABLE IF EXISTS license_state;
+
 CREATE INDEX IF NOT EXISTS idx_clusters_status ON clusters(status);
 CREATE INDEX IF NOT EXISTS idx_operation_logs_cluster_id ON operation_logs(cluster_id);
 CREATE INDEX IF NOT EXISTS idx_operation_logs_created_at ON operation_logs(created_at);

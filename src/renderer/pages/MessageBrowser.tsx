@@ -48,6 +48,7 @@ import {
 } from '../components/message/messageFormat';
 import {buildMessagesExport, messagesExportFilename} from '../components/message/exportMessages';
 import {useResizableColumns} from '../hooks/useResizableColumns';
+import {useVirtualTable} from '../hooks/useVirtualTable';
 
 // 一行"标签 + 问号说明 + 控件"。标签钉宽、控件吃剩下，与工作台那两张参数表同构，
 // 说明挂在标签上而不是控件后面：控件右边往往还跟着第二个控件（选择 + 时间），
@@ -834,6 +835,10 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
     // 而拖完这一屏就这样停着，比每次点开都重排要稳。
     const {resizableColumns, components} = useResizableColumns(columns);
 
+    // 界面保留条数可以开到几千：几千行 × 每行一堆 Tag/Tooltip 是这台客户端最主要
+    // 的卡顿来源。超过阈值才切成虚拟滚动，几百条以内与原来逐像素一致。
+    const box = useVirtualTable(messages.length);
+
     const fieldLabel = {marginRight: 'var(--spacing-sm)', fontWeight: 500} as const;
 
     const sendPanel = (
@@ -1272,16 +1277,19 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                             emptyText={isRunning ? '等待消息...' : '点击「开始」接收消息'}
                             height={160}
                         >
-                            <Table
-                                dataSource={messages}
-                                columns={resizableColumns}
-                                components={components}
-                                // 稳定 key：见 appendBatch 的去重说明
-                                rowKey="messageId"
-                                pagination={false}
-                                size="small"
-                                scroll={{x: 'max-content'}}
-                            />
+                            <div ref={box.ref}>
+                                <Table
+                                    dataSource={messages}
+                                    columns={resizableColumns}
+                                    components={components}
+                                    // 稳定 key：见 appendBatch 的去重说明
+                                    rowKey="messageId"
+                                    pagination={false}
+                                    size="small"
+                                    scroll={box.scroll}
+                                    virtual={box.virtual}
+                                />
+                            </div>
                         </StateBlock>
                     </>
                 )}

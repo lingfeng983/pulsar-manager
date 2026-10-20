@@ -1,6 +1,68 @@
 # Pulsar Manager Desktop
 
-Apache Pulsar 集群的桌面运维客户端，基于 Electron + React + TypeScript。所有与 broker 的通信都在主进程完成，渲染进程只通过 preload 暴露的白名单接口拿数据。
+Apache Pulsar 集群的桌面运维客户端，基于 Electron + React + TypeScript。官方 Apache Pulsar Manager（Web 管理 UI）已停止维护，本项目以桌面客户端承接 Pulsar 运维的完整链路：集群管理、消息收发、快速压测、监控巡检、告警通知、内置文档与插件市场——一个本地、安全、免费的工具装下 Pulsar 运维的七件事。
+
+所有与 broker 的通信都在主进程完成，渲染进程只通过 preload 暴露的白名单接口拿数据；凭据以 AES-256 加密后落库，加密密钥由系统密钥库保护（平台不支持时默认拒绝降级为明文），数据存于本地 SQLite，不依赖任何外部服务。
+
+![License](https://img.shields.io/badge/License-Apache%202.0-blue)
+![Version](https://img.shields.io/badge/Version-v1.5.0-orange)
+![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
+![Electron](https://img.shields.io/badge/Electron-29-47848F)
+![React](https://img.shields.io/badge/React-18-61DAFB)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178C6)
+![PRs](https://img.shields.io/badge/PRs-welcome-brightgreen)
+
+- **下载安装**：前往分发仓 [pulsar-manager-dist](https://gitee.com/lingfeng983/pulsar-manager-dist/releases) 下载最新安装包（Windows 一键安装，应用内支持在线更新）
+- **一键体验**：不想先装集群？用 docker 起一个 standalone Pulsar，5 分钟跑通全部功能，见 [一键体验指南](./docs/guides/一键体验指南.md)
+- **反馈与贡献**：Bug / 需求请走 [Issue 模板](./.gitee/ISSUE_TEMPLATE/)，参与开发见 [CONTRIBUTING.md](./CONTRIBUTING.md)
+
+## 功能矩阵
+
+| 能力域 | 一句话 | 详见 |
+| --- | --- | --- |
+| 集群与资源管理 | 集群增删改查、探活、租户/命名空间/Topic 三层资源树 | [集群管理](#集群管理)、[资源浏览与管理](#资源浏览与管理) |
+| 消息收发 | 发送测试、订阅消费、Reader 按位置读、生产者/消费者工作台 | [消息收发](#消息收发)、[生产者与消费者工作台](#生产者与消费者工作台) |
+| 快速压测 | 并发写入、实时吞吐与延迟统计（P50/P95/P99） | [快速压测](#快速压测) |
+| 监控与拓扑 | 集群聚合统计、broker 列表、多集群/单集群拓扑、时序快照留存 | [监控与拓扑](#监控与拓扑) |
+| 巡检与告警 | 集群巡检、定时巡检、跨集群汇总、告警规则、通知渠道 | [集群巡检与告警](#集群巡检与告警) |
+| 策略管理 | 命名空间/Topic 级策略读写、批量同步、跨集群对比 | [策略管理](#策略管理) |
+| 函数与连接器 | Functions / Connectors 管理、本机包上传 | [函数与连接器](#函数与连接器) |
+| 接入与扩展 | SSH 隧道、K8s 端口转发、Schema、ACL、插件市场、文档中心 | [接入通道](#接入通道)、[Schema 与权限](#schema-与权限)、[文档中心](#文档中心)、[插件市场](#插件市场) |
+
+## Rust 原生版（Tauri 外壳，同一套界面）
+
+`rust/` 下是同一功能的 Rust 实现：后台全部在 Rust 里（另起进程、原生 Pulsar 协议 + Admin REST），
+界面复用本仓库的 React 前端，装进 Tauri 外壳——只依赖系统自带的 WebView2，不再携带整个 Chromium
+（安装包 7 MB，Electron 版约 90 MB）。
+
+页面与 Electron 版逐像素一致：`src/preload.ts` 里的 155 个接口由 `scripts/gen-tauri-bridge.mjs`
+生成同名桥接，前端代码一行都不用改；窗口尺寸、托盘菜单、关闭即收进托盘、外链交给系统浏览器，
+这些外壳行为也按 Electron 版的实现对齐。
+
+两个版本共用同一份 `pulsar-manager.db`（`user_version = 17`）、同一套 DPAPI 保护的凭据密钥与同一份
+`logs/main.log`，可以互相打开对方的数据、交替启动。
+
+```bash
+# 1) 先出前端产物（两个版本共用）
+npm run build:renderer
+# 2) 编译并打包（产物：rust/target/release/Pulsar Manager.exe
+#    与 rust/target/release/bundle/nsis/Pulsar Manager_<版本>_x64-setup.exe）
+cd rust/crates/pm-tauri && npx tauri build
+```
+
+架构、模块划分、与 Electron 版的差异及未实现项见 [docs/rust/README.md](./docs/rust/README.md)。
+
+## 界面预览
+
+> 截图素材待采集，采集清单见 [docs/screenshots/README.md](./docs/screenshots/README.md)。
+
+- 首页集群总览与监控
+- 消息浏览器（发送测试 / 订阅消费 / Reader）
+- 生产者 / 消费者工作台
+- 快速压测
+- 集群拓扑
+- 巡检报告与告警中心
+- 插件市场
 
 ## 功能
 
@@ -53,10 +115,44 @@ Topic 详情页的「消息浏览器」有三种模式，互不混淆（不是�
 
 ### 监控与拓扑
 
-- 首页总览与监控面板：集群聚合统计与 broker 列表（数据来自 Admin API 的真实 stats 聚合，不是造出来的示例值）；首页与侧边栏的集群状态挂载即探一次、之后按配置中心间隔轮询，版本列由探活顺带补齐
+- 首页总览与监控面板：集群聚合统计与 broker 列表（数据来自 Admin API 的真实 stats 聚合，不是造出来的示例值）；首页与侧边栏的集群状态挂载即探一次、之后按配置中心间隔轮询，版本列由探活顺带补齐；监控曲线**时序快照本地留存**（原样留存，不做降采样），可回看历史
 - 集群拓扑：一个页签两种形态——全局视图多集群同屏（按集群抽样、离线/取不到明细的集群留降级气泡、点集群气泡下钻），单集群视图整簇全展开（订阅与可选分区）；力导向 / 环形两种布局切换，按节点类型与名称筛选，节点点击可直接打开对应详情页；只在页签激活时加载与轮询
     - broker→topic 的归属关系只在**能拿到真实来源**时才画连线；拿不到时载荷里 `ownershipSource` 明确标注为不可用，界面也会提示，不编造全连接图
     - 配色运行时从 CSS 变量读取，跟随亮色/暗色/护眼三套主题
+
+### 集群巡检与告警
+
+- **集群巡检**：一次只读采集换一份能直接发出去的体检报告——积压、未确认消息、生产/消费速率、阻塞订阅、broker 覆盖等逐项判定为 ok / warn / crit / 未覆盖 四档，每项判定都给出照着能做的结论；命名空间与 topic 按上限采样，报告写明采样范围与截断，不把"没采到的部分"说成全集群结论；可导出 Markdown 贴工单、发群
+- **巡检历史与环比**：报告落 SQLite，同一集群可对比上次结论，回答"比上次多了还是少了"，而不是只给一份互不相干的快照
+- **巡检口径可配置**：判定线（积压关注/严重线、未 ack 关注线、入出向倍数等）与采样上限按集群各存一份；每份报告记录实际使用的口径，判定线动过时环比会明确说清，不会把"判定线变了"伪装成"集群变了"
+- **定时自动巡检**：到点由应用自己跑一次只读巡检，结论与手点走同一条路
+- **跨集群巡检汇总**：把 N 份单集群报告拼成一张"先看哪台"的表——按严重级与新鲜度排序，逐台标注最近一次报告时间与过期程度，从没看过的集群不会混进"看过了没问题"那一堆；可导出 Markdown
+- **告警规则**：规则、定时评估、事件留存、桌面通知与告警中心；规则存本地 SQLite，导出配置包时随行
+- **通知渠道**：钉钉 / 企业微信 / 飞书 / Slack / 邮件，渠道地址与签名密钥按凭据处理（库里只有密文，列表页可截图发群）；每条投递记录自证"发、没发、为什么不发"——200 不等于送达（按各家 errcode/ok 判定），限流与拒发原因落库可查
+
+### 策略管理
+
+- **命名空间策略**：Policies 逐字段读、写、清，覆盖 25 个字段（TTL、积压配额、限速、去重、复制集群等）；未设置 / 0 / -1 三种值不互相塌缩；没有 DELETE 端点的字段不给清除按钮
+- **复制集群管理**：读写命名空间复制目标；移除复制目标是不可逆动作，走输入确认，预填只填当前真正在复制的集群
+- **批量同步**：源命名空间整值推到同集群多个目标，先预览差异再下发
+- **跨集群只读对比**：同名命名空间策略跨集群比对差异
+- **Topic 级策略**：TopicPolicies 读取、按字段写入与清除
+- **Topic 级对比与批量同步**：只同步"这一项在本 broker 上真的读出来了"的字段，broker 缺端点时整项 skip，绝不把 404 当成"未设置"去批量清空别人配好的覆盖
+
+### 函数与连接器
+
+- **Functions / Connectors**：列表、详情、启停、重载、分配表与内置清单（worker 端点整套走 Admin REST）
+- **本机包上传**：支持上传本机 zip 包注册函数/连接器，注册请求字段对齐 worker 真实 schema
+
+### 接入通道
+
+- **SSH 隧道**：启用后应用在本机起两条随机端口转发（Admin 与 Broker 各一条），集群地址自动改写到隧道上，TLS 仍按用户填写的原始主机名校验证书；原生客户端无法指定 SNI，所以「TLS + SSH 隧道」会被明确拒绝，请改用 `pulsar://` 明文经隧道
+- **K8s 端口转发**：集群跑在 Kubernetes 里时，直接 spawn 本机 `kubectl` 做 `port-forward`（认证沿用本机 kubeconfig，应用不读其内容），与 SSH 隧道并列第三条连接通道；就绪判定与失败原因分类（RBAC、上下文、x509 等）都给出运维照着能做的提示；SSH 与 K8s 两条通道在配置上互斥
+
+### Schema 与权限
+
+- **Schema 管理**：Topic 的 schema 查看与管理（含 schema 兼容策略等）
+- **权限（ACL）写入**：租户/命名空间/Topic 级权限管理，配置可写可查
 
 ### 界面
 
@@ -66,6 +162,11 @@ Topic 详情页的「消息浏览器」有三种模式，互不混淆（不是�
 - 字号四档：小 / 中 / 大（默认）/ 特大。DOM 文字走 `--font-size-*` 梯度，antd 组件的字号族与控件尺寸按同一档位重算（compact 算法会把 ConfigProvider 的 fontSize 种子覆盖掉，所以是自定义算法在它之后再补一层），ECharts 的画布文字同比缩放
 - 表格列宽可拖拽（消息列表），拖拽宽度不入库，刷新即回默认
 - 顶部导航左上角是「监控」「拓扑」与侧边栏折叠开关（原来的 `⚡Pulsar Manager` 大标题已去掉，应用名只在「关于」弹窗里出现），侧边栏顶部因此只留 topic 筛选框；折叠状态存 localStorage，不进配置中心的可重置项
+
+### 文档中心
+
+- 内置 8 篇 Pulsar 资料（详细功能清单、集群部署、配置清单、调优与架构选型、IoT 高吞吐场景方案、生产环境 Broker/Bookie 参数模板、3.x 高危缺陷整理与防护建议等），随构建打进渲染包，应用内即可查
+- 支持目录锚点与跨文档全文检索，命中后自动定位到对应小节
 
 ### 配置中心与在线更新
 
@@ -91,8 +192,11 @@ Topic 详情页的「消息浏览器」有三种模式，互不混淆（不是�
 | 前端        | React 18 + TypeScript 5.6 + Vite 5                                   |
 | UI / 状态   | Ant Design 5、Zustand 4                                              |
 | 图表        | ECharts 5.4                                                          |
-| 本地存储    | better-sqlite3 9                                                     |
+| 本地存储    | better-sqlite3 9（SQLite，含增量迁移）                                |
 | Pulsar 通信 | axios（Admin REST）+ pulsar-client 1.18（原生消息收发）              |
+| 接入通道    | ssh2（SSH 隧道）、复用本机 kubectl（K8s 端口转发）                   |
+| 通知渠道    | nodemailer（邮件）+ 钉钉/企微/飞书/Slack Webhook（axios）            |
+| 文档渲染    | marked + dompurify（内置文档中心，渲染进程）                         |
 | 参数校验    | zod 3                                                                |
 | 打包        | electron-builder 24（Windows NSIS / macOS dmg / Linux AppImage+deb） |
 | 代码质量    | ESLint 9 + Prettier 3                                                |
@@ -107,28 +211,34 @@ pulsar-manager/
 │   │   ├── config/            # 请求并发、重试、聚合上限等常量
 │   │   ├── database/          # SQLite schema 与数据访问
 │   │   ├── ipc/               # IPC handler（按域拆分）+ 主→渲染推送
-│   │   ├── services/          # Admin REST 客户端、指标聚合、原生客户端、SSH 隧道、加密、更新
+│   │   ├── services/          # Admin REST 客户端、指标聚合、原生客户端、SSH 隧道、K8s 转发、巡检、
+│   │   │                      # 告警引擎、通知派发、加密、更新
 │   │   └── utils/             # 日志
 │   ├── preload.ts             # 沙箱 preload：唯一暴露给渲染进程的接口面
-│   ├── shared/types.ts        # 跨进程共享的领域类型（单一事实来源）
+│   ├── shared/                # 跨进程共享的领域类型与判定逻辑（巡检口径/汇总/通知判定等，单一事实来源）
 │   └── renderer/              # React 渲染进程
 │       ├── components/        # 布局、资源树、拓扑、编辑器（CodeMirror 封装）、生产/消费表单、各类弹窗
 │       ├── hooks/             # 资源缓存、ECharts、快捷键、全屏、尺寸监听、列宽拖拽
 │       ├── pages/             # 首页、集群配置、Topic/租户/命名空间详情、消息浏览器、生产者工作台、
-│       │                      # 消费者工作台、监控、配置中心、插件市场、快捷键
-│       ├── store/             # Zustand：集群、Tab、主题、命令、快捷键、应用设置、插件
-│       └── utils/             # 格式化、导出、拓扑配色、按键解析、统一筛选匹配
+│       │                      # 消费者工作台、监控、巡检、告警中心、通知渠道、文档中心、配置中心、插件市场、快捷键
+│       ├── store/             # Zustand：集群、Tab、主题、命令、快捷键、应用设置、插件、告警
+│       └── utils/             # 格式化、导出、拓扑配色、按键解析、统一筛选匹配、文档中心锚点
 ├── docs/pulsar/               # 内置文档中心的 8 篇 Pulsar 资料（随构建打进渲染包）
 ├── docs/design/               # 项目设计稿与实施方案
-├── docs/guides/               # 使用与扩展指南
+├── docs/guides/               # 使用与扩展指南（含一键体验指南、插件编写说明）
+├── docs/screenshots/          # 界面截图素材与采集清单
 ├── docs/reference/            # 数据来源等内部参考说明
 ├── build/                     # 应用图标产物（icon.ico / icon.png，由脚本生成，入库）
+├── .gitee/ISSUE_TEMPLATE/     # Issue 模板（Bug 报告 / 功能建议）
+├── CONTRIBUTING.md            # 贡献指南
+├── docker-compose.yml         # 一键体验：standalone Pulsar 示例集群
 ├── release.sh                 # 一键出包 + 发布 Gitee 发行版
 ├── scripts/make-icon.mjs      # 图标唯一来源：纯 Node 画图标并生成 build/* 与 src/main/app-icon.ts
 ├── scripts/after-pack.js      # 打包阶段用 app-builder rcedit 写 exe 版本信息与图标
 ├── scripts/release-publish.mjs# 调 Gitee API 建/更新发行版并上传附件
 ├── scripts/tunnel-selftest/   # SSH 隧道端到端自检（本机起真 SSH 服务器 + 假 Pulsar 源站）
 ├── scripts/dev-ssh-bridge.js  # 开发期本机 SSH 服务器，供隧道功能实机验证
+├── scripts/*-selftest.cjs     # 模板引擎 / worker / policies / topic / k8s / 巡检 / 定时 / 汇总 / 通知 / 文档 等自测
 ├── electron-builder.json      # 打包配置
 ├── vite.config.ts             # 前端构建 + 生产 CSP 注入
 └── tsconfig.node.json         # 主进程/preload 的 TS 配置（CommonJS）
@@ -137,6 +247,16 @@ pulsar-manager/
 `docs/design/` 下另有一份[《详细设计说明书》](./docs/design/Pulsar%20桌面管理工具详细设计说明书.md)和一份[《UI 详细设计规范》](./docs/design/Pulsar%20桌面管理工具%20UI%20详细设计规范（最终完整版）.md)，是项目最初的设计输入，部分细节已被后续实现取代。
 
 ## 快速开始
+
+### 一键体验（推荐先试）
+
+不想先搭集群？项目根目录提供 standalone Pulsar 的 docker-compose：
+
+```bash
+docker compose up -d        # 启动 standalone Pulsar（broker 6650 / admin 8080）
+```
+
+起好后在应用里添加集群：Admin 地址 `http://127.0.0.1:8080`，Broker 地址 `pulsar://127.0.0.1:6650`（无需凭据），即可体验消息收发、压测、巡检等全部功能。详细步骤见 [一键体验指南](./docs/guides/一键体验指南.md)。
 
 ### 环境要求
 
@@ -194,7 +314,7 @@ npm run build:main && npm run build
 - **分发仓只保留最近 3 个版本的安装包**（`GITEE_DIST_KEEP` 可调）：一个包 81MB，堆十几份就撞 Gitee 的仓库容量上限。删的是发行版及其附件，标签留着不影响脚本重复执行。
 - **可重复执行**：标签已存在且指向当前提交就复用（发行版转为更新，同名附件先删再传）；指向别的提交则直接报错，不会把新包挂到旧标签上。任何一步失败，修好后重跑即可，不会产生重复发行版或重复附件。
 - 中文标题与正文由 `release.sh` 写入 UTF-8 临时文件再交给 `scripts/release-publish.mjs`，**不走命令行参数**——Windows 控制台是 GBK，直接传参会把中文变成乱码。
-- **自定义正文必须带 `- SHA256：\`<64 位>\`` 这一行**（应用内「检查更新」的校验值只从发行说明正文里取，见 `update-service.ts` 的 `sha256FromNotes`）。安装包要打完包才有 SHA，正文却是发版前写好的，所以正文里可以直接写 `@SHA256@`，脚本在算完校验值后替换掉；漏了这行脚本在上传前就 `die`，不会把一条"所有旧客户端读得到版本却拒绝下载"的更新发出去。
+- **自定义正文必须带 `- SHA256：`<64 位>`` 这一行**（应用内「检查更新」的校验值只从发行说明正文里取，见 `update-service.ts` 的 `sha256FromNotes`）。安装包要打完包才有 SHA，正文却是发版前写好的，所以正文里可以直接写 `@SHA256@`，脚本在算完校验值后替换掉；漏了这行脚本在上传前就 `die`，不会把一条"所有旧客户端读得到版本却拒绝下载"的更新发出去。
 - **出包门禁**：`scripts/verify-package.mjs` 除了查 exe / app.asar / 原生模块在不在，还会读主程序 exe 的属性面板（文件说明、产品名称、公司、版权、原始文件名称、文件版本、产品版本）并逐项核对——这些字段由 `scripts/after-pack.js` 写入，版本值与 `package.json` 同源，所以「设置 → 关于」里看到的版本、exe 属性里的版本和发行版标签是同一个数。
 
 ## 架构约束
@@ -216,7 +336,7 @@ npm run build:main && npm run build
 
 ## 本地数据
 
-- SQLite 位于 `app.getPath('userData')/pulsar-manager.db`，存集群配置、SSH 配置、操作日志、界面设置与快捷键绑定、报文模板、消费者会话配置、发送历史；表结构以 `PRAGMA user_version` 跟踪并增量迁移
+- SQLite 位于 `app.getPath('userData')/pulsar-manager.db`，存集群配置、SSH/K8s 转发配置、操作日志、界面设置与快捷键绑定、报文模板、消费者会话配置、发送历史、巡检报告与历史、告警规则与事件、通知渠道与投递记录；表结构以 `PRAGMA user_version` 跟踪并增量迁移
 - 已安装的插件是 `app.getPath('userData')/plugins/*.json`（或 `plugins/<目录>/plugin.json`），启用状态记在 `user_settings` 的 `disabledPlugins` 里
 - 调试时可以另起一个实例：`npx electron . --user-data-dir=<临时目录>`（单实例锁按 userData 路径判定）
 
@@ -228,12 +348,22 @@ npm run build:main && npm run build
 - **在线更新走公开分发仓库**：设置→检查更新 读取 `lingfeng983/pulsar-manager-dist`（公开，只放发行版与安装包）的最新发行版，比对版本号后下载 exe 附件并校验 SHA256，再静默安装重启。公开仓库匿名就能读，应用内没有任何令牌入口，用户不用配任何东西；源码仓库保持私有也不发版。仓库地址写死在两处：应用侧 `src/main/services/update-service.ts`，发版侧 `release.sh` 的 `DIST_REPO`（可用 `GITEE_DIST_REPO` 覆盖）——换仓库两处必须一起改，否则发出去的包读不到新版本。
 - **快速压测的延迟口径**：统计的是 `send()` 调用到 broker 确认的时间，包含客户端在途队列的排队；单生产者并发调大时 P50 会显著上升，这不是 broker 变慢
 - **发送历史只存前缀**：每次发送（单发、直接发送、连续发送的每一轮）都往 `send_history` 落一行，生产者工作台的「发送历史」按 集群 + topic 读最近 200 条；正文只留前 400 字符与平均单条字节数，整篇载荷当时就在原生层释放，所以历史不能拿来重发
+- **跨集群巡检汇总是快照对比**：汇总页读的是各集群最近一份历史报告，屏幕上的数字可能已是几小时前的；页面按新鲜度分级提示，并以报告生成时间为准，导出文档会写明"这不是同一时刻的快照"
 - **插件只贡献数据**：插件市场里的插件是本地 JSON 声明，只能提供压测预设与 Topic 创建模板，不能新增界面、不能访问 broker、不能执行代码；需要这类能力请直接把需求提为应用功能
 - 未实现：国际化；监控时序快照按原样留存，不做降采样
 - broker→topic 归属在多 broker 集群下没有廉价来源（`/admin/v2/broker-stats/{broker}/topics` 在部分部署上不可用），只能逐 topic 走 `/lookup`；单 broker（standalone）场景下归属是确定的
 
-## 许可证
+## 社区与贡献
 
-Apache License 2.0，见 [LICENSE](./LICENSE)。
+- **反馈问题 / 提需求**：请使用 [Bug 报告模板](./.gitee/ISSUE_TEMPLATE/bug_report.md) 与 [功能建议模板](./.gitee/ISSUE_TEMPLATE/feature_request.md) 提交 Issue
+- **参与开发**：见 [CONTRIBUTING.md](./CONTRIBUTING.md)——开发环境、自测清单、提交前四道门、提交约定与发版流程
+- **安装与更新**：安装包与版本说明统一在分发仓 [pulsar-manager-dist](https://gitee.com/lingfeng983/pulsar-manager-dist/releases) 发布，应用内「设置 → 检查更新」自动比对
+- 如果你觉得这个工具顺手，欢迎点个 Star；也欢迎把使用中遇到的坑提成 Issue，一起把 Pulsar 运维这件事做得更顺
+
+## 版本与许可证
+
+本项目以 Apache License 2.0 全量开源发布，所有功能（集群管理、消息收发、快速压测、监控巡检、
+定时巡检、告警通知、SSH 隧道 / K8s 转发、策略批量同步、函数与连接器上传）完整开放，
+不设任何版本分区、激活码或用量上限。许可证全文见 [LICENSE](./LICENSE)。
 
 Copyright 2026 Pulsar Manager Team
