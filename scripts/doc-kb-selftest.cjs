@@ -234,12 +234,33 @@ check('真实文档：每篇都有非空摘要与目录，且 slug 不重复', (
 check('真实文档：配置模板那篇不会被 conf 注释灌满标题', () => {
     const template = REAL.find(doc => doc.file.startsWith('07'));
     assert.ok(template, '没找到 07');
-    // 全文有 47 行以 # 开头，其中 22 行是真的 ATX 标题，其余都是 conf 注释。
-    eq(template.meta.headings.length, 22, '标题数');
+    // 全文有 68 行以 # 开头，其中 26 行是真的 ATX 标题，其余都是 conf 注释。
+    eq(template.meta.headings.length, 26, '标题数');
     assert.ok(
         !template.meta.headings.some(heading => heading.text.includes('【改】')),
         '参数注释被当成了标题',
     );
+});
+
+check('真实文档：审校中判定不存在的参数名不会被写回操作类文档', () => {
+    // 这些名字是 2026-10 对照 branch-3.3 conf 与 BookKeeper 4.17 ServerConfiguration 判定「不存在/已改名」的，
+    // 只有 08 的审校记录允许提到它们（作为订正说明），01~07 是给人照着抄的，抄了就报错。
+    const retired = [
+        'rwRereplicateWorkBatchSize',
+        'defaultTopicCompactionThreshold',
+        'majorCompactionIntervalSeconds',
+        'minorCompactionIntervalSeconds',
+        'pulsar_subscription_backlog',
+    ];
+    for (const doc of REAL.filter(d => !d.file.startsWith('08'))) {
+        for (const name of retired) {
+            assert.ok(!doc.markdown.includes(name), `${doc.file} 里出现了已订正为不存在的参数名 ${name}`);
+        }
+        assert.ok(
+            !/^replicationEnabled\s*=/m.test(doc.markdown),
+            `${doc.file} 里把 replicationEnabled 当成了 broker 参数`,
+        );
+    }
 });
 
 check('真实文档：正文里每一条手写目录链接都能落到标题上', () => {

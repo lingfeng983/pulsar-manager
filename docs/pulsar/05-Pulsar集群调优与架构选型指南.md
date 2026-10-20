@@ -13,6 +13,7 @@
 - [6. 架构设计原则](#6-架构设计原则)
 - [7. 场景选型指导](#7-场景选型指导)
 - [8. 常见性能问题排查](#8-常见性能问题排查)
+- [9. 新手起步：调优前必须建立的五件事](#9-新手起步调优前必须建立的五件事)
 
 ## 1. 性能调优总览
 
@@ -54,7 +55,7 @@ PULSAR_GC="-XX:+UseG1GC -XX:MaxGCPauseMillis=10"
 | numIOThreads | 2×CPU | Netty IO 线程 | 默认即可；CPU 核数少可下调 |
 | numOrderedExecutorThreads | 8 | ZK/元数据操作线程 | 默认 |
 | numHttpServerThreads | 2×CPU | HTTP Admin 线程 | 默认 |
-| bookkeeperClientNumWorkerThreads | =CPU | BK 客户端工作线程 | 默认 |
+| bookkeeperClientNumWorkerThreads | conf 留空（取代码默认，约 CPU 核数量级） | BK 客户端工作线程 | 默认 |
 | maxConcurrentTopicLoadRequest | 5000 | topic 加载并发 | 大 topic 集群可调大 |
 
 > 高连接数/高并发 topic 场景，IO 线程与 BK 客户端线程若不足会成为吞吐瓶颈，观察 `NettyEventLoopUtil` 与 `bookkeeper_client_*` 指标判断。
@@ -111,7 +112,7 @@ PULSAR_GC="-XX:+UseG1GC -XX:MaxGCPauseMillis=10"
 ### 3.3 读路径与 GC
 
 - `dbStorage_readAheadCacheBatchSize`（**默认 1000**，DbLedgerStorage 前缀）：回溯读多则调大。
-- `compaction*`：Entry Log 大压缩 `majorCompactionThreshold=0.8`；删除频繁场景（TTL 短）可调小阈值提高空间利用率。
+- `minorCompactionThreshold=0.2` / `majorCompactionThreshold=`**`0.5`**（conf 里参数名是 `majorCompactionInterval`，不是 `...IntervalSeconds`）：阈值判的是「entry log 里**还活着的**数据占比」，低于阈值才值得压缩。所以 **TTL 短、删除频繁时要想把阈值调大**（例如 0.5 → 0.6），让更多文件进入压缩、空间回收更快；调小只会让压缩几乎不触发、磁盘利用率变差。旧稿这里写反了。
 - **磁盘水位（3.3 默认）**：`diskUsageThreshold=0.95`（只读）、`diskUsageWarnThreshold=0.90`（暂停 major compaction）、`diskUsageLwmThreshold=0.95`（低于恢复读写，与 Threshold 同默认）。建议给 Threshold 与 Lwm 留回差（如 0.95/0.90）防止在只读-读写间抖动。
 - `gcWaitTime`（**默认 900000ms=15 分钟**）：磁盘紧张时可配合 `isForceGCAllowWhenNoSpace` 兜底。
 
@@ -280,8 +281,8 @@ cat /sys/block/nvme0n1/queue/scheduler
 
 ```
 延迟升高 → 区分生产/消费/端到端
-  ├─ 生产延迟高：检查 bookie 写延迟（pulsar_storage_write_latency）、磁盘水位、Qa 副本数
-  ├─ 消费积压：消费者存活？maxUnacked 打满？backlog quota 触发 producer_request_hold？
+  ├─ 生产延迟高：检查 bookie 写延迟（pulsar_storage_write_latency_le_10 / _le_100 分桶）、磁盘水位、Qa 副本数
+  ├─ 消费积压：消费者存活（pulsar_broker_consumers_count）？maxUnacked 打满？backlog quota 触发 producer_request_hold？
   └─ 端到端抖动：GC 停顿？网络重传？负载均衡搬迁 bundle？
 吞吐上不去 → 客户端未开 batching？分区数不足？单 broker 过载（loadManager 指标）？
 ```
@@ -305,14 +306,83 @@ cat /sys/block/nvme0n1/queue/scheduler
 - 压测矩阵：消息大小（1KB/10KB/100KB）× 订阅模式 × 持久化/非持久化 × 副本数。
 - 关注 p99/p999 而非平均值；持续 ≥ 30 分钟观察 GC 与负载均衡的稳态行为。
 
-**`pulsar-perf` 快速基线示例**（客户端同机房，先测生产再测消费）：
+**`pulsar-perf` 快速基线示例**（客户端同机房，先测生产再测消费；参数名按 branch-3.3 `PerformanceProducer`/`PerformanceConsumer` 核对）：
 
 ```bash
-# 生产：单 topic 分区 16，消息 1KB，1 万 msg/s，持续 30min
-bin/pulsar-perf produce persistent://tenant/ns/topic \
-  -rp 16 -m 10000 -s 1024 -n 1800 -z 4   # -z 4=ZSTD 压缩；-n 为输出行数（≈时长×输出间隔）
-# 消费：同一 topic，Shared 4 消费端，看消费吞吐与延迟
-bin/pulsar-perf consume persistent://tenant/ns/topic -s perftest -m "rate:10000" -n 1800
+# 生产：建 16 分区的 topic，消息 1KB，目标 1 万 msg/s，跑 30 分钟，ZSTD 压缩
+bin/pulsar-perf produce persistent://tenant/ns/perftopic \
+  -np 16 -r 10000 -s 1024 -time 1800 -z ZSTD -au http://broker1:8080
+#   -np 分区数（要真建分区 topic 必须带 -au 指向 Admin）
+#   -r 目标速率 msg/s（旧稿写成 -m 是错的：-m 是「总条数」，<=0 才是持续发）
+#   -s 消息字节数     -time 持续秒数（旧稿写 -n 1800 也是错的：-n 是「每 topic 生产者个数」）
+#   -z 取压缩算法名（NONE/LZ4/ZLIB/ZSTD/SNAPPY），不是数字
+
+# 消费：同一 topic，4 个消费者、Shared 模式，看消费吞吐与端到端延迟
+bin/pulsar-perf consume persistent://tenant/ns/perftopic \
+  -ss perftest -st Shared -n 4 -time 1800
+#   -ss 订阅名（-s 是隐藏的老参数）  -st 订阅类型  -n 消费者个数
 ```
 
-> `pulsar-perf` 输出含 `Latency p99/p999`、`Throughput` 与 `Error` 计数；压测 topic 用独立 namespace（`pulsar-perf` 默认写 `persistent://public/default/perf`，勿与业务混用）。
+> `pulsar-perf` 的输出含 `Message rate`、`Avg rate`、`Aggregated latency`（含 p50/p99/p999 分位）与 `Error` 计数。
+> 压测 topic 用独立 namespace（示例里的 `tenant/ns` 请换成专用压测租户），**不要直接压 `public/default`**：压测会新建大量 topic 与订阅，跑完记得 `pulsar-admin topics delete` 清理，否则遗留的订阅会一直拖住 backlog、白白吃磁盘。
+> 想单独看存储层瓶颈，可以先不接客户端，用 `bin/pulsar-perf bookkeeper` 直接压 BookKeeper。
+
+## 9. 新手起步：调优前必须建立的五件事
+
+> 这一节不讲参数，讲「怎么判断该不该动参数」。跳过它直接调，最常见的结果是调了一周、瓶颈从头到尾没变过。
+
+### 9.1 一条消息的延迟由哪几段拼起来
+
+先知道时间花在哪，才知道该改哪一层。持久化 topic 的端到端大致是：
+
+```
+Producer 端攒批（batchingMaxPublishDelay，默认 1ms）
+  → 网络到 broker（同机房 <1ms）
+  → broker 解码/鉴权/写入编排
+  → BookKeeper 写：journal fsync（NVMe 通常 <1ms）+ 等 Qa 个副本确认
+  → broker 返回 Producer 成功            ← 「生产延迟」到此为止
+  → dispatcher 推给 Consumer（受 managedLedgerNewEntriesCheckDelayInMillis 影响）
+  → Consumer 处理 + ack（业务代码耗时，通常才是大头）
+  → 游标 mark-delete（按 managedLedgerDefaultMarkDeleteRateLimit 批量落盘）
+```
+
+- 生产延迟的地板由 **journal fsync + Qa** 决定，broker 侧参数只能在它之上加东西，减不动它。
+- 消费「延迟」里最常见的贡献项其实是**应用自己的处理时间**和 **ack 节奏**，不是集群。
+- 攒批会**主动增加**生产延迟换取吞吐：要低延迟就别开批（或把 `batchingMaxPublishDelay` 压到 1ms 以下），这两者是同一枚硬币的两面，不存在「既要极致吞吐又要极致延迟」的参数。
+
+### 9.2 排查顺序：客户端 → Broker → Bookie → OS
+
+| 顺序 | 判据 | 典型结论 |
+|---|---|---|
+| ① 客户端 | 关掉 batching / 压缩再压一次，差异多大？生产者/消费者数量是否 ≥ 分区数？ | 大多数「集群慢」报告到这里就结束了 |
+| ② Broker | CPU 是否打满？`pulsar_broker_lookup_failures`、GC 停顿、bundle 是否只落在一台 | 单点 bundle 倾斜用 `namespaces unload` 或加分区 |
+| ③ Bookie | `pulsar_storage_write_latency_le_*` 分布、journal 盘 util、磁盘水位 | journal 与 ledger 同盘是第一大结构性原因 |
+| ④ OS/网络 | `iostat -x`、网卡重传、swap、时钟漂移 | 见《07》§5 |
+
+### 9.3 建立基线：先看这四个指标，再看别的
+
+```bash
+# 别信文档里的指标名，先看这个版本真的导出了什么
+curl -s http://broker1:8080/metrics | grep -E '^pulsar_(broker_msg_backlog|storage_write_latency|broker_rate_in)' | head
+```
+
+| 指标 | 看什么 | 异常意味着 |
+|---|---|---|
+| `pulsar_broker_rate_in` / `_out` | 实际吞吐是否与压测目标一致 | 达不到目标先看客户端，再看 bundle 分布 |
+| `pulsar_broker_msg_backlog` | 是否持续单调增长 | 消费能力 < 生产能力，或某订阅被弃用没删 |
+| `pulsar_storage_write_latency_le_10` vs `_le_100` | 分桶占比（多少写落在 10ms 内/100ms 内） | 100ms 桶占比抬头＝Bookie 或磁盘问题 |
+| `jvm_gc_collection_seconds_sum` / 直接内存 | GC 停顿总时长、堆外占用 | 长停顿会连带引发 ZK 会话超时与 bundle 抖动 |
+
+### 9.4 一次只改一项，并且留得回去
+
+- 每项改动记录：改了哪个参数、从多少到多少、预期看到哪个指标变化、观察时长。
+- **改法优先选可回滚路径**：namespace 级策略（`pulsar-admin namespaces set-*`）改错了立刻再 set 回原值；broker.conf 改动要先 `cp broker.conf broker.conf.$(date +%F)`，且逐台滚动、留 1 台对照。
+- 判断「有效」的标准是目标指标变了**且**p99 没变差，不是平均值好看。
+
+### 9.5 认天花板：这三种情况调参数无效
+
+| 天花板 | 怎么确认 | 唯一解 |
+|---|---|---|
+| 磁盘带宽 | `iostat -x` 里 journal 盘 util 长期 >80%、await 抬头 | 加盘/换 NVMe/加 Bookie 摊分，不是调 `journal*` |
+| 跨机房 RTT | 生产延迟下限≈RTT，且与副本数线性相关 | 就近接入、降 Qa 或改异步复制；参数调不动物理延迟 |
+| 元数据规模 | topic/namespace 数量巨大时 `pulsar_broker_lookup_*`、ZK znode 与延迟同时恶化 | 合并 topic（改分区 topic）、拆集群、ZK 独立 SSD |

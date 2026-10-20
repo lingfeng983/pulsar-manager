@@ -16,6 +16,7 @@
 - [8. 运维与可观测性](#8-运维与可观测性)
 - [9. 管理工具](#9-管理工具)
 - [10. 选型与版本建议](#10-选型与版本建议)
+- [11. 新手导读：核心概念、术语表与一条消息的旅程](#11-新手导读核心概念术语表与一条消息的旅程)
 
 ## 1. 消息模型
 
@@ -30,7 +31,7 @@
 | 消息保留（Retention） | 基于大小/时间的持久化保留策略，独立于订阅回溯 | 默认 0=按订阅保留（不设则只保留到 ack）；要长期保留必须显式配置 | 见《03》§1.2、`defaultRetentionTimeInMinutes` |
 | 消息过期（TTL） | 未确认消息超时后标记为可删除或重新投递 | TTL 与 Retention 是两套语义，勿混用 | 业务无 TTL 需求时保持 0 |
 | 延迟消息（Delayed Delivery） | 消息级 delay 标记，到时后才可投递 | 3.x 默认开启，有追踪开销；不使用可关省资源 | 用 `delayedDeliveryEnabled` 控制，见《03》 |
-| 死信队列（DLQ）/ 重试队列 | Shared 订阅 nack 达阈值后转入 DLQ，支持自动重试 topic | 需为 Shared 订阅单独配置；Exclusive/Failover 默认无 DLQ 语义 | 关键消费链路务必配 DLQ |
+| 死信队列（DLQ）/ 重试队列 | 消费失败（nack/重投达阈值）后转入重试 topic，再达上限进 DLQ topic | 由消费者侧参数（`DeadLetterPolicy`）配置，**主要作用于 Shared / Key_Shared 订阅**；Exclusive/Failover 无 DLQ 语义 | 关键消费链路务必配 DLQ，并给 DLQ 本身配监控 |
 | 消息去重（Deduplication） | Producer 端幂等去重，基于 message dedup context | 以 ProducerName 为维度；开启增加持久化开销 | 要求「至少一次→精确一次」且 Producer 会重连重发时开启 |
 | Schema（模式管理） | 内置 Schema Registry，支持 Avro/JSON/Protobuf/KeyValue，自动兼容检查 | 兼容级别 BACKWARD/FORWARD/FULL/ALWAYS_COMPATIBLE；开强制校验会拒收无 schema 生产者 | 新系统建议从第一天启用 Schema |
 | 批量消息（Batching） | Producer 端批量发送，降低开销 | 小消息吞吐可提升数倍，代价是单条延迟上升 | 吞吐场景必开，见《05》§2.5 |
@@ -55,7 +56,7 @@
 | Function 状态 | 基于 Table View 的状态存储 | 提供有状态处理基础 | 状态类场景才启用 |
 | Window 函数 | 滚动/滑动窗口聚合 | 有限窗口语义 | 聚合类需求可用，量大仍建议流计算引擎 |
 | Pulsar IO (Connector) | Source 拉入 + Sink 写出，连接各种系统 | 连接器丰富；注意凭据安全（见《08》CVE） | 作为「管道胶水」性价比高 |
-| Transactions | 跨 topic 原子读-处理-写（2.8+） | 需启用事务协调器；有额外元数据开销 | 强一致性读改写场景才开，见《03》`transactionCoordinatorEnabled` |
+| Transactions | 跨 topic 原子读-处理-写（2.8+ 引入） | 3.x 仍属 preview 特性：需启用事务协调器与 acknowledge-with-transaction，有额外元数据开销 | 非强一致需求不要为了「看起来更高级」而开，见《03》`transactionCoordinatorEnabled` |
 
 ## 4. 计算协调（Pulsar SQL / Functions Mesh 等）
 
@@ -86,7 +87,7 @@
 
 | 功能 | 作用 | 影响与注意点 | 建议 |
 |---|---|---|---|
-| 官方客户端 | Java、Python、Go、C++、Node.js、WebSocket | 语言覆盖广 | 按团队技术栈选择 |
+| 官方客户端 | Java、Python、Go、C++（均由 Apache Pulsar 仓库维护）；Node.js 客户端与 WebSocket API 属官方支持渠道但节奏独立 | 语言覆盖广；C++ 是 Python/Go 客户端的底层实现 | 按团队技术栈选择；跨语言团队注意各客户端特性支持度不完全一致（事务、Key_Shared 等） |
 | 协议兼容 | KoP（Kafka）、AoP（AMQP）、MoP（MQTT）、RoP（RabbitMQ）协议处理器 | 承接存量客户端、统一平台；协议处理器有额外资源开销 | 迁移期混跑评估，见《05》§7.3 |
 | REST Admin API | `/admin/v2` 全量管理接口 | 无发消息/peek 端点（需原生客户端） | 管理自动化统一走 Admin API |
 | Proxy | 无状态接入层，支持 TLS 终结与鉴权透传 | 屏蔽集群拓扑变化；永不直接暴露公网（《08》） | 生产/云环境统一走 Proxy |
@@ -117,3 +118,89 @@
 - **何时选 Pulsar**：百万级 topic、多租户平台、长保留 + 分层存储、跨地域复制、多协议统一、流批混合（详见《05》§7.3）。
 - **何时不必选**：单业务小规模、已成熟 Kafka 生态无多租户诉求、微秒级单机 RPC、资源极度受限（《05》§7.4）。
 - **版本底线**：任何 3.x 部署至少 ≥ 3.0.11 / 3.2.2，推荐 3.3.x 最新 patch（详见《08》§3）。
+
+## 11. 新手导读：核心概念、术语表与一条消息的旅程
+
+> 前 10 节是「有什么能力」，这一节是「先搞懂什么才能看懂那 10 节」。第一次接触 Pulsar 请从这里开始读。
+
+### 11.1 五个名词的从属关系（背下这张图，后面所有配置都有位置感）
+
+```
+Cluster（一套物理集群：Broker + Bookie + ZK）
+  └── Tenant（租户：一个业务线/团队/环境）
+        └── Namespace（命名空间：策略真正生效的层级 ← 最重要的一层）
+              └── Topic（主题：一条持久消息流）
+                    └── Subscription（订阅：某个下游消费组的进度）
+                          └── Consumer（消费者实例：无状态，随时上下线）
+```
+
+- **策略挂在 Namespace，不挂在 Topic**：保留、TTL、积压配额、副本数、权限、复制关系默认都在 namespace 级设置，topic 只在需要覆盖时才单独设。所以「我改了 broker.conf 怎么没生效」的标准答案几乎都是：改的是默认值，已有 namespace 不吃这个默认（见《03》§6.2、§7）。
+- **Tenant 的真正作用是隔离与配额**，不是目录。多业务线各一个 tenant，才能让「一个业务把集群打死」变成「只打爆它自己的配额」。
+- **Subscription 属于 topic，不属于客户端**：消费者全下线，订阅还在、消息还在堆。
+
+### 11.2 Topic 名字的三段式，写错就找不到
+
+```
+persistent://public/default/orders
+    │        │      │      └── topic 名
+    │        │      └───────── namespace 名
+    │        └──────────────── tenant 名
+    └───────────────────────── 持久(non-persistent 为纯内存)
+```
+
+- 缺 `persistent://` 前缀时客户端会补默认值，`public/default` 是出厂自带的命名空间——**练手可以，业务别用**。
+- `non-persistent://` 的 topic 不落 BookKeeper，broker 重启即丢，只用于可容忍丢失的实时信号。
+
+### 11.3 一条消息在生产集群里走过的路
+
+```
+① Producer 客户端攒批（batching）+ 压缩 → 通过 6650 发给「该 topic 的 owner broker」
+② owner broker 找到 topic 当前写入的 ledger，拆成 entry 交给 BookKeeper 客户端
+③ BookKeeper 把这条 ledger 的 chunk 分散到 E 台 Bookie，写到 Qw 台、Qa 台确认后
+   （每台 Bookie 先顺序写 journal 并 fsync，再进 entry log）
+④ broker 回 Producer「发送成功」，返回 MessageId        ← 到这里是「生产延迟」
+⑤ broker 上的 dispatcher 按订阅模式把 entry 推给 Consumer
+⑥ Consumer 处理完调 acknowledge，游标（cursor）向前推进
+⑦ 满足「该 topic 上所有订阅都已 ack」+ 过了 retention 窗口的 ledger 才可删，
+   由 broker 标记删除、BookKeeper ledger GC 与 entry log compaction 真正回收空间
+```
+
+看懂这七步，就看懂了本文档剩下的结构：①④归客户端与 broker（《03》§1.2~1.4、《05》§2），②③归 BookKeeper（《03》§2、《05》§3），⑤⑥归订阅与投递（§1 消息模型），⑦归保留/TTL/配额与 GC（《03》§6.2）。
+
+> 第⑦步那条「**所有**订阅都 ack 才回收」是新手最容易忽视的运维事实：一个早已废弃却没删除的订阅，就能让 topic 的历史数据永远删不掉，把磁盘吃满。排查积压先看订阅列表，不是先看消费者。
+
+### 11.4 术语速查
+
+| 术语 | 一句话 | 出现处 |
+|---|---|---|
+| Entry | BookKeeper 里的最小写入单元（≈一条消息） | 《03》§2 |
+| Ledger | BookKeeper 的一段追加写日志，一个 topic 由多条 ledger 串成 | 《02》§1 |
+| Journal | Bookie 的顺序预写日志，决定写延迟 | 《05》§3.1 |
+| Entry Log | Bookie 磁盘上承载 entry 的物理文件，多 ledger 混写其中 | 《03》§2.2 |
+| Compaction | 把混写文件里仍存活的数据搬到新文件以回收空间（与 topic 的「消息压缩」不是一回事） | 《03》§2.3、《05》§3.3 |
+| Offload / 分层存储 | 把旧 ledger 复制到对象存储，本地只留热数据 | 《05》§5.3 |
+| Bundle | namespace 被切分的负载分配单元，负载均衡搬的就是它 | 《03》§6.4 |
+| Cursor | 某个订阅读到哪了 | 《03》§6.3 |
+| Backlog | 游标之后未消费/未 ack 的消息量 | 《03》§6.2 |
+| Bookie 机架感知 | 副本放置时避免全落同一机架 | 《05》§3.5 |
+| MoP/KoP/AoP/RoP | MQTT/Kafka/AMQP/RabbitMQ 协议处理器 | 《06》§2 |
+
+### 11.5 六条常见误解（每条都会让人白折腾半天）
+
+1. 「Pulsar 是 Kafka 的替代品，配置方式差不多」→ Kafka 的分区绑 broker，Pulsar 的数据在 BookKeeper；Kafka 靠日志留存时间删数据，Pulsar 靠订阅 ack + retention + GC。
+2. 「分区数越多吞吐越高」→ 分区解决客户端并行，不解决单 bundle 打满一台 broker；且分区数会推高 ZK 与 broker 负担（《03》§6.4）。
+3. 「开了 retention 就不会丢消息」→ retention 只保留「已被所有订阅 ack」的消息；未 ack 且超 TTL 一样会被处理掉（《03》§6.2）。
+4. 「backlog 大就是消费者挂了」→ 也可能是消费者活着但 ack 太慢被 `maxUnackedMessagesPerConsumer` 卡住，或配额策略把生产者压住了（hold 模式表现成「生产者超时」）。
+5. 「改 broker.conf 就能改所有 topic 的保留策略」→ 已有 namespace 的策略优先，需要 `pulsar-admin namespaces set-*`（《03》§7）。
+6. 「Bookie 磁盘满了 broker 会报错」→ 默认行为是 Bookie 进只读，生产者侧表现为写超时/`NoWritableBookiesFound`，看不出是磁盘问题；先看磁盘水位三件套（《03》§2.2）。
+
+### 11.6 建议的上手顺序
+
+```
+《04》§12 单体跑通第一条消息（30 分钟，动手）
+  → 《01》本文 §11 + §1 消息模型（建立概念）
+  → 《02》§1、§5、§11 部署一套 3 节点小集群（动手）
+  → 《03》§6 五组概念 + §7 验证方法（回头解释你刚才改了什么）
+  → 《07》§7 按模板套生产参数（动手）
+  → 《05》§9 调优起步 → 《06》/《08》按场景与安全需要查阅
+```

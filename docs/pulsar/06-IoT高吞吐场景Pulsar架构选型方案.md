@@ -15,6 +15,7 @@
 - [8. 可观测性](#8-可观测性)
 - [9. 演进路线](#9-演进路线)
 - [10. 风险与对策](#10-风险与对策)
+- [11. 新手视角：把本方案缩小到一万台设备](#11-新手视角把本方案缩小到一万台设备)
 
 ## 1. 需求假设（示例基线）
 
@@ -31,6 +32,13 @@
 > 换算到具体参数前，先按此表替换为你的真实数值重算（容量公式见《05》§5.1）。
 
 ## 2. 接入层选型
+
+> **先分清三个容易混的名词**（本方案与《05》里反复出现）：
+> - **Proxy**：Pulsar 自带的无状态接入层，说的是 Pulsar 私有协议/HTTP，作用是「让客户端只记一个地址」+ 统一 TLS 与鉴权。它不认 MQTT。
+> - **协议处理器（MoP / KoP / AoP / RoP）**：装在 Broker 上的插件，让 Pulsar 直接听得懂 MQTT / Kafka / AMQP / RabbitMQ 协议。MoP（MQTT-on-Pulsar）就是设备用标准 MQTT 客户端直接连集群，topic 与 Pulsar topic 一一映射，QoS/遗嘱/保留消息由 MoP 实现。**它省掉了独立 MQTT 服务器**，代价是吃 Broker 的 CPU 与内存。
+> - **独立 MQTT 网关（EMQX / NanoMQ 等）**：集群外面的另一套服务，靠桥接（或 MoP）把消息搬进 Pulsar。存量设备认证、规则、连接管理已经在网关里做过时才有必要。
+>
+> 选型只需回答一句：**设备的 MQTT 连接管理与认证，你打算自己再建一套，还是交给 Pulsar（MoP）？**
 
 - **协议**：设备侧 MQTT（低带宽、弱网、QoS 支持）→ 部署 **MoP（MQTT-on-Pulsar）** 协议处理器，或前置 EMQX/NanoMQ 网关桥接到 Pulsar（前者架构更简单，后者复用存量 MQTT 基础设施）。
 - **Proxy 层**：
@@ -74,9 +82,17 @@ backlogQuotaDefaultLimitBytes=107374182400   # 100GB（3.x 参数名，勿用已
 backlogQuotaDefaultRetentionPolicy=producer_exception
 ttlDurationDefaultInSeconds=0            # 保留交给 retention，不做 TTL
 defaultRetentionTimeInMinutes=4320       # 3 天热数据
-# 分层存储
-managedLedgerOffloadAutoTriggerSizeThresholdBytes=<3天热数据量/分区>
-managedLedgerOffloadDriverClassName=org.apache.pulsar.broker.offload.impl.S3OffloaderFactory   # OSS 用 JCloudOffloaderFactory + service endpoint
+
+# 分层存储（参数名与工厂类名按 branch-3.3 核对）
+managedLedgerOffloadDriver=org.apache.bookkeeper.mledger.offload.jcloud.JCloudLedgerOffloaderFactory
+#   ↑ jclouds 系（S3 / OSS / Azure Blob / GCS）与本地文件都走这两个工厂之一：
+#     本地文件系统用 org.apache.bookkeeper.mledger.offload.filesystem.FileSystemLedgerOffloaderFactory
+#     旧稿写的 org.apache.pulsar.broker.offload.impl.S3OffloaderFactory 不是真实类名
+managedLedgerOffloadAutoTriggerSizeThresholdBytes=-1   # 默认 -1=不按大小触发；设单 ledger 阈值（如 10737418240=10GB）
+managedLedgerOffloadThresholdInSeconds=-1              # 3.x 新增：按「ledger 存活多久」触发卸载，热数据按天数划窗口时用这个
+managedLedgerOffloadDeletionLagMs=14400000             # 卸载后过多久才删 Bookie 上的副本（默认 4 小时，留反悔窗口）
+managedLedgerOffloadMaxThreads=2
+# 再按 driver 补 s3ManagedLedgerOffloadBucket / s3ManagedLedgerOffloadRegion 之类的专有项（--help 与官方 offload 文档为准）
 ```
 
 - 冷数据 90 天卸载 S3/OSS，Bookie 容量只需覆盖 3 天热数据。
@@ -100,9 +116,9 @@ managedLedgerOffloadDriverClassName=org.apache.pulsar.broker.offload.impl.S3Offl
 
 - **客户端/网关**：`batchingEnabled=true`，`batchingMaxMessages=1000`；压缩 LZ4（CPU 便宜、快）。
 - **Broker**：`PULSAR_MEM` 8~16g 堆 + 16g 直接内存；追尾读 `managedLedgerNewEntriesCheckDelayInMillis=1~5`。
-- **Bookie**：Journal 组提交保持默认；关注 `pulsar_storage_write_latency` p99；`lostBookieRecoveryDelay=300s` 防瞬时故障抖动。
+- **Bookie**：Journal 组提交保持默认；关注 `pulsar_storage_write_latency_le_10` 与 `_le_100` 两桶的占比（写延迟超过 100ms 的份额抬头就该查盘）；`lostBookieRecoveryDelay=300s` 防瞬时故障抖动。
 - **负载均衡**：`loadBalancerBrokerOverloadedThresholdPercentage=80`；bundle 数按 broker×4 起步。
-- **积压治理**：消费端保证 ack 速率 > 生产速率；监控 `pulsar_subscription_backlog` 并按 namespace 告警。
+- **积压治理**：消费端保证 ack 速率 > 生产速率；监控 `pulsar_broker_msg_backlog`（broker 汇总）与 `pulsar_subscription_back_log`（订阅级，注意拼写带下划线），按 namespace 告警。
 
 ## 8. 可观测性
 
@@ -132,3 +148,25 @@ managedLedgerOffloadDriverClassName=org.apache.pulsar.broker.offload.impl.S3Offl
 | S3 卸载冷读慢 | 回溯分析走分层存储读接口，避免打热 Bookie（分池隔离） |
 | Key_Shared 消费者扩缩容抖动 | 用 consistent hashing 模式，低峰期扩缩 |
 | 离线设备 topic 被自动清理 | 配长 `brokerDeleteInactiveTopicsMaxInactiveDurationSeconds` 或关键 ns 关闭清理 |
+
+## 11. 新手视角：把本方案缩小到一万台设备
+
+> 本文的规模（百万设备、15~20 台 Bookie）是用来讲「上限在哪」的。**不要照抄成起步配置**——那样只会得到一套你看不懂、也验证不了的集群。
+> 一万台设备、平均 1 条/秒、消息 512B ≈ 5MB/s 入，单机集群完全够；正确姿势是先跑小集群，把 §10 的每条风险都亲手触发一次，再按同一套设计放大。
+
+| 维度 | 百万设备（本文） | 一万台起步（建议照这列做） |
+|---|---|---|
+| 拓扑 | 3 ZK + 10~15 Broker + 15~20 Bookie | **3 台机器，每台混部 ZK+Broker+Bookie**（E=Qw=3/Qa=2 需要 3 台 Bookie 才有意义） |
+| 设备接入 | MoP 独立扩容 | 直接装 MoP 在 Broker 上；一台都够 |
+| Topic 粒度 | 一设备一 topic（100 万） | **一产品一 topic + 按 deviceId 做 message key**（几千个），等 topic 数真的成为查询瓶颈再拆细 |
+| 订阅 | 多链路 fan-out | 先 1 个落库订阅 + 1 个告警订阅，验证游标互不影响 |
+| 保留 | 3 天热 + 90 天 S3 | 只配 `defaultRetentionTimeInMinutes=1440`（1 天），**先不做分层存储**——它是本表里最容易配错、也最难验证收益的一项 |
+| 分层存储 | JCloud S3/OSS 卸载 | 先用本地文件 offloader 跑通一次卸载与冷读，再换对象存储 |
+| 压测 | pulsar-perf 全矩阵 | 1 万 msg/s 单 topic 基线 + 突发 5 倍（`-r` 阶梯） |
+| 容灾 | 双集群 Geo-Replication | **先验证备份路径**：ZK 快照 + Bookie 数据盘；复制等多账号业务真要求时再上 |
+
+三件在小规模下也必须做对的事（这三条到了大规模没有补救机会）：
+
+1. **租户/命名空间从第一天就按业务划**，别全塞 `public/default`——后期迁移 topic 要断流。
+2. **`advertisedAddress` 与网络规划一次做对**（见《02》§11 ①），跨网段的坑放大到百万连接时会变成事故。
+3. **保留/TTL/积压配额三者按《03》§6.2 的语义显式设定**，不要用默认值。默认值（Retention=0、配额=-1）在小集群的表现是「测试一切正常，第一次有慢消费者就磁盘写满」。
