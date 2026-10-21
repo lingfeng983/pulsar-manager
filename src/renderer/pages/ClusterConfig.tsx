@@ -1,4 +1,4 @@
-import React, {useState, useEffect} from 'react';
+import React, {useState, useEffect, useRef} from 'react';
 import {
     Modal,
     Form,
@@ -8,7 +8,6 @@ import {
     Switch,
     Button,
     Space,
-    Steps,
     message,
     Alert,
     Divider,
@@ -16,14 +15,7 @@ import {
     Col,
     Tag,
 } from 'antd';
-import {
-    ClusterOutlined,
-    LockOutlined,
-    SettingOutlined,
-    CheckCircleOutlined,
-    CloseCircleOutlined,
-    ApiOutlined,
-} from '@ant-design/icons';
+import {CheckCircleOutlined, CloseCircleOutlined} from '@ant-design/icons';
 import type {ClusterConfig} from '../types';
 
 const {Option} = Select;
@@ -31,7 +23,8 @@ const {Option} = Select;
 interface ClusterConfigModalProps {
     open: boolean;
     onCancel: () => void;
-    onSuccess: () => void;
+    /** 保存成功后回传落库视图；status/version 已带上本次测试连接的结果。 */
+    onSuccess: (saved?: ClusterConfig) => void;
     editingCluster?: ClusterConfig | null;
 }
 
@@ -67,25 +60,33 @@ function k8sFormValues(k8s?: ClusterConfig['k8s']) {
 
 const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, onSuccess, editingCluster}) => {
     const [form] = Form.useForm();
-    const [currentStep, setCurrentStep] = useState(0);
     const [loading, setLoading] = useState(false);
     const [testing, setTesting] = useState(false);
-    const [testResult, setTestResult] = useState<{connected: boolean; version?: string} | null>(null);
+    const [testResult, setTestResult] = useState<{connected: boolean; version?: string; error?: string} | null>(null);
     const [tunnelTesting, setTunnelTesting] = useState(false);
     const [tunnelResult, setTunnelResult] = useState<{ok: boolean; text: string} | null>(null);
     const [forwardTesting, setForwardTesting] = useState(false);
     const [forwardResult, setForwardResult] = useState<{ok: boolean; text: string} | null>(null);
+    // 测试连接代次：改过连接参数或再点一次测试后，旧响应必须被丢弃。
+    const testRequestRef = useRef(0);
 
     useEffect(() => {
         if (open) {
+            // Modal 不销毁，Form 实例会跨会话保留字段。编辑分支必须先清空，
+            // 否则上一个集群的 authParams / tlsTrustCerts 会原样带进下一个集群。
+            form.resetFields();
             if (editingCluster) {
-                form.setFieldsValue({
-                    ...editingCluster,
-                    ssh: sshFormValues(editingCluster.ssh),
-                    k8s: k8sFormValues(editingCluster.k8s),
-                });
+                const values = {...editingCluster} as ClusterConfig & {ssh?: unknown; k8s?: unknown};
+                // 只有后端确实返回了摘要时才覆盖嵌套对象；否则会把默认端口 /
+                // 认证方式一起清成 undefined。
+                if (editingCluster.ssh) {
+                    values.ssh = sshFormValues(editingCluster.ssh);
+                }
+                if (editingCluster.k8s) {
+                    values.k8s = k8sFormValues(editingCluster.k8s);
+                }
+                form.setFieldsValue(values);
             } else {
-                form.resetFields();
                 form.setFieldsValue({
                     serviceUrl: 'pulsar://localhost:6650',
                     webServiceUrl: 'http://localhost:8080',
@@ -96,7 +97,6 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
                     useK8sForward: false,
                 });
             }
-            setCurrentStep(0);
             setTestResult(null);
             setTunnelResult(null);
             setForwardResult(null);
@@ -112,11 +112,16 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
             return;
         }
         const values = form.getFieldsValue(true);
+        const requestId = ++testRequestRef.current;
         setTesting(true);
         setTestResult(null);
 
         try {
             const response = await window.electronAPI.cluster.testConnection(values);
+            // 表单在请求期间被改过（或又点了一次测试）：这份结果已经不对应当前输入。
+            if (requestId !== testRequestRef.current) {
+                return;
+            }
             // 失败时主进程同样回传它建立/落库的通道 id：连不上不代表转发没建，
             // 不接住这条 id，保存时会再落一条重复的配置。
             if (response.data?.sshConfigId) {
@@ -125,18 +130,31 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
             if (response.data?.k8sConfigId) {
                 form.setFieldValue('k8sConfigId', response.data.k8sConfigId);
             }
+            // response.success 只代表 RPC 没抛错，不代表 broker 连上了：
+            // 后端用 ConnectionTest.connected 表达探测结果，两个标志必须分开看。
             if (response.success && response.data) {
                 setTestResult(response.data);
-                message.success('连接成功！');
+                if (response.data.connected) {
+                    message.success(`连接成功！Pulsar 版本: ${response.data.version || '未知'}`);
+                } else {
+                    message.error(response.data.error || '连接失败，请检查配置');
+                }
             } else {
-                setTestResult({connected: false});
-                message.error(response.error || '连接失败');
+                const reason = response.error || '连接失败';
+                setTestResult({connected: false, error: reason});
+                message.error(reason);
             }
         } catch (error) {
-            setTestResult({connected: false});
-            message.error(error instanceof Error ? error.message : '连接测试失败');
+            if (requestId !== testRequestRef.current) {
+                return;
+            }
+            const reason = error instanceof Error ? error.message : '连接测试失败';
+            setTestResult({connected: false, error: reason});
+            message.error(reason);
         } finally {
-            setTesting(false);
+            if (requestId === testRequestRef.current) {
+                setTesting(false);
+            }
         }
     };
 
@@ -213,6 +231,15 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
     };
 
     const handleSubmit = async () => {
+        // 当前 Rust 版只实现了手动 ssh -L / kubectl port-forward，没有把转发端口
+        // 自动改写进集群地址。开着开关保存会让该集群之后所有操作被后端拒绝，
+        // 所以在提交前明确拦下，而不是制造一个“保存成功但不可用”的配置。
+        if (form.getFieldValue('useSshTunnel') || form.getFieldValue('useK8sForward')) {
+            message.error(
+                '当前版本暂不支持自动建立 SSH 隧道 / K8s 转发：请先手动建好转发，关闭开关后直接填写本地可达地址',
+            );
+            return;
+        }
         let allValues: ClusterConfig;
         try {
             // validateFields() 只返回"当前这一步挂载着"的字段，分步表单里前几步的值
@@ -241,7 +268,27 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
 
             if (response.success) {
                 message.success(editingCluster ? '集群配置已更新' : '集群添加成功');
-                onSuccess();
+                // 把"刚才测试连接成功了"这个事实带到列表：落库结果的 status 仍是
+                // 保存时的旧值，不等下一轮探活，先按 connected/version 回填。
+                // 测试失败时要明确置为离线，不能回落到旧状态把失败盖掉。
+                const saved: ClusterConfig | undefined = response.data
+                    ? {
+                          ...response.data,
+                          status: testResult
+                              ? testResult.connected
+                                  ? 'connected'
+                                  : 'disconnected'
+                              : response.data.status,
+                          version: testResult
+                              ? testResult.connected
+                                  ? (testResult.version ?? response.data.version)
+                                  : undefined
+                              : response.data.version,
+                      }
+                    : undefined;
+                form.resetFields();
+                setTestResult(null);
+                onSuccess(saved);
             } else {
                 message.error(response.error || '操作失败');
             }
@@ -264,19 +311,11 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
             void window.electronAPI.k8s.disconnect(testForwardId).catch(() => {});
         }
         form.resetFields();
-        setCurrentStep(0);
         setTestResult(null);
         setTunnelResult(null);
         setForwardResult(null);
         onCancel();
     };
-
-    const STEP_FIELDS: (string | string[])[][] = [
-        ['name', 'serviceUrl', 'webServiceUrl', 'adminApiTimeout'],
-        ['authPlugin', 'authParams'],
-        ['useSshTunnel', 'useK8sForward'],
-        ['tlsEnabled', 'tlsTrustCerts'],
-    ];
 
     // 隧道字段只在勾选后渲染，未渲染时提交校验不到；测试连接前按开关补齐。
     const sshStepFields = (): (string | string[])[] =>
@@ -308,20 +347,6 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
         ...sshStepFields(),
         ...k8sStepFields(),
     ];
-
-    const nextStep = async () => {
-        const fields =
-            currentStep === 2
-                ? ['useSshTunnel', 'useK8sForward', ...sshStepFields(), ...k8sStepFields()]
-                : STEP_FIELDS[currentStep];
-        try {
-            await form.validateFields(fields);
-        } catch {
-            return;
-        }
-        setCurrentStep(prev => prev + 1);
-    };
-    const prevStep = () => setCurrentStep(prev => prev - 1);
 
     const renderStep0 = () => (
         <>
@@ -397,6 +422,20 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
         const saved = editingCluster?.ssh;
         return (
             <>
+                <Alert
+                    type="warning"
+                    showIcon
+                    style={{marginBottom: 12}}
+                    message="当前版本不自动改写集群地址"
+                    description={
+                        <>
+                            SSH 隧道 / K8s 端口转发需要先在本机手动建好（或在本页测试按钮里建立）， 然后把 Broker 与
+                            Admin 地址直接填成 127.0.0.1 的本地端口。
+                            <br />
+                            开着下面两个开关保存会让该集群被后台拒绝。
+                        </>
+                    }
+                />
                 <Form.Item
                     name="useSshTunnel"
                     label="启用 SSH 隧道"
@@ -688,78 +727,102 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
                     )
                 }
             </Form.Item>
-
-            {testResult && (
-                <Alert
-                    type={testResult.connected ? 'success' : 'error'}
-                    message={
-                        testResult.connected
-                            ? `连接成功！Pulsar 版本: ${testResult.version || '未知'}`
-                            : '连接失败，请检查配置'
-                    }
-                    icon={testResult.connected ? <CheckCircleOutlined /> : <CloseCircleOutlined />}
-                    style={{marginTop: 16}}
-                />
-            )}
-
-            <Button type="default" onClick={handleTestConnection} loading={testing} style={{marginTop: 16}}>
-                测试连接
-            </Button>
         </>
     );
-
-    const steps = [
-        {title: '基础信息', icon: <ClusterOutlined />, content: renderStep0},
-        {title: '认证配置', icon: <LockOutlined />, content: renderStep1},
-        {title: '隧道 / 转发', icon: <ApiOutlined />, content: renderStep2},
-        {title: '高级配置', icon: <SettingOutlined />, content: renderStep3},
-    ];
 
     return (
         <Modal
             title={editingCluster ? '编辑集群' : '添加集群'}
             open={open}
             onCancel={handleCancel}
-            width={680}
+            width={760}
             footer={
-                <Space size={4}>
-                    {currentStep > 0 && <Button onClick={prevStep}>上一步</Button>}
-                    {currentStep < steps.length - 1 ? (
-                        <Button type="primary" onClick={nextStep}>
-                            下一步
-                        </Button>
-                    ) : (
-                        <Button
-                            type="primary"
-                            onClick={handleSubmit}
-                            loading={loading}
-                            disabled={!editingCluster && !testResult?.connected}
-                        >
-                            {editingCluster ? '保存' : '添加'}
-                        </Button>
-                    )}
+                <Space size={8}>
                     <Button onClick={handleCancel}>取消</Button>
+                    <Button onClick={handleTestConnection} loading={testing}>
+                        测试连接
+                    </Button>
+                    <Button
+                        type="primary"
+                        onClick={handleSubmit}
+                        loading={loading}
+                        disabled={!editingCluster && !testResult?.connected}
+                    >
+                        {editingCluster ? '保存' : '添加'}
+                    </Button>
                 </Space>
             }
         >
-            <Steps
-                current={currentStep}
-                items={steps.map(s => ({title: s.title, icon: s.icon}))}
-                style={{marginBottom: 24}}
-            />
+            {/* 单页表单：配置项一次摊开，滚动区只约束高度，不再分步丢字段 */}
+            <div style={{maxHeight: '62vh', overflowY: 'auto', paddingRight: 8}}>
+                <Form
+                    form={form}
+                    layout="vertical"
+                    initialValues={{
+                        adminApiTimeout: 5000,
+                        tlsEnabled: false,
+                        useSshTunnel: false,
+                        useK8sForward: false,
+                    }}
+                    onValuesChange={changed => {
+                        // 改过连接参数后旧的成功结果就失效了，否则会出现"测的是 A、
+                        // 添加的是 B"还带着绿色成功标记。
+                        const connectionKeys = [
+                            'serviceUrl',
+                            'webServiceUrl',
+                            'adminApiTimeout',
+                            'authPlugin',
+                            'authParams',
+                            'tlsEnabled',
+                            'tlsTrustCerts',
+                            'useSshTunnel',
+                            'useK8sForward',
+                            'ssh',
+                            'k8s',
+                        ];
+                        if (Object.keys(changed).some(key => connectionKeys.includes(key))) {
+                            // 在途的测试结果已经不对应新输入，作废它
+                            testRequestRef.current += 1;
+                            setTestResult(null);
+                            setTesting(false);
+                        }
+                    }}
+                >
+                    <Divider orientation="left" plain>
+                        基础信息
+                    </Divider>
+                    {renderStep0()}
 
-            <Form
-                form={form}
-                layout="vertical"
-                initialValues={{
-                    adminApiTimeout: 5000,
-                    tlsEnabled: false,
-                    useSshTunnel: false,
-                    useK8sForward: false,
-                }}
-            >
-                {steps[currentStep].content()}
-            </Form>
+                    <Divider orientation="left" plain>
+                        认证
+                    </Divider>
+                    {renderStep1()}
+
+                    <Divider orientation="left" plain>
+                        接入通道（SSH 隧道 / K8s 端口转发）
+                    </Divider>
+                    {renderStep2()}
+
+                    <Divider orientation="left" plain>
+                        TLS
+                    </Divider>
+                    {renderStep3()}
+                </Form>
+            </div>
+
+            {testResult && (
+                <Alert
+                    type={testResult.connected ? 'success' : 'error'}
+                    message={testResult.connected ? '连接成功' : '连接失败，请检查配置'}
+                    description={
+                        testResult.connected
+                            ? `Pulsar 版本: ${testResult.version || '未知'}`
+                            : testResult.error || '请检查 serviceUrl / webServiceUrl、TLS 与认证配置'
+                    }
+                    icon={testResult.connected ? <CheckCircleOutlined /> : <CloseCircleOutlined />}
+                    style={{marginTop: 12}}
+                />
+            )}
         </Modal>
     );
 };

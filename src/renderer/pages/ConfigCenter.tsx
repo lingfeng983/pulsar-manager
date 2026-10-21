@@ -559,8 +559,8 @@ const ConfigCenter: React.FC = () => {
                                 运行时日志：{meta?.logPath || '读取中…'}
                             </Text>
                             <Text className="hint-text">
-                                默认目录是 %APPDATA%\pulsar-manager\logs；单个文件超过 2MB 轮转为
-                                main.1.log，只保留一份备份。
+                                默认目录是 %APPDATA%\pulsar-manager\logs；单个文件超过 2MB 轮转为 main.1.log，保留最近 5
+                                份备份（最多约 12MB）。
                             </Text>
                             <Space wrap>
                                 <Button icon={<FolderOpenOutlined />} onClick={() => void handleOpenLogDir()}>

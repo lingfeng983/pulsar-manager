@@ -53,7 +53,8 @@ const UpdateModal: React.FC<{open: boolean; onClose: () => void}> = ({open, onCl
     }, [open, runCheck]);
 
     useEffect(() => {
-        if (!open) return;
+        // 订阅常开：下载可能比弹窗活得更久，关闭弹窗期间不能丢 done 事件，
+        // 否则重新打开时会永远停在“下载中”。
         return window.electronAPI.update.onProgress(p => {
             if (p.error) {
                 setDownloading(false);
@@ -65,7 +66,7 @@ const UpdateModal: React.FC<{open: boolean; onClose: () => void}> = ({open, onCl
                 setProgress({received: p.received, total: p.total});
             }
         });
-    }, [open]);
+    }, []);
 
     const handleDownload = async () => {
         if (!result?.downloadUrl) return;
@@ -74,7 +75,12 @@ const UpdateModal: React.FC<{open: boolean; onClose: () => void}> = ({open, onCl
         setProgress({received: 0, total: result.size || 0});
         try {
             const response = await window.electronAPI.update.download(result.downloadUrl);
-            if (!response.success) {
+            if (response.success) {
+                // download() 只在文件落地后返回；done 事件可能在弹窗关闭期间错过，
+                // 这里以返回值兜底，保证重新打开时能看到“立即安装”。
+                setDownloading(false);
+                setDownloaded(true);
+            } else {
                 setDownloading(false);
                 setError(response.error || '下载失败');
             }

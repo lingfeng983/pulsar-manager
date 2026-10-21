@@ -3308,7 +3308,7 @@ dependencies = [
 
 [[package]]
 name = "pm-core"
-version = "1.6.1"
+version = "1.6.2"
 dependencies = [
  "chrono",
  "rusqlite",
@@ -3321,7 +3321,7 @@ dependencies = [
 
 [[package]]
 name = "pm-pulsar"
-version = "1.6.1"
+version = "1.6.2"
 dependencies = [
  "futures",
  "pm-core",
@@ -3334,7 +3334,7 @@ dependencies = [
 
 [[package]]
 name = "pm-services"
-version = "1.6.1"
+version = "1.6.2"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -3361,7 +3361,7 @@ dependencies = [
 
 [[package]]
 name = "pm-store"
-version = "1.6.1"
+version = "1.6.2"
 dependencies = [
  "pm-core",
  "rusqlite",
@@ -3371,7 +3371,7 @@ dependencies = [
 
 [[package]]
 name = "pm-tauri"
-version = "1.6.1"
+version = "1.6.2"
 dependencies = [
  "chrono",
  "pm-core",

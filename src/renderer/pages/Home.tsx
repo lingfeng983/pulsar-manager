@@ -236,9 +236,23 @@ const HomePage: React.FC = () => {
             <ClusterConfigModal
                 open={modalOpen}
                 onCancel={() => setModalOpen(false)}
-                onSuccess={() => {
+                onSuccess={saved => {
                     setModalOpen(false);
-                    fetchClusters();
+                    // 保存后立刻回填"测试连接"已知的状态/版本，再做一轮真实探活：
+                    // 只 fetchClusters 会读回落库前的 disconnected，用户看到的就是
+                    // "刚测通、刚添加，列表却显示离线、没有版本"。
+                    void (async () => {
+                        await fetchClusters();
+                        if (saved?.id) {
+                            useClusterStore.getState().updateCluster(saved.id, {
+                                status: saved.status,
+                                version: saved.version,
+                            });
+                        }
+                        // force=true：若首屏/轮询那一轮还在飞，等它结束后再跑一轮，
+                        // 否则旧一轮的晚到响应会把这个刚回填的状态盖回去。
+                        await refreshClusterStatus(true);
+                    })();
                 }}
                 editingCluster={editingCluster}
             />

@@ -1811,6 +1811,166 @@ fn runtime_base(kind: &str) -> AppResult<&'static str> {
     }
 }
 
+/// broker 的 FunctionConfig/SinkConfig/SourceConfig 有几十个键；这里只挑界面
+/// 一定会展示的字段，其余原样留在 raw 里给详情抽屉。
+fn normalize_runtime_item(
+    kind: &str,
+    tenant: &str,
+    namespace: &str,
+    name: &str,
+    raw: Value,
+    status: Option<Value>,
+    stats: Option<Value>,
+) -> Value {
+    let text = |key: &str| raw.get(key).and_then(Value::as_str).map(str::to_string);
+    let class_name = text("className")
+        .or_else(|| text("sinkClassName"))
+        .or_else(|| text("sourceClassName"));
+    let archive = text("archive")
+        .or_else(|| text("jar"))
+        .or_else(|| text("py"))
+        .or_else(|| text("go"));
+    let runtime = text("runtime")
+        .map(|value| value.to_ascii_uppercase())
+        .or_else(|| {
+            if raw.get("jar").and_then(Value::as_str).is_some() {
+                Some("JAVA".into())
+            } else if raw.get("py").and_then(Value::as_str).is_some() {
+                Some("PYTHON".into())
+            } else if raw.get("go").and_then(Value::as_str).is_some() {
+                Some("GO".into())
+            } else {
+                None
+            }
+        });
+    let resources = raw.get("resources");
+    let cpu = resources
+        .and_then(|value| value.get("cpu"))
+        .and_then(Value::as_f64);
+    let ram_mb = resources
+        .and_then(|value| value.get("ram"))
+        .and_then(Value::as_i64)
+        .map(|bytes| bytes / (1024 * 1024));
+    let disk_mb = resources
+        .and_then(|value| value.get("disk"))
+        .and_then(Value::as_i64)
+        .map(|bytes| bytes / (1024 * 1024));
+    // source 没有 inputs，用 topicName 表示输出；sink 的 inputs 是消费的 topic。
+    let inputs = raw.get("inputs").cloned().unwrap_or(Value::Null);
+    let output = raw
+        .get("output")
+        .cloned()
+        .or_else(|| raw.get("topicName").cloned())
+        .unwrap_or(Value::Null);
+
+    json!({
+        "config": {
+            "kind": kind,
+            "tenant": tenant,
+            "namespace": namespace,
+            "name": name,
+            "className": class_name,
+            "archive": archive,
+            "runtime": runtime,
+            "inputs": inputs,
+            "output": output,
+            "logTopic": raw.get("logTopic").cloned().unwrap_or(Value::Null),
+            "parallelism": raw.get("parallelism").cloned().unwrap_or(Value::Null),
+            "processingGuarantee": raw
+                .get("processingGuarantees")
+                .cloned()
+                .unwrap_or(Value::Null),
+            "cpu": cpu,
+            "ramMb": ram_mb,
+            "diskMb": disk_mb,
+            "autoAck": raw.get("autoAck").cloned().unwrap_or(Value::Null),
+            "timeoutMs": raw.get("timeoutMs").cloned().unwrap_or(Value::Null),
+            "raw": raw,
+        },
+        "status": status.and_then(normalize_runtime_status),
+        "stats": stats.and_then(normalize_runtime_stats),
+    })
+}
+
+fn normalize_runtime_status(raw: Value) -> Option<Value> {
+    let instances = raw
+        .get("instances")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if instances.is_empty() && raw.get("numInstances").is_none() {
+        return None;
+    }
+    let mut running = 0i64;
+    let mut stopped = 0i64;
+    let mut error = 0i64;
+    let mut items = Vec::with_capacity(instances.len());
+    for instance in instances {
+        let status = instance.get("status");
+        let is_running = status
+            .and_then(|value| value.get("running"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let message = status
+            .and_then(|value| value.get("error"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let state = if !message.is_empty() {
+            error += 1;
+            "error"
+        } else if is_running {
+            running += 1;
+            "running"
+        } else {
+            stopped += 1;
+            "stopped"
+        };
+        items.push(json!({
+            "instanceId": instance.get("instanceId").and_then(Value::as_i64).unwrap_or(0),
+            "status": state,
+            "error": if message.is_empty() { Value::Null } else { Value::String(message) },
+            "numRestarts": status
+                .and_then(|value| value.get("numRestarts"))
+                .and_then(Value::as_i64)
+                .unwrap_or(0),
+            "workerId": instance.get("workerId").and_then(Value::as_str),
+        }));
+    }
+    let num_instances = raw
+        .get("numInstances")
+        .and_then(Value::as_i64)
+        .unwrap_or(items.len() as i64);
+    Some(json!({
+        "numInstances": num_instances,
+        "running": running,
+        "stopped": stopped,
+        "error": error,
+        "instances": items,
+    }))
+}
+
+fn normalize_runtime_stats(raw: Value) -> Option<Value> {
+    let number = |key: &str| raw.get(key).and_then(Value::as_i64).unwrap_or(0);
+    let user = number("userExceptionsTotal");
+    let system = number("systemExceptionsTotal");
+    let exceptions = user + system;
+    let received = number("receivedTotal");
+    let processed = number("processedTotal");
+    let emitted = number("emittedTotal");
+    if received == 0 && processed == 0 && emitted == 0 && exceptions == 0 {
+        return None;
+    }
+    Some(json!({
+        "received": received,
+        "processed": processed,
+        "successfullyProcessed": number("processedSuccessfullyTotal"),
+        "unsuccessfullyProcessed": exceptions,
+        "emitted": emitted,
+        "exceptions": exceptions,
+    }))
+}
+
 /// 内置清单的路径不是复数规则：functions/builtins、sinks/builtinsinks、sources/builtinsources
 fn builtin_base(kind: &str) -> AppResult<String> {
     let base = runtime_base(kind)?;
@@ -1891,19 +2051,104 @@ impl AdminClient {
         }
     }
 
+    async fn worker_config(
+        &self,
+        base: &str,
+        tenant: &str,
+        namespace: &str,
+        name: &str,
+    ) -> AppResult<Value> {
+        self.get_json(&format!(
+            "{base}/{}/{}/{}",
+            seg(tenant),
+            seg(namespace),
+            seg(name)
+        ))
+        .await
+    }
+
+    async fn worker_status(
+        &self,
+        base: &str,
+        tenant: &str,
+        namespace: &str,
+        name: &str,
+    ) -> Option<Value> {
+        self.get_opt_json::<Value>(&format!(
+            "{base}/{}/{}/{}/status",
+            seg(tenant),
+            seg(namespace),
+            seg(name)
+        ))
+        .await
+        .ok()
+        .flatten()
+    }
+
+    async fn worker_stats(
+        &self,
+        base: &str,
+        tenant: &str,
+        namespace: &str,
+        name: &str,
+    ) -> Option<Value> {
+        self.get_opt_json::<Value>(&format!(
+            "{base}/{}/{}/{}/stats",
+            seg(tenant),
+            seg(namespace),
+            seg(name)
+        ))
+        .await
+        .ok()
+        .flatten()
+    }
+
+    /// 列表：broker 只返回名字，这里补齐成 `{config,status,stats}`，与渲染层
+    /// `PulsarRuntimeItem[]` 契约一致（否则页面读 `item.config.name` 直接崩）。
     pub async fn worker_items(
         &self,
         kind: &str,
         tenant: &str,
         namespace: &str,
-    ) -> AppResult<Vec<String>> {
+    ) -> AppResult<Vec<Value>> {
         self.ensure_worker().await?;
-        let base = runtime_base(kind)?;
+        let base = runtime_base(kind)?.to_string();
         let names = self
             .get_opt_json::<Vec<String>>(&format!("{base}/{}/{}", seg(tenant), seg(namespace)))
             .await?
             .unwrap_or_default();
-        Ok(names.into_iter().filter(|name| !name.is_empty()).collect())
+        let names: Vec<String> = names.into_iter().filter(|name| !name.is_empty()).collect();
+        let items = stream::iter(names.into_iter().map(|name| {
+            let base = base.clone();
+            let kind = kind.to_string();
+            let tenant = tenant.to_string();
+            let namespace = namespace.to_string();
+            async move {
+                // 详情取不到也要保留这一行：界面仍需要能对它做删除/启停，
+                // 直接丢掉会让用户以为函数不存在。
+                let config = match self.worker_config(&base, &tenant, &namespace, &name).await {
+                    Ok(config) => config,
+                    Err(error) => json!({ "__unavailable": error.to_string() }),
+                };
+                let status = self.worker_status(&base, &tenant, &namespace, &name).await;
+                let stats = self.worker_stats(&base, &tenant, &namespace, &name).await;
+                Ok::<Value, AppError>(normalize_runtime_item(
+                    &kind, &tenant, &namespace, &name, config, status, stats,
+                ))
+            }
+        }))
+        .buffer_unordered(8)
+        .filter_map(|item| async move { item.ok() })
+        .collect::<Vec<Value>>()
+        .await;
+        let mut items = items;
+        items.sort_by_key(|item| {
+            item["config"]["name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        });
+        Ok(items)
     }
 
     pub async fn worker_item(
@@ -1915,13 +2160,12 @@ impl AdminClient {
     ) -> AppResult<Value> {
         self.ensure_worker().await?;
         let base = runtime_base(kind)?;
-        self.get_json(&format!(
-            "{base}/{}/{}/{}",
-            seg(tenant),
-            seg(namespace),
-            seg(name)
+        let config = self.worker_config(base, tenant, namespace, name).await?;
+        let status = self.worker_status(base, tenant, namespace, name).await;
+        let stats = self.worker_stats(base, tenant, namespace, name).await;
+        Ok(normalize_runtime_item(
+            kind, tenant, namespace, name, config, status, stats,
         ))
-        .await
     }
 
     pub async fn worker_control(
@@ -1976,7 +2220,7 @@ impl AdminClient {
 
     /// 注册函数/连接器。三段式：`{kind}Config` 文本段是完整定义，
     /// `url` 段让 worker 自己去取包，`data` 文件段是本地包（与 url 二选一）。
-#[allow(clippy::too_many_arguments)] // 参数就是这几列，拆成结构体只会多一层转发
+    #[allow(clippy::too_many_arguments)] // 参数就是这几列，拆成结构体只会多一层转发
     pub async fn register_runtime(
         &self,
         kind: &str,
@@ -2095,6 +2339,67 @@ fn output_or_default(output: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_item_matches_frontend_contract() {
+        let item = normalize_runtime_item(
+            "function",
+            "public",
+            "default",
+            "word-count",
+            json!({
+                "className": "org.example.WordCount",
+                "jar": "/pulsar/functions/word-count.jar",
+                "inputs": ["persistent://public/default/in"],
+                "output": "persistent://public/default/out",
+                "parallelism": 2,
+                "processingGuarantees": "ATLEAST_ONCE",
+                "resources": {"cpu": 0.5, "ram": 1048576, "disk": 2097152}
+            }),
+            Some(json!({
+                "numInstances": 2,
+                "instances": [
+                    {"instanceId": 0, "status": {"running": true, "error": ""}, "workerId": "w1"},
+                    {"instanceId": 1, "status": {"running": false, "error": "boom"}, "workerId": "w2"}
+                ]
+            })),
+            Some(json!({
+                "receivedTotal": 10,
+                "processedTotal": 9,
+                "processedSuccessfullyTotal": 8,
+                "userExceptionsTotal": 1,
+                "emittedTotal": 8
+            })),
+        );
+        assert_eq!(item["config"]["kind"], "function");
+        assert_eq!(item["config"]["name"], "word-count");
+        assert_eq!(item["config"]["runtime"], "JAVA");
+        assert_eq!(item["config"]["ramMb"], 1);
+        assert_eq!(item["config"]["diskMb"], 2);
+        assert_eq!(item["status"]["numInstances"], 2);
+        assert_eq!(item["status"]["running"], 1);
+        assert_eq!(item["status"]["error"], 1);
+        assert_eq!(item["status"]["instances"][1]["status"], "error");
+        assert_eq!(item["stats"]["processed"], 9);
+        assert_eq!(item["stats"]["exceptions"], 1);
+    }
+
+    #[test]
+    fn runtime_item_survives_missing_config() {
+        let item = normalize_runtime_item(
+            "source",
+            "public",
+            "default",
+            "mysql-source",
+            json!({"__unavailable": "connection refused"}),
+            None,
+            None,
+        );
+        assert_eq!(item["config"]["name"], "mysql-source");
+        assert_eq!(item["config"]["kind"], "source");
+        assert!(item["status"].is_null());
+        assert!(item["stats"].is_null());
+    }
 
     #[test]
     fn folds_policies_with_mixed_key_styles() {

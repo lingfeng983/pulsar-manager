@@ -47,6 +47,22 @@ impl AdminClient {
         let http = builder
             .build()
             .map_err(|e| AppError::Network(format!("初始化 HTTP 客户端失败: {e}")))?;
+        // 每个 RPC 会新建一次客户端；这一行回答"到底在连哪台 broker"，
+        // 地址先脱敏（userinfo / query 不进日志）。
+        pm_core::pm_log!(
+            "[admin] 客户端就绪 base={} timeout={}ms auth={}",
+            pm_core::redact_endpoint(&base),
+            timeout.as_millis(),
+            if config
+                .auth_params
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+            {
+                "yes"
+            } else {
+                "no"
+            }
+        );
         Ok(Self {
             http,
             base,
@@ -78,7 +94,17 @@ impl AdminClient {
         query: Option<&[(String, String)]>,
     ) -> AppResult<Response> {
         let mut attempts = 0;
+        let label = format!("{} {}", method.as_str(), path);
+        // 只有幂等请求能安全重发。POST/PATCH 在 broker 已执行但响应丢失时会
+        // 变成「创建两次」或「trigger 两次」；这类请求只在连接尚未建立时重试。
+        let idempotent = method == Method::GET
+            || method == Method::HEAD
+            || method == Method::OPTIONS
+            || method == Method::PUT
+            || method == Method::DELETE;
         loop {
+            let started = std::time::Instant::now();
+            pm_core::pm_log!("[admin] -> {label}");
             let _permit = self
                 .limit
                 .acquire()
@@ -100,18 +126,29 @@ impl AdminClient {
             match outcome {
                 Ok(response) => {
                     let status = response.status();
+                    let elapsed = started.elapsed().as_millis();
                     if status.is_success() {
+                        pm_core::pm_log!("[admin] <- {label} {} {elapsed}ms", status.as_u16());
                         return Ok(response);
                     }
                     let text = response.text().await.unwrap_or_default();
                     let message = condense_error(&text);
                     let retryable = status == StatusCode::SERVICE_UNAVAILABLE
                         || status == StatusCode::BAD_GATEWAY;
-                    if retryable && attempts < 2 {
+                    if retryable && idempotent && attempts < 2 {
                         attempts += 1;
+                        pm_core::pm_warn!(
+                            "[admin] <- {label} {} {elapsed}ms，第 {attempts}/2 次重试",
+                            status.as_u16()
+                        );
                         tokio::time::sleep(Duration::from_millis(400 * attempts as u64)).await;
                         continue;
                     }
+                    pm_core::pm_warn!(
+                        "[admin] !! {label} {} {elapsed}ms：{}",
+                        status.as_u16(),
+                        message_or_path(&message, path)
+                    );
                     return Err(match status.as_u16() {
                         404 => AppError::NotFound(message_or_path(&message, path)),
                         401 | 403 => AppError::Auth(if message.is_empty() {
@@ -126,13 +163,21 @@ impl AdminClient {
                     });
                 }
                 Err(error) => {
+                    let elapsed = started.elapsed().as_millis();
+                    let reason = condense_error(&error.to_string());
                     if attempts < 2
-                        && (error.is_connect() || error.is_timeout() || error.is_request())
+                        && ((idempotent
+                            && (error.is_connect() || error.is_timeout() || error.is_request()))
+                            || error.is_connect())
                     {
                         attempts += 1;
+                        pm_core::pm_warn!(
+                            "[admin] !! {label} 连接失败（{elapsed}ms），第 {attempts}/2 次重试：{reason}"
+                        );
                         tokio::time::sleep(Duration::from_millis(400 * attempts as u64)).await;
                         continue;
                     }
+                    pm_core::pm_warn!("[admin] !! {label} 连接失败（{elapsed}ms）：{reason}");
                     return Err(AppError::Network(format!(
                         "无法连接 {}：{}",
                         self.base,
@@ -264,20 +309,36 @@ impl AdminClient {
             form = form.part("data", part);
         }
 
+        let started = std::time::Instant::now();
+        pm_core::pm_log!("[admin] -> POST {path} (multipart)");
         let mut builder = self.http.post(self.url(path)).multipart(form);
         if let Some(token) = &self.auth_params {
             builder = builder.header("Authorization", format!("Bearer {token}"));
         }
-        let response = builder
-            .send()
-            .await
-            .map_err(|e| AppError::Network(format!("上传 {} 失败：{e}", path)))?;
+        let response = match builder.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                pm_core::pm_warn!(
+                    "[admin] !! POST {path} 上传失败（{}ms）：{}",
+                    started.elapsed().as_millis(),
+                    condense_error(&error.to_string())
+                );
+                return Err(AppError::Network(format!("上传 {path} 失败：{error}")));
+            }
+        };
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
+        let elapsed = started.elapsed().as_millis();
         if status.is_success() {
+            pm_core::pm_log!("[admin] <- POST {path} {} {elapsed}ms", status.as_u16());
             return Ok(text);
         }
         let message = condense_error(&text);
+        pm_core::pm_warn!(
+            "[admin] !! POST {path} {} {elapsed}ms：{}",
+            status.as_u16(),
+            message_or_path(&message, path)
+        );
         Err(match status.as_u16() {
             404 => AppError::NotFound(message_or_path(&message, path)),
             401 | 403 => AppError::Auth(format!(
@@ -295,7 +356,10 @@ impl AdminClient {
     /// 原样返回响应体文本（函数 trigger 的输出不是 JSON）。
     pub async fn post_form_raw(&self, path: &str, form: &[(&str, &str)]) -> AppResult<String> {
         let mut attempts = 0;
+        let label = format!("POST {path}");
         loop {
+            let started = std::time::Instant::now();
+            pm_core::pm_log!("[admin] -> {label}");
             let _permit = self
                 .limit
                 .acquire()
@@ -313,7 +377,9 @@ impl AdminClient {
             match outcome {
                 Ok(response) => {
                     let status = response.status();
+                    let elapsed = started.elapsed().as_millis();
                     if status.is_success() {
+                        pm_core::pm_log!("[admin] <- {label} {} {elapsed}ms", status.as_u16());
                         return Ok(response.text().await.unwrap_or_default());
                     }
                     let text = response.text().await.unwrap_or_default();
@@ -323,6 +389,11 @@ impl AdminClient {
                         tokio::time::sleep(Duration::from_millis(400 * attempts as u64)).await;
                         continue;
                     }
+                    pm_core::pm_warn!(
+                        "[admin] !! {label} {} {elapsed}ms：{}",
+                        status.as_u16(),
+                        message_or_path(&message, path)
+                    );
                     return Err(match status.as_u16() {
                         404 => AppError::NotFound(message_or_path(&message, path)),
                         401 | 403 => AppError::Auth(if message.is_empty() {
@@ -337,11 +408,16 @@ impl AdminClient {
                     });
                 }
                 Err(error) => {
+                    pm_core::pm_warn!(
+                        "[admin] !! {label} 连接失败（{}ms）：{}",
+                        started.elapsed().as_millis(),
+                        condense_error(&error.to_string())
+                    );
                     return Err(AppError::Network(format!(
                         "无法连接 {}：{}",
                         self.base,
                         condense_error(&error.to_string())
-                    )))
+                    )));
                 }
             }
         }
@@ -357,6 +433,7 @@ impl AdminClient {
                 .map_err(|e| AppError::Other(format!("响应为空且无法按期望类型解析: {e}")));
         }
         serde_json::from_slice(&bytes).map_err(|e| {
+            pm_core::pm_warn!("[admin] 响应解析失败：{e}");
             AppError::Other(format!(
                 "解析 broker 响应失败: {e}；响应前 200 字节：{}",
                 String::from_utf8_lossy(&bytes[..bytes.len().min(200)])
@@ -384,6 +461,11 @@ impl AdminClient {
                 }
             }
         }
+        pm_core::pm_warn!(
+            "[admin] 健康检查失败 base={}（已尝试 {} 个端点）",
+            pm_core::redact_endpoint(&self.base),
+            ENDPOINTS.len()
+        );
         false
     }
 
@@ -442,7 +524,10 @@ impl AdminClient {
             return ConnectionTest {
                 connected: false,
                 version: None,
-                error: Some("health check 失败：所有探测端点均不可用".into()),
+                error: Some(format!(
+                    "无法连接 Admin REST（{}）：/clusters、/tenants、/brokers/health、/admin/healthcheck 四个探测端点均失败。请检查 webServiceUrl 端口、TLS 证书与 Token；每次请求的状态码与耗时见「设置 → 日志」。",
+                    pm_core::redact_endpoint(&self.base)
+                )),
             };
         }
         ConnectionTest {

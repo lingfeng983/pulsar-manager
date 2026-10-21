@@ -25,12 +25,16 @@ interface ClusterState {
 
     // Async actions
     fetchClusters: () => Promise<void>;
-    refreshClusterStatus: () => Promise<boolean>;
+    refreshClusterStatus: (force?: boolean) => Promise<boolean>;
     addClusterAsync: (config: Omit<ClusterConfig, 'id'>) => Promise<ClusterConfig | null>;
     updateClusterAsync: (id: string, config: Partial<ClusterConfig>) => Promise<boolean>;
     deleteClusterAsync: (id: string) => Promise<boolean>;
     testConnection: (config: ClusterConfig) => Promise<{connected: boolean; version?: string} | null>;
 }
+
+// 在途的探活轮次。首屏挂载与用户点刷新挨得极近时复用同一轮；
+// force=true 表示「等这一轮结束后再跑一轮」，用于保存后必须拿到新配置结果。
+let statusRefresh: Promise<boolean> | null = null;
 
 export const useClusterStore = create<ClusterState>((set, get) => ({
     clusters: [],
@@ -79,24 +83,39 @@ export const useClusterStore = create<ClusterState>((set, get) => ({
 
     // 逐集群探活并回整份列表。已经在探的时候直接复用这一轮：首屏挂载与用户点刷新
     // 挨得极近，起两轮就是双倍打 broker。
-    refreshClusterStatus: async () => {
-        if (get().checking) {
-            return true;
-        }
-        set({checking: true});
-        try {
-            const response = await window.electronAPI.cluster.checkStatus();
-            if (response.success && response.data) {
-                set({clusters: response.data as ClusterConfig[]});
-                return true;
+    refreshClusterStatus: async (force = false) => {
+        if (statusRefresh) {
+            if (!force) {
+                return statusRefresh;
             }
-            // 不写 error：列表已经在页面上显示着，探活这一轮失败不该把它换成整页错误块，
-            // 由调用方弹一条 toast 就够了。
-            return false;
-        } catch {
-            return false;
+            // 等上一轮落地再重新探一次：保存后必须看到新配置的结果，
+            // 不能把旧一轮的响应当成「刷新成功」。
+            await statusRefresh;
+        }
+        const run = (async () => {
+            set({checking: true});
+            try {
+                const response = await window.electronAPI.cluster.checkStatus();
+                if (response.success && response.data) {
+                    set({clusters: response.data as ClusterConfig[]});
+                    return true;
+                }
+                // 不写 error：列表已经在页面上显示着，探活这一轮失败不该把它换成整页错误块，
+                // 由调用方弹一条 toast 就够了。
+                return false;
+            } catch {
+                return false;
+            } finally {
+                set({checking: false});
+            }
+        })();
+        statusRefresh = run;
+        try {
+            return await run;
         } finally {
-            set({checking: false});
+            if (statusRefresh === run) {
+                statusRefresh = null;
+            }
         }
     },
 
@@ -105,13 +124,9 @@ export const useClusterStore = create<ClusterState>((set, get) => ({
         try {
             const response = await window.electronAPI.cluster.add(config);
             if (response.success && response.data) {
-                const newCluster: ClusterConfig = {
-                    ...config,
-                    id: response.data.id,
-                    status: 'disconnected',
-                    createdAt: new Date().toISOString(),
-                    updatedAt: new Date().toISOString(),
-                };
+                // 用主进程落库后的视图，别再写死 status='disconnected'：
+                // 那会让刚测通、刚添加的集群立刻显示成离线。
+                const newCluster: ClusterConfig = {...config, ...response.data};
                 get().addCluster(newCluster);
                 set({loading: false});
                 return newCluster;
@@ -147,7 +162,10 @@ export const useClusterStore = create<ClusterState>((set, get) => ({
         set({loading: true, error: null});
         try {
             const response = await window.electronAPI.cluster.delete(id);
-            if (response.success) {
+            // 目标状态是"这个集群不在列表里"：后端已经不存在时也算删除成功。
+            // 否则用户重试一次就会收到 NOT_FOUND，弹一堆"删除失败"。
+            const alreadyGone = !response.success && response.code === 'NOT_FOUND';
+            if (response.success || alreadyGone) {
                 get().deleteCluster(id);
                 set({loading: false});
                 return true;

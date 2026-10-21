@@ -711,10 +711,14 @@ declare global {
                 add: (config: ClusterConfigDraft) => Promise<APIResponse<ClusterConfig>>;
                 update: (id: string, config: ClusterConfigDraft) => Promise<APIResponse<ClusterConfig>>;
                 delete: (id: string) => Promise<APIResponse<void>>;
-                testConnection: (
-                    config: ClusterConfigDraft,
-                ) => Promise<
-                    APIResponse<{connected: boolean; version?: string; sshConfigId?: string; k8sConfigId?: string}>
+                testConnection: (config: ClusterConfigDraft) => Promise<
+                    APIResponse<{
+                        connected: boolean;
+                        version?: string;
+                        error?: string;
+                        sshConfigId?: string;
+                        k8sConfigId?: string;
+                    }>
                 >;
             };
             resources: {

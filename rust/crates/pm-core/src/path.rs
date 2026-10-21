@@ -14,7 +14,12 @@ const HTTPS_PORTS: (u16, u16) = (6651, 8443);
 /// 2. 否则把二进制口映射到 HTTP 口（6650→8080 / 6651→8443），不能把 6650 原样当
 ///    Admin 地址用——那是「地址明明填对了，测试连接就是失败」的根因。
 pub fn resolve_base_url(config: &AdminConfig) -> AppResult<String> {
-    if let Some(web) = config.web_service_url.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(web) = config
+        .web_service_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         if config.tls_enabled && !web.to_ascii_lowercase().starts_with("https://") {
             return Err(AppError::config(format!(
                 "TLS 已开启，但 Admin API 地址不是 HTTPS（{web}）。请改用 https:// 地址或关闭 TLS。"
@@ -52,12 +57,34 @@ pub fn resolve_base_url(config: &AdminConfig) -> AppResult<String> {
     Ok(url.to_string().trim_end_matches('/').to_string())
 }
 
+/// 写日志用的服务地址：去掉 userinfo 与 query/fragment。
+///
+/// serviceUrl / webServiceUrl 可能带 `user:pass@` 或 `?token=...`，原样进日志
+/// 等于把凭据抄到磁盘上；这里只保留 scheme + host + path，够定位集群就行。
+pub fn redact_endpoint(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let without_query = trimmed.split(['?', '#']).next().unwrap_or(trimmed);
+    if let Some((scheme, rest)) = without_query.split_once("://") {
+        // 只能在 scheme 之后切 userinfo，否则会把 scheme 一起切掉
+        let host = rest.rsplit('@').next().unwrap_or(rest);
+        format!("{scheme}://{host}")
+    } else {
+        without_query
+            .rsplit('@')
+            .next()
+            .unwrap_or(without_query)
+            .to_string()
+    }
+}
+
 /// 把单个路径段编码成不可越界的形态（`/`、`..`、空格、`#` 都必须被转义）。
 pub fn seg(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.as_bytes() {
         match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(*byte as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char)
+            }
             _ => out.push_str(&format!("%{byte:02X}")),
         }
     }
@@ -174,13 +201,20 @@ mod tests {
 
     #[test]
     fn explicit_web_url_wins() {
-        let base = resolve_base_url(&cfg("pulsar://host:6650", Some("http://admin:8080/"), false)).unwrap();
+        let base = resolve_base_url(&cfg(
+            "pulsar://host:6650",
+            Some("http://admin:8080/"),
+            false,
+        ))
+        .unwrap();
         assert_eq!(base, "http://admin:8080");
     }
 
     #[test]
     fn tls_rejects_plain_http_web_url() {
-        assert!(resolve_base_url(&cfg("pulsar://host:6650", Some("http://admin:8080"), true)).is_err());
+        assert!(
+            resolve_base_url(&cfg("pulsar://host:6650", Some("http://admin:8080"), true)).is_err()
+        );
     }
 
     #[test]
@@ -188,11 +222,27 @@ mod tests {
         let path = TopicPath::parse("persistent://public/default/my-topic").unwrap();
         assert_eq!(path.tenant, "public");
         assert_eq!(path.short_name(), "my-topic");
-        assert_eq!(path.admin_base(), "/admin/v2/persistent/public/default/my-topic");
+        assert_eq!(
+            path.admin_base(),
+            "/admin/v2/persistent/public/default/my-topic"
+        );
     }
 
     #[test]
     fn encodes_reserved_segment_chars() {
         assert_eq!(seg("a/b c"), "a%2Fb%20c");
+    }
+
+    #[test]
+    fn redacts_credentials_and_query_from_logged_endpoints() {
+        assert_eq!(
+            redact_endpoint("pulsar://admin:secret@host:6650?token=abc"),
+            "pulsar://host:6650"
+        );
+        assert_eq!(
+            redact_endpoint("https://host:8443/admin/v2/tenants"),
+            "https://host:8443/admin/v2/tenants"
+        );
+        assert_eq!(redact_endpoint("host:6650"), "host:6650");
     }
 }

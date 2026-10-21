@@ -149,9 +149,13 @@ impl SessionRegistry {
     pub async fn ack(&self, session_id: &str, seqs: Vec<u64>, cumulative: bool) -> AppResult<()> {
         let tx = self.sender(session_id)?;
         let (done, wait) = oneshot::channel();
-        tx.send(Command::Ack { seqs, cumulative, done })
-            .await
-            .map_err(|_| AppError::Other("会话已经结束了".into()))?;
+        tx.send(Command::Ack {
+            seqs,
+            cumulative,
+            done,
+        })
+        .await
+        .map_err(|_| AppError::Other("会话已经结束了".into()))?;
         wait.await
             .map_err(|_| AppError::Other("会话已经结束了".into()))?
     }
@@ -200,10 +204,20 @@ impl SessionRegistry {
 pub async fn start_consume(
     registry: Arc<SessionRegistry>,
     config: &AdminConfig,
-    options: ConsumeOptions,
+    mut options: ConsumeOptions,
     emit: Emit,
 ) -> AppResult<String> {
     let client = NativeClient::connect(config).await?;
+    // 先把最终名字定下来再交给 native：否则 broker 侧看到的随机名与界面
+    // 展示的名字会是两个不同的值，用户按名字排查消费者时对不上。
+    let consumer_name = options
+        .consumer_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("pulsar-manager-{}", &pm_core::new_id()[..8]));
+    options.consumer_name = Some(consumer_name.clone());
     let mut consumer = client.open_consumer(&options).await?;
 
     let session_id = pm_core::new_id();
@@ -211,7 +225,6 @@ pub async fn start_consume(
     let pending = Arc::new(AtomicI64::new(0));
     let (tx, mut rx) = mpsc::channel::<Command>(64);
 
-    let consumer_name = format!("pulsar-manager-{}", &session_id[..8]);
     registry.insert(
         session_id.clone(),
         Entry {
@@ -280,38 +293,78 @@ pub async fn start_consume(
                     buffer_bytes += message.data_bytes;
                     buffer.push(message);
                     received.fetch_add(1, Ordering::Relaxed);
-                    let hit_limit = max_messages > 0 && received.load(Ordering::Relaxed) >= max_messages;
+                    let hit_limit =
+                        max_messages > 0 && received.load(Ordering::Relaxed) >= max_messages;
                     if buffer.len() >= BATCH_SIZE
                         || buffer_bytes >= BATCH_MAX_BYTES
                         || last_flush.elapsed() >= Duration::from_millis(BATCH_FLUSH_MS)
                     {
                         // 手动确认模式下未确认条数就是待确认队列长度
                         pending.store(buffer.len() as i64, Ordering::Relaxed);
-                        flush(&task_emit, CONSUME_BATCH, &task_id, &mut buffer, &mut buffer_bytes, &mut last_flush);
+                        flush(
+                            &task_emit,
+                            CONSUME_BATCH,
+                            &task_id,
+                            &mut buffer,
+                            &mut buffer_bytes,
+                            &mut last_flush,
+                        );
                     }
                     if hit_limit {
-                        flush(&task_emit, CONSUME_BATCH, &task_id, &mut buffer, &mut buffer_bytes, &mut last_flush);
+                        flush(
+                            &task_emit,
+                            CONSUME_BATCH,
+                            &task_id,
+                            &mut buffer,
+                            &mut buffer_bytes,
+                            &mut last_flush,
+                        );
                         reason = "completed".into();
                         break;
                     }
                 }
                 Event::Item(Some(Err(error))) => {
-                    flush(&task_emit, CONSUME_BATCH, &task_id, &mut buffer, &mut buffer_bytes, &mut last_flush);
+                    flush(
+                        &task_emit,
+                        CONSUME_BATCH,
+                        &task_id,
+                        &mut buffer,
+                        &mut buffer_bytes,
+                        &mut last_flush,
+                    );
                     reason = "error".into();
                     detail = Some(error.to_string());
                     break;
                 }
                 Event::Item(None) => {
-                    flush(&task_emit, CONSUME_BATCH, &task_id, &mut buffer, &mut buffer_bytes, &mut last_flush);
+                    flush(
+                        &task_emit,
+                        CONSUME_BATCH,
+                        &task_id,
+                        &mut buffer,
+                        &mut buffer_bytes,
+                        &mut last_flush,
+                    );
                     reason = "completed".into();
                     break;
                 }
                 Event::Cmd(Some(Command::Stop)) | Event::Cmd(None) => {
-                    flush(&task_emit, CONSUME_BATCH, &task_id, &mut buffer, &mut buffer_bytes, &mut last_flush);
+                    flush(
+                        &task_emit,
+                        CONSUME_BATCH,
+                        &task_id,
+                        &mut buffer,
+                        &mut buffer_bytes,
+                        &mut last_flush,
+                    );
                     reason = "stopped".into();
                     break;
                 }
-                Event::Cmd(Some(Command::Ack { seqs, cumulative, done })) => {
+                Event::Cmd(Some(Command::Ack {
+                    seqs,
+                    cumulative,
+                    done,
+                })) => {
                     let mut result = Ok(());
                     for seq in seqs {
                         let outcome = if cumulative {
@@ -341,9 +394,17 @@ pub async fn start_consume(
                     let _ = done.send(result);
                 }
                 Event::Tick => {
-                    if !buffer.is_empty() && last_flush.elapsed() >= Duration::from_millis(BATCH_FLUSH_MS)
+                    if !buffer.is_empty()
+                        && last_flush.elapsed() >= Duration::from_millis(BATCH_FLUSH_MS)
                     {
-                        flush(&task_emit, CONSUME_BATCH, &task_id, &mut buffer, &mut buffer_bytes, &mut last_flush);
+                        flush(
+                            &task_emit,
+                            CONSUME_BATCH,
+                            &task_id,
+                            &mut buffer,
+                            &mut buffer_bytes,
+                            &mut last_flush,
+                        );
                     }
                 }
             }
@@ -354,7 +415,11 @@ pub async fn start_consume(
         let event = SessionEndEvent {
             session_id: task_id,
             // 没走到任何 break 分支就退出循环时按「已停止」收尾
-            reason: if reason.is_empty() { "stopped".to_string() } else { reason },
+            reason: if reason.is_empty() {
+                "stopped".to_string()
+            } else {
+                reason
+            },
             detail,
         };
         if let Ok(payload) = serde_json::to_value(&event) {
@@ -389,7 +454,10 @@ pub async fn start_read(
 ) -> AppResult<String> {
     let scan = !matches!(request.from.as_str(), "earliest" | "latest");
     let client = NativeClient::connect(config).await?;
-    let mut reader = client.open_reader(&request.topic_uri, true).await?;
+    // latest 必须让 Reader 从末尾开始，否则「最新之后」会变成「最早 N 条」。
+    let mut reader = client
+        .open_reader(&request.topic_uri, request.from.as_str() != "latest")
+        .await?;
 
     let session_id = pm_core::new_id();
     let received = Arc::new(AtomicI64::new(0));
@@ -455,8 +523,9 @@ pub async fn start_read(
                         "timestamp" | "messageId" => {
                             if !collecting {
                                 collecting = match request.from.as_str() {
-                                    "timestamp" => message.publish_time
-                                        >= request.timestamp.unwrap_or(0),
+                                    "timestamp" => {
+                                        message.publish_time >= request.timestamp.unwrap_or(0)
+                                    }
                                     _ => request
                                         .message_id
                                         .as_deref()
@@ -468,7 +537,9 @@ pub async fn start_read(
                                         || started.elapsed()
                                             >= Duration::from_millis(SCAN_TIMEOUT_MS)
                                     {
-                                        detail = Some("没扫到起点（消息可能已过期），请换个起点再试".into());
+                                        detail = Some(
+                                            "没扫到起点（消息可能已过期），请换个起点再试".into(),
+                                        );
                                         reason = "error".into();
                                         break;
                                     }
@@ -484,8 +555,8 @@ pub async fn start_read(
                         }
                     }
 
-                    let hit_limit =
-                        request.max_messages > 0 && received.load(Ordering::Relaxed) >= request.max_messages;
+                    let hit_limit = request.max_messages > 0
+                        && received.load(Ordering::Relaxed) >= request.max_messages;
                     if buffer.len() >= BATCH_SIZE
                         || last_flush.elapsed() >= Duration::from_millis(BATCH_FLUSH_MS)
                         || hit_limit
@@ -506,14 +577,17 @@ pub async fn start_read(
                     reason = "stopped".into();
                     break;
                 }
-                Event::Cmd(Some(Command::Ack { done, .. })) | Event::Cmd(Some(Command::Nack { done, .. })) => {
+                Event::Cmd(Some(Command::Ack { done, .. }))
+                | Event::Cmd(Some(Command::Nack { done, .. })) => {
                     // 回溯读取不确认：明确回一句，而不是让界面以为成功了
                     let _ = done.send(Err(AppError::Unsupported(
                         "回溯读取不确认消息：它不建订阅，读完即撤".into(),
                     )));
                 }
                 Event::Tick => {
-                    if !buffer.is_empty() && last_flush.elapsed() >= Duration::from_millis(BATCH_FLUSH_MS) {
+                    if !buffer.is_empty()
+                        && last_flush.elapsed() >= Duration::from_millis(BATCH_FLUSH_MS)
+                    {
                         flush_read(&task_emit, &task_id, &mut buffer, &mut last_flush);
                     }
                 }
@@ -574,18 +648,34 @@ pub async fn send_once(config: &AdminConfig, options: &pm_core::SendOptions) -> 
     client.send(options).await
 }
 
-/// 偷看：给目标订阅临时挂一条 Shared 消费者的等效做法——建 Reader 读几条就撤。
+/// 偷看：在目标订阅上临时挂一条 Shared 消费者，读几条就撤，一条都不确认。
 ///
-/// Reader 不碰订阅游标，这是「只是看一眼」的正确语义；调用方已确认订阅存在，
-/// 所以这里不会顺手在集群上留下一个从最早位置开始的新订阅。
+/// 这里必须用订阅而不是 Reader：Reader 不碰订阅游标，会从 topic 最早位置读，
+/// 返回可能包含该订阅已经确认过的消息，与界面「看一眼待消费消息」的语义不符。
+/// 关闭时不 ack，未确认消息会回到积压。
 pub async fn peek(
     config: &AdminConfig,
     topic_uri: &str,
+    subscription: &str,
     max_messages: i64,
 ) -> AppResult<(Vec<Message>, Option<String>)> {
     let client = NativeClient::connect(config).await?;
-    let mut reader = client.open_reader(topic_uri, true).await?;
     let want = max_messages.clamp(1, 200);
+    let options = ConsumeOptions {
+        cluster_id: String::new(),
+        topic: topic_uri.to_string(),
+        subscription: subscription.to_string(),
+        subscription_type: "Shared".into(),
+        initial_position: "Earliest".into(),
+        auto_ack: false,
+        max_messages: want,
+        receiver_queue_size: Some(want.clamp(1, 1000)),
+        ack_timeout_ms: None,
+        n_ack_redeliver_timeout_ms: None,
+        consumer_name: None,
+        owner_id: None,
+    };
+    let mut consumer = client.open_consumer(&options).await?;
     let mut messages = Vec::new();
     let mut note = None;
     let deadline = Instant::now() + Duration::from_millis(5_000);
@@ -595,7 +685,7 @@ pub async fn peek(
             note = Some("取数超时：这段时间里没有新消息，已返回取到的部分".to_string());
             break;
         }
-        match tokio::time::timeout(remaining, reader.next()).await {
+        match tokio::time::timeout(remaining, consumer.next()).await {
             Err(_) => {
                 note = Some("取数超时：这段时间里没有新消息，已返回取到的部分".to_string());
                 break;
@@ -608,6 +698,6 @@ pub async fn peek(
             Ok(Some(Ok(message))) => messages.push(message),
         }
     }
-    reader.close().await;
+    consumer.close().await;
     Ok((messages, note))
 }

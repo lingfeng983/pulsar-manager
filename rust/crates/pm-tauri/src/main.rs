@@ -99,7 +99,15 @@ fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 fn main() {
     // 日志先于一切：初始化失败时它是唯一的证据，而且要在无控制台的 release
     // 里也留得下来。sink 安装不依赖数据库，先装不影响后续报错落盘。
-    logging::init();
+    let log_path = logging::init();
+    // 每次启动都留一条基准线：用户反馈"没有日志"时，先看有没有这一行；
+    // 有它但之后什么都没有，说明是业务没有触发，而不是 sink 没装上。
+    pm_core::pm_log!(
+        "[app] Pulsar Manager {} 启动，数据库 {}，日志 {}",
+        env!("CARGO_PKG_VERSION"),
+        pm_store::default_db_path().display(),
+        log_path.display()
+    );
 
     let context = match bridge::init() {
         Ok(context) => Arc::new(context),
@@ -110,10 +118,7 @@ fn main() {
             rfd::MessageDialog::new()
                 .set_level(rfd::MessageLevel::Error)
                 .set_title("Pulsar Manager 启动失败")
-                .set_description(format!(
-                    "{error}\n\n日志：{}",
-                    logging::path().display()
-                ))
+                .set_description(format!("{error}\n\n日志：{}", logging::path().display()))
                 .show();
             panic!("初始化失败：{error}");
         }
@@ -135,7 +140,11 @@ fn main() {
             // 后台任务（定时巡检、告警引擎）靠这个句柄往渲染进程推事件
             bridge::set_app_handle(app.handle());
             // 告警评估与定时巡检：两者都只在主进程跑，窗口收进托盘也照样按间隔执行
-            scheduler::start(app.state::<std::sync::Arc<pm_services::AppContext>>().inner().clone());
+            scheduler::start(
+                app.state::<std::sync::Arc<pm_services::AppContext>>()
+                    .inner()
+                    .clone(),
+            );
 
             create_tray(app.handle())?;
 

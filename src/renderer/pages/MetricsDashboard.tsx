@@ -412,7 +412,7 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                     return;
                 }
                 setTopicsLoading(false);
-                setTopics(response.success && response.data ? response.data.topics : []);
+                setTopics(response.success && response.data?.topics ? response.data.topics : []);
             })
             .catch(() => {
                 if (cancelled) {
@@ -456,7 +456,7 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                     const s = response.data;
                     const sample: AggregatedStats = {
                         totalTopics: 1,
-                        totalPartitions: s.partitions.length,
+                        totalPartitions: s.partitionList.length,
                         totalSubscriptions: Object.keys(s.subscriptions).length,
                         totalProducers: s.producers.length,
                         totalConsumers: s.consumers.length,

@@ -315,4 +315,5 @@ pub const COLUMN_PATCHES: &[(&str, &str, &str)] = &[
     ("inspections", "source", "TEXT NOT NULL DEFAULT 'manual'"),
     ("notify_channels", "mail_profile_id", "TEXT"),
     ("notify_channels", "recipients", "TEXT NOT NULL DEFAULT ''"),
+    ("ssh_tunnels", "host_fingerprint", "TEXT"),
 ];

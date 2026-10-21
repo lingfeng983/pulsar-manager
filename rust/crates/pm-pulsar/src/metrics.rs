@@ -1,6 +1,6 @@
 use futures::stream::{self, StreamExt};
 use pm_core::{
-    AggregatedStats, BrokerInfo, ClusterTopology, TopologyEdge, TopologyLimits, TopologyNode,
+    AggregatedStats, BrokerInfo, ClusterTopology, TopologyBroker, TopologyLimits, TopologyTopic,
 };
 use pm_core::{AppResult, Topic};
 
@@ -93,7 +93,7 @@ impl AdminClient {
         Ok(stats)
     }
 
-    /// 拓扑：broker 节点 + topic 节点，边表示承载关系。
+    /// 拓扑：broker 列表 + topic 明细，brokers[].topics 由 topic 的 ownerBrokers 反向聚合。
     /// 归属来源不可得时绝不编造映射——单 broker 集群下所有 topic 必然在它上面，
     /// 这是事实；多 broker 且无归属就标 `none` 让界面明确降级。
     pub async fn cluster_topology(
@@ -104,15 +104,14 @@ impl AdminClient {
         let max_topics = clamp(limits.and_then(|l| l.max_topics), MAX_TOPICS);
 
         let brokers = self.brokers().await?;
+        let single_broker = brokers.active_brokers.len() == 1;
         let mut topology = ClusterTopology {
-            nodes: brokers
+            brokers: brokers
                 .active_brokers
                 .iter()
-                .map(|name| TopologyNode {
-                    id: format!("broker:{name}"),
-                    label: name.clone(),
-                    kind: "broker".into(),
-                    ..Default::default()
+                .map(|name| TopologyBroker {
+                    name: name.clone(),
+                    topics: Vec::new(),
                 })
                 .collect(),
             ..Default::default()
@@ -132,7 +131,7 @@ impl AdminClient {
                 }
             }
         }
-        topology.truncated = collected.len() > max_topics;
+        let truncated = collected.len() > max_topics;
         collected.truncate(max_topics);
 
         let mut has_owner = false;
@@ -141,68 +140,85 @@ impl AdminClient {
                 .topic_stats(&tenant, &namespace, &topic.name, topic.persistent)
                 .await
                 .ok();
-            let owners = stats
+            let mut owners = stats
                 .as_ref()
                 .map(|s| s.owner_brokers.clone())
                 .unwrap_or_default();
             if !owners.is_empty() {
                 has_owner = true;
             }
-            let id = format!(
-                "topic:{}://{}",
-                if topic.persistent {
-                    "persistent"
-                } else {
-                    "non-persistent"
-                },
-                topic.name
-            );
-            topology.nodes.push(TopologyNode {
-                id: id.clone(),
-                label: topic.short_name().to_string(),
-                kind: "topic".into(),
-                value: stats
-                    .as_ref()
-                    .map(|s| s.msg_rate_in + s.msg_rate_out)
-                    .unwrap_or(0.0),
-                detail: format!("{tenant}/{namespace}"),
-            });
-            for owner in owners {
-                if let Some(broker) = topology
-                    .nodes
-                    .iter()
-                    .find(|node| node.kind == "broker" && broker_matches(&node.label, &owner))
-                {
-                    topology.edges.push(TopologyEdge {
-                        source: broker.id.clone(),
-                        target: id.clone(),
-                        ..Default::default()
-                    });
-                }
+            let partition_names = stats
+                .as_ref()
+                .map(|s| {
+                    if s.partition_list.is_empty() {
+                        topic.partitions.clone()
+                    } else {
+                        s.partition_list.clone()
+                    }
+                })
+                .unwrap_or_else(|| topic.partitions.clone());
+            let subscriptions = stats
+                .as_ref()
+                .map(|s| s.subscriptions.keys().cloned().collect())
+                .unwrap_or_default();
+            let producers = stats
+                .as_ref()
+                .map(|s| s.producers.len() as i64)
+                .unwrap_or(0);
+            let consumers = stats
+                .as_ref()
+                .map(|s| s.all_consumers().len() as i64)
+                .unwrap_or(0);
+            let msg_rate_in = stats.as_ref().map(|s| s.msg_rate_in).unwrap_or(0.0);
+            let msg_rate_out = stats.as_ref().map(|s| s.msg_rate_out).unwrap_or(0.0);
+            let backlog_size = stats
+                .as_ref()
+                .map(|s| s.subscriptions.values().map(|sub| sub.backlog_size).sum())
+                .unwrap_or(0);
+
+            // 单 broker 且一条真实归属都没有：所有 topic 必然在它上面，这是事实而不是猜测。
+            if owners.is_empty() && single_broker {
+                owners.push(brokers.active_brokers[0].clone());
             }
+
+            topology.topics.push(TopologyTopic {
+                name: topic.name.clone(),
+                tenant: tenant.clone(),
+                namespace: namespace.clone(),
+                persistent: topic.persistent,
+                partition_names,
+                owner_brokers: owners,
+                subscriptions,
+                producers,
+                consumers,
+                msg_rate_in,
+                msg_rate_out,
+                backlog_size,
+            });
         }
 
-        if !has_owner {
-            let broker_ids: Vec<String> = topology
-                .nodes
-                .iter()
-                .filter(|node| node.kind == "broker")
-                .map(|node| node.id.clone())
-                .collect();
-            if broker_ids.len() == 1 {
-                let topic_ids: Vec<String> = topology
-                    .nodes
-                    .iter()
-                    .filter(|node| node.kind == "topic")
-                    .map(|node| node.id.clone())
-                    .collect();
-                for topic_id in topic_ids {
-                    topology.edges.push(TopologyEdge {
-                        source: broker_ids[0].clone(),
-                        target: topic_id,
-                        label: "single-broker".into(),
-                        ..Default::default()
-                    });
+        topology.ownership_source = if has_owner {
+            "brokerStats".into()
+        } else if single_broker {
+            "singleBroker".into()
+        } else {
+            "none".into()
+        };
+        if truncated {
+            pm_core::pm_warn!(
+                "[topology] topic 数量超过上限 {max_topics}，本次只返回前 {max_topics} 个"
+            );
+        }
+
+        // 反向聚合 broker → topic：只在能匹配上真实归属时才连线。
+        for topic in &topology.topics {
+            for owner in &topic.owner_brokers {
+                if let Some(broker) = topology
+                    .brokers
+                    .iter_mut()
+                    .find(|broker| broker_matches(&broker.name, owner))
+                {
+                    broker.topics.push(topic.name.clone());
                 }
             }
         }

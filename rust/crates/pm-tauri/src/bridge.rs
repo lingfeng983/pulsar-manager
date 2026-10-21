@@ -45,7 +45,9 @@ pub fn quit(code: i32) {
 static PICKED_PACKAGES: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
 
 pub fn remember_picked_package(path: &std::path::Path) {
-    let mut list = PICKED_PACKAGES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut list = PICKED_PACKAGES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let path = path.to_path_buf();
     if !list.iter().any(|item| item == &path) {
         list.push(path);
@@ -57,7 +59,9 @@ pub fn remember_picked_package(path: &std::path::Path) {
 }
 
 pub fn picked_package_allowed(path: &str) -> bool {
-    let list = PICKED_PACKAGES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let list = PICKED_PACKAGES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     list.iter().any(|item| item.to_string_lossy() == path)
 }
 
@@ -84,8 +88,9 @@ pub async fn rpc(
 }
 
 async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Value {
-    // 前端是否真的跑起来了，看这行日志最直接：白屏时如果一条都没有，
-    // 说明 JS 根本没执行（资源 404 / CSP 拦截），而不是接口报错。
+    // 方法名常开：排障时先看"界面到底有没有发请求"。args 默认不打——里面可能
+    // 有消息正文或凭据；需要时用 PM_RPC_LOG=1 打开完整载荷。
+    pm_core::pm_log!("[rpc] {method}");
     if std::env::var("PM_RPC_LOG").is_ok() {
         pm_core::pm_log!("[rpc] {method} args={args:?}");
     }
@@ -93,29 +98,22 @@ async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Value {
     let _ = &args;
 
     // 按业务域分发，命中即返回；未命中落到下面的兜底分支。
-    if let Some(value) =
-        crate::rpc::system::dispatch(context.clone(), method, args.clone()).await
+    if let Some(value) = crate::rpc::system::dispatch(context.clone(), method, args.clone()).await {
+        return value;
+    }
+    if let Some(value) = crate::rpc::resource::dispatch(context.clone(), method, args.clone()).await
     {
         return value;
     }
-    if let Some(value) =
-        crate::rpc::resource::dispatch(context.clone(), method, args.clone()).await
+    if let Some(value) = crate::rpc::cluster::dispatch(context.clone(), method, args.clone()).await
     {
         return value;
     }
-    if let Some(value) =
-        crate::rpc::cluster::dispatch(context.clone(), method, args.clone()).await
+    if let Some(value) = crate::rpc::observe::dispatch(context.clone(), method, args.clone()).await
     {
         return value;
     }
-    if let Some(value) =
-        crate::rpc::observe::dispatch(context.clone(), method, args.clone()).await
-    {
-        return value;
-    }
-    if let Some(value) =
-        crate::rpc::policy::dispatch(context.clone(), method, args.clone()).await
-    {
+    if let Some(value) = crate::rpc::policy::dispatch(context.clone(), method, args.clone()).await {
         return value;
     }
     if let Some(value) =
@@ -123,13 +121,11 @@ async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Value {
     {
         return value;
     }
-    if let Some(value) =
-        crate::rpc::inspect::dispatch(context.clone(), method, args.clone()).await
+    if let Some(value) = crate::rpc::inspect::dispatch(context.clone(), method, args.clone()).await
     {
         return value;
     }
-    if let Some(value) =
-        crate::rpc::message::dispatch(context.clone(), method, args.clone()).await
+    if let Some(value) = crate::rpc::message::dispatch(context.clone(), method, args.clone()).await
     {
         return value;
     }
@@ -181,15 +177,51 @@ pub(crate) fn fail(error: AppError) -> Value {
 }
 
 /// Rust 侧字段是 snake_case，前端契约是 camelCase，在这一层统一转换。
-/// 只转对象的键名，值里的字符串（比如策略 JSON）保持原样。
+/// 只转结构体字段名：`subscriptions` / `properties` / `partitions` / `raw`
+/// 这类值是「用户或 broker 定义键」的 map，键名必须原样保留，否则订阅名
+/// `my_sub` 会变成 `mySub`、消息属性 `order_id` 会变成 `orderId`。
 fn camelize(value: Value) -> Value {
+    camelize_value(value, false)
+}
+
+fn camelize_value(value: Value, preserve_keys: bool) -> Value {
     match value {
-        Value::Object(map) => Value::Object(
-            map.into_iter()
-                .map(|(key, value)| (snake_to_camel(&key), camelize(value)))
-                .collect(),
-        ),
-        Value::Array(items) => Value::Array(items.into_iter().map(camelize).collect()),
+        Value::Object(map) => {
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (key, value) in map {
+                if preserve_keys {
+                    out.insert(key, value);
+                    continue;
+                }
+                let dynamic_map =
+                    matches!(key.as_str(), "subscriptions" | "properties" | "partitions");
+                let value = if key == "raw" {
+                    // raw 是 broker 原文，整体保持原样（内部键可能也是用户数据）
+                    value
+                } else if dynamic_map {
+                    // 只保留这一层 map 的键，值仍然是结构体，要继续转字段名
+                    match value {
+                        Value::Object(inner) => Value::Object(
+                            inner
+                                .into_iter()
+                                .map(|(inner_key, inner_value)| {
+                                    (inner_key, camelize_value(inner_value, false))
+                                })
+                                .collect(),
+                        ),
+                        other => camelize_value(other, false),
+                    }
+                } else {
+                    camelize_value(value, false)
+                };
+                out.insert(snake_to_camel(&key), value);
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => items
+            .into_iter()
+            .map(|item| camelize_value(item, preserve_keys))
+            .collect(),
         other => other,
     }
 }
@@ -215,43 +247,15 @@ fn snake_to_camel(key: &str) -> String {
     out
 }
 
-/// 前端提交的是 camelCase，反序列化前要转回 snake_case。
-pub fn snakeize(value: Value) -> Value {
-    match value {
-        Value::Object(map) => Value::Object(
-            map.into_iter()
-                .map(|(key, value)| (camel_to_snake(&key), snakeize(value)))
-                .collect(),
-        ),
-        Value::Array(items) => Value::Array(items.into_iter().map(snakeize).collect()),
-        other => other,
-    }
-}
-
-fn camel_to_snake(key: &str) -> String {
-    let mut out = String::with_capacity(key.len() + 4);
-    for ch in key.chars() {
-        if ch.is_uppercase() {
-            out.push('_');
-            out.extend(ch.to_lowercase());
-        } else {
-            out.push(ch);
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn converts_between_naming_styles() {
+    fn converts_response_keys_to_camel_case() {
         assert_eq!(snake_to_camel("service_url"), "serviceUrl");
         assert_eq!(snake_to_camel("has_auth_params"), "hasAuthParams");
         assert_eq!(snake_to_camel("name"), "name");
-        assert_eq!(camel_to_snake("serviceUrl"), "service_url");
-        assert_eq!(camel_to_snake("hasAuthParams"), "has_auth_params");
     }
 
     #[test]
@@ -266,5 +270,27 @@ mod tests {
         assert_eq!(output["nested"][0]["createdAt"], "t");
         // 值里的下划线不能被动到
         assert_eq!(output["value"], "keep_key_literal");
+    }
+
+    #[test]
+    fn camelize_keeps_dynamic_map_keys() {
+        let input = json!({
+            "subscriptions": { "my_sub": { "msg_backlog": 3 } },
+            "properties": { "order_id": "42" },
+            "partitions": { "persistent://t/ns/topic-partition-0": { "msg_rate_in": 1 } },
+            "raw": { "custom_key": { "nested_key": true } }
+        });
+        let output = camelize(input);
+        // 结构体字段仍然转 camelCase
+        assert_eq!(output["subscriptions"]["my_sub"]["msgBacklog"], 3);
+        // map 的键必须原样保留
+        assert!(output["subscriptions"].get("my_sub").is_some());
+        assert!(output["subscriptions"].get("mySub").is_none());
+        assert_eq!(output["properties"]["order_id"], "42");
+        assert!(output["partitions"]
+            .get("persistent://t/ns/topic-partition-0")
+            .is_some());
+        assert!(output["raw"].get("custom_key").is_some());
+        assert!(output["raw"]["custom_key"].get("nested_key").is_some());
     }
 }

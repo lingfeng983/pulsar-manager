@@ -41,7 +41,11 @@ pub struct Cluster {
 
 impl Cluster {
     /// 从 serviceUrl 推 Admin API 地址（见 [`crate::path::resolve_base_url`] 的说明）。
-    pub fn admin_config(&self, auth_params: Option<String>, trust_certs: Option<String>) -> AdminConfig {
+    pub fn admin_config(
+        &self,
+        auth_params: Option<String>,
+        trust_certs: Option<String>,
+    ) -> AdminConfig {
         AdminConfig {
             service_url: self.service_url.clone(),
             web_service_url: self.web_service_url.clone(),
@@ -82,14 +86,16 @@ pub struct ClusterView {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+// default 让旧版前端/导入文件只带部分字段时也能落到"空值 + 一条人话校验"，
+// 而不是一句 missing field 把整个保存流程挡在反序列化阶段。
+#[serde(rename_all = "camelCase", default)]
 pub struct ClusterDraft {
     pub id: Option<String>,
     pub name: String,
     pub service_url: String,
     pub web_service_url: Option<String>,
     pub auth_plugin: Option<String>,
-    /// 明文。`None` 表示「不改动已保存的凭据」，空串表示「清除」。
+    /// 明文。`None` 或空串表示「不改动已保存的凭据」。
     pub auth_params: Option<String>,
     pub tls_enabled: bool,
     pub tls_trust_certs: Option<String>,
@@ -124,6 +130,8 @@ pub struct ConnectionTest {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Tenant {
+    /// broker 的单租户详情不返回 name（只在外层路径里），读出来后由调用方回填。
+    #[serde(default)]
     pub name: String,
     #[serde(default)]
     pub admin_roles: Vec<String>,
@@ -152,6 +160,8 @@ impl Topic {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClusterInfo {
+    /// broker 的集群详情不返回 name，路径里的名字才是唯一来源。
+    #[serde(default)]
     pub name: String,
     pub service_url: String,
     pub broker_service_url: Option<String>,
@@ -368,36 +378,51 @@ pub struct MetricsPoint {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TopologyNode {
-    pub id: String,
-    pub label: String,
-    pub kind: String,
+pub struct TopologyBroker {
+    pub name: String,
+    /// 该 broker 承载的 topic 全路径；归属不可得时为空数组。
     #[serde(default)]
-    pub value: f64,
-    #[serde(default)]
-    pub detail: String,
+    pub topics: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TopologyEdge {
-    pub source: String,
-    pub target: String,
+pub struct TopologyTopic {
+    /// tenant/namespace/topic
+    pub name: String,
+    pub tenant: String,
+    pub namespace: String,
+    pub persistent: bool,
     #[serde(default)]
-    pub label: String,
+    pub partition_names: Vec<String>,
     #[serde(default)]
-    pub value: f64,
+    pub owner_brokers: Vec<String>,
+    #[serde(default)]
+    pub subscriptions: Vec<String>,
+    #[serde(default)]
+    pub producers: i64,
+    #[serde(default)]
+    pub consumers: i64,
+    #[serde(default)]
+    pub msg_rate_in: f64,
+    #[serde(default)]
+    pub msg_rate_out: f64,
+    #[serde(default)]
+    pub backlog_size: i64,
 }
 
+/// 与渲染层 `ClusterTopology` 契约一致：brokers 按 topic 的 ownerBrokers 反向聚合，
+/// `ownership_source` 明确告诉界面这是真实归属（brokerStats）、单 broker 推断
+/// （singleBroker）还是拿不到（none），不编造全连接图。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClusterTopology {
     #[serde(default)]
-    pub nodes: Vec<TopologyNode>,
+    pub brokers: Vec<TopologyBroker>,
     #[serde(default)]
-    pub edges: Vec<TopologyEdge>,
+    pub topics: Vec<TopologyTopic>,
     #[serde(default)]
-    pub truncated: bool,
+    pub ownership_source: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1022,4 +1047,29 @@ pub struct OperationLog {
     pub result: Option<String>,
     pub error_message: Option<String>,
     pub created_at: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn broker_tenant_detail_without_name_deserializes() {
+        // 实测 Pulsar 3.3.9：GET /admin/v2/tenants/public 不含 name
+        let tenant: Tenant =
+            serde_json::from_str(r#"{"adminRoles":[],"allowedClusters":["standalone"]}"#).unwrap();
+        assert!(tenant.name.is_empty());
+        assert_eq!(tenant.allowed_clusters, vec!["standalone"]);
+    }
+
+    #[test]
+    fn broker_cluster_detail_without_name_deserializes() {
+        // GET /admin/v2/clusters/standalone 只返回 serviceUrl / brokerServiceUrl
+        let info: ClusterInfo = serde_json::from_str(
+            r#"{"serviceUrl":"pulsar://localhost:6650","brokerServiceUrl":"pulsar://localhost:6650"}"#,
+        )
+        .unwrap();
+        assert!(info.name.is_empty());
+        assert_eq!(info.service_url, "pulsar://localhost:6650");
+    }
 }

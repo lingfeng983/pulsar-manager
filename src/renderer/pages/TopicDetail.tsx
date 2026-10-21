@@ -708,7 +708,7 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                   msgRateOut: sub.msgRateOut,
                   msgThroughputOut: sub.msgThroughputOut,
                   unackedMessages: sub.unackedMessages || 0,
-                  consumerCount: sub.consumerCount || 0,
+                  consumerCount: sub.consumers?.length ?? 0,
                   type: sub.type || 'exclusive',
               }))
             : [];

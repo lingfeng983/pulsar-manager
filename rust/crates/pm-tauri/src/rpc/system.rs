@@ -2,7 +2,7 @@
 //!
 //! 与 Electron 版的 handler 一一对应，返回值结构保持逐字一致。
 
-use pm_core::AppError;
+use pm_core::{AppError, ClusterDraft};
 use pm_services::AppContext;
 use pm_store::{logs, settings};
 use serde_json::{json, Map, Value};
@@ -37,7 +37,9 @@ fn default_settings() -> Map<String, Value> {
 fn merged_settings(context: &AppContext) -> pm_core::AppResult<Value> {
     let mut merged = default_settings();
     for (key, raw) in settings::raw_all(&context.store)? {
-        let Some(slot) = merged.get_mut(&key) else { continue };
+        let Some(slot) = merged.get_mut(&key) else {
+            continue;
+        };
         let decoded = match slot {
             Value::Bool(_) => match raw.as_str() {
                 "true" => Some(json!(true)),
@@ -146,12 +148,34 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
             let context = context.clone();
             blocking(move || {
                 let settings = merged_settings(&context)?;
+                // 导出不含任何凭据：view 里只有 hasAuthParams/hasTlsTrustCerts。
+                let clusters: Vec<Value> = context
+                    .list_clusters()?
+                    .into_iter()
+                    .map(|cluster| {
+                        json!({
+                            "name": cluster.name,
+                            "serviceUrl": cluster.service_url,
+                            "webServiceUrl": cluster.web_service_url,
+                            "authPlugin": cluster.auth_plugin,
+                            "tlsEnabled": cluster.tls_enabled,
+                            "adminApiTimeout": cluster.admin_api_timeout,
+                            // 隧道凭据本来就不在集群视图里；导出条目留空，
+                            // 导入后由用户在集群表单里重新确认。
+                            "ssh": Value::Null,
+                            "k8s": Value::Null,
+                        })
+                    })
+                    .collect();
+                let shortcuts = settings::get(&context.store, "shortcuts")?
+                    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                    .unwrap_or(Value::Null);
                 Ok(json!({
                     "format": "pulsar-manager-config",
                     "version": 1,
                     "settings": settings,
-                    "clusters": [],
-                    "shortcuts": Value::Null,
+                    "clusters": clusters,
+                    "shortcuts": shortcuts,
                 }))
             })
             .await
@@ -160,10 +184,12 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
             let bundle = args.first().cloned().unwrap_or_else(|| json!({}));
             let context = context.clone();
             blocking(move || {
+                let mut settings_applied = false;
                 if let Some(settings) = bundle.get("settings").and_then(Value::as_object) {
                     for (key, value) in settings {
                         write_setting(&context, key, value)?;
                     }
+                    settings_applied = true;
                     // 导入的日志目录立即生效，不用等重启；空串回默认目录
                     if let Some(value) = settings.get("logDirectory").and_then(Value::as_str) {
                         let dir = if value.trim().is_empty() {
@@ -174,14 +200,86 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
                         crate::logging::set_dir(&dir)?;
                     }
                 }
-                merged_settings(&context)
+
+                let mut clusters_imported = 0i64;
+                let mut clusters_skipped: Vec<String> = Vec::new();
+                if let Some(items) = bundle.get("clusters").and_then(Value::as_array) {
+                    let mut existing: Vec<String> = context
+                        .list_clusters()?
+                        .into_iter()
+                        .map(|cluster| cluster.name)
+                        .collect();
+                    for item in items {
+                        let name = item
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .trim()
+                            .to_string();
+                        if name.is_empty() {
+                            continue;
+                        }
+                        if existing.iter().any(|value| value == &name) {
+                            clusters_skipped.push(name);
+                            continue;
+                        }
+                        let draft = ClusterDraft {
+                            name: name.clone(),
+                            service_url: item
+                                .get("serviceUrl")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                            web_service_url: item
+                                .get("webServiceUrl")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                            auth_plugin: item
+                                .get("authPlugin")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                            tls_enabled: item
+                                .get("tlsEnabled")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false),
+                            admin_api_timeout: item.get("adminApiTimeout").and_then(Value::as_i64),
+                            ..Default::default()
+                        };
+                        match context.save_cluster(&draft) {
+                            Ok(_) => {
+                                clusters_imported += 1;
+                                existing.push(name);
+                            }
+                            Err(error) => clusters_skipped.push(format!("{name}（{error}）")),
+                        }
+                    }
+                }
+
+                let shortcuts_applied = match bundle.get("shortcuts") {
+                    Some(Value::Null) | None => false,
+                    Some(shortcuts) => {
+                        settings::set(&context.store, "shortcuts", &shortcuts.to_string())?;
+                        true
+                    }
+                };
+
+                Ok(json!({
+                    "settingsApplied": settings_applied,
+                    "clustersImported": clusters_imported,
+                    "clustersSkipped": clusters_skipped,
+                    "tunnelsImported": 0,
+                    "forwardsImported": 0,
+                    "shortcutsApplied": shortcuts_applied,
+                }))
             })
             .await
         }
         "config:clearLogs" => {
             let context = context.clone();
-            blocking(move || logs::clear(&context.store).map(|deleted| json!({ "deleted": deleted })))
-                .await
+            blocking(move || {
+                logs::clear(&context.store).map(|deleted| json!({ "deleted": deleted }))
+            })
+            .await
         }
 
         // ---------- 日志与版本 ----------
@@ -200,11 +298,17 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
                 .unwrap_or_else(pm_store::default_log_dir);
             let _ = std::fs::create_dir_all(&dir);
             #[cfg(target_os = "windows")]
-            let failure = std::process::Command::new("explorer").arg(&dir).spawn().err();
+            let failure = std::process::Command::new("explorer")
+                .arg(&dir)
+                .spawn()
+                .err();
             #[cfg(target_os = "macos")]
             let failure = std::process::Command::new("open").arg(&dir).spawn().err();
             #[cfg(all(unix, not(target_os = "macos")))]
-            let failure = std::process::Command::new("xdg-open").arg(&dir).spawn().err();
+            let failure = std::process::Command::new("xdg-open")
+                .arg(&dir)
+                .spawn()
+                .err();
             json!({
                 "success": true,
                 "data": {
@@ -271,10 +375,16 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
             }
         }
         "update:download" => {
-            let url = args.first().and_then(Value::as_str).unwrap_or("").to_string();
+            let url = args
+                .first()
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             let dir = pm_services::update::updates_dir(&context_dir());
             let emit: pm_services::messaging::Emit =
-                std::sync::Arc::new(|event: &str, payload: Value| crate::bridge::emit(event, payload));
+                std::sync::Arc::new(|event: &str, payload: Value| {
+                    crate::bridge::emit(event, payload)
+                });
             match pm_services::update::download(&url, &dir, emit).await {
                 Ok(file) => json!({ "success": true, "data": { "file": file } }),
                 Err(error) => crate::bridge::fail(error),
@@ -425,7 +535,10 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            let enabled = payload.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+            let enabled = payload
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let context = context.clone();
             blocking(move || pm_services::plugins::set_enabled(&context.store, &id, enabled)).await
         }
@@ -434,11 +547,17 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
             let dir = pm_services::plugins::plugins_dir();
             let _ = std::fs::create_dir_all(&dir);
             #[cfg(target_os = "windows")]
-            let failure = std::process::Command::new("explorer").arg(&dir).spawn().err();
+            let failure = std::process::Command::new("explorer")
+                .arg(&dir)
+                .spawn()
+                .err();
             #[cfg(target_os = "macos")]
             let failure = std::process::Command::new("open").arg(&dir).spawn().err();
             #[cfg(all(unix, not(target_os = "macos")))]
-            let failure = std::process::Command::new("xdg-open").arg(&dir).spawn().err();
+            let failure = std::process::Command::new("xdg-open")
+                .arg(&dir)
+                .spawn()
+                .err();
             json!({
                 "success": true,
                 "data": {
@@ -455,14 +574,19 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
             let picked = tokio::task::spawn_blocking(|| {
                 rfd::FileDialog::new()
                     .set_title("选择函数 / 连接器的包")
-                    .add_filter("常见的包（jar / nar / zip / py）", &["jar", "nar", "zip", "py"])
+                    .add_filter(
+                        "常见的包（jar / nar / zip / py）",
+                        &["jar", "nar", "zip", "py"],
+                    )
                     .pick_file()
             })
             .await;
             match picked {
                 Ok(None) => json!({ "success": true, "data": null }),
                 Ok(Some(path)) => match std::fs::metadata(&path) {
-                    Ok(meta) if !meta.is_file() => json!({ "success": false, "error": "选中的不是文件" }),
+                    Ok(meta) if !meta.is_file() => {
+                        json!({ "success": false, "error": "选中的不是文件" })
+                    }
                     Ok(meta) if meta.len() == 0 => json!({
                         "success": false,
                         "error": "这个文件是空的，worker 取过去也加载不了"
@@ -509,9 +633,7 @@ async fn export_logs(context: Shared) -> Value {
     let (items, runtime) = match snapshot {
         Ok(Ok(value)) => value,
         Ok(Err(error)) => return crate::bridge::fail(error),
-        Err(error) => {
-            return crate::bridge::fail(AppError::Other(format!("任务失败：{error}")))
-        }
+        Err(error) => return crate::bridge::fail(AppError::Other(format!("任务失败：{error}"))),
     };
     let operation_log_count = items.len();
 
@@ -530,9 +652,7 @@ async fn export_logs(context: Shared) -> Value {
     let path = match picked {
         Ok(None) => return json!({ "success": true, "data": null }),
         Ok(Some(path)) => path,
-        Err(error) => {
-            return crate::bridge::fail(AppError::Other(format!("对话框失败：{error}")))
-        }
+        Err(error) => return crate::bridge::fail(AppError::Other(format!("对话框失败：{error}"))),
     };
 
     let payload = json!({
@@ -566,20 +686,9 @@ async fn export_logs(context: Shared) -> Value {
     }
 }
 
-/// 旧一轮 + 当前一轮按时间顺序拼接；文件都读不到时给一句人话，导出包仍是合法 JSON。
+/// 运行时日志的滚动文件由 logging 模块统一命名，这里不重复拼 main.N.log。
 fn runtime_log_text() -> String {
-    let path = crate::logging::path();
-    let backup = path.with_file_name("main.1.log");
-    let mut text = String::new();
-    for file in [backup, path] {
-        if let Ok(content) = std::fs::read_to_string(&file) {
-            text.push_str(&content);
-        }
-    }
-    if text.is_empty() {
-        text.push_str("（还没有运行时日志）\n");
-    }
-    text
+    crate::logging::merged_text()
 }
 
 /// 数据目录：更新包落在 <userData>/updates，插件目录在 <userData>/plugins。
@@ -614,4 +723,3 @@ fn text_arg(args: &[Value], index: usize) -> String {
         .unwrap_or_default()
         .to_string()
 }
-

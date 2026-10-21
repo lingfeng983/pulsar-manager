@@ -3,17 +3,25 @@
 //! 会话登记表放在进程级（`OnceLock`）：它必须活得比单次 RPC 调用长，
 //! 而 AppContext 里都是「可重建、可丢弃」的东西，塞进去会让热重载把会话一起清掉。
 
-use std::sync::{Arc, OnceLock};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use pm_core::{AppError, SendOptions};
 use pm_services::messaging::{self, ConsumeSessionView, ReadRequest, SessionRegistry};
-use pm_services::producer::{self, FlowSpec, ProducerRegistry, SendItem};
+use pm_services::producer::{self, BenchmarkSpec, FlowSpec, ProducerRegistry, SendItem};
 use serde_json::{json, Value};
 
 use crate::bridge::{fail, ok, Shared};
 
 static SESSIONS: OnceLock<Arc<SessionRegistry>> = OnceLock::new();
 static PRODUCERS: OnceLock<Arc<ProducerRegistry>> = OnceLock::new();
+/// 正在跑的压测：runId → 取消标记。stop 只翻标记，任务自己收尾并推终态帧。
+static BENCHMARKS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
+
+fn benchmarks() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
+    BENCHMARKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 fn sessions() -> Arc<SessionRegistry> {
     SESSIONS
@@ -65,7 +73,14 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
                     ok(json!({"messageId": id}))
                 }
                 Err(error) => {
-                    record_send(&context, &options, 1, None, "failed", Some(error.to_string()));
+                    record_send(
+                        &context,
+                        &options,
+                        1,
+                        None,
+                        "failed",
+                        Some(error.to_string()),
+                    );
                     fail(error)
                 }
             }
@@ -125,8 +140,11 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
                 Ok(config) => config,
                 Err(payload) => return Some(payload),
             };
-            let max = params.get("maxMessages").and_then(Value::as_i64).unwrap_or(10);
-            match messaging::peek(&config, &topic_uri(&params), max).await {
+            let max = params
+                .get("maxMessages")
+                .and_then(Value::as_i64)
+                .unwrap_or(10);
+            match messaging::peek(&config, &topic_uri(&params), &subscription, max).await {
                 Ok((messages, note)) => ok(json!({"messages": messages, "note": note})),
                 Err(error) => fail(error),
             }
@@ -144,7 +162,10 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
                 subscription_type: string_of(&params, "subscriptionType"),
                 initial_position: string_of(&params, "initialPosition"),
                 auto_ack: boolean_of(&params, "autoAck", false),
-                max_messages: params.get("maxMessages").and_then(Value::as_i64).unwrap_or(0),
+                max_messages: params
+                    .get("maxMessages")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0),
                 receiver_queue_size: params.get("receiverQueueSize").and_then(Value::as_i64),
                 ack_timeout_ms: params.get("ackTimeoutMs").and_then(Value::as_i64),
                 n_ack_redeliver_timeout_ms: params
@@ -210,8 +231,14 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
                 topic_uri: topic_uri(&params),
                 from: string_of(&params, "from"),
                 timestamp: params.get("timestamp").and_then(Value::as_i64),
-                max_messages: params.get("maxMessages").and_then(Value::as_i64).unwrap_or(0),
-                recent_count: params.get("recentCount").and_then(Value::as_i64).unwrap_or(50),
+                max_messages: params
+                    .get("maxMessages")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0),
+                recent_count: params
+                    .get("recentCount")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(50),
                 message_id: optional(&params, "messageId"),
                 owner_id: optional(&params, "ownerId").unwrap_or_default(),
             };
@@ -283,12 +310,22 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
                     .and_then(Value::as_i64)
                     .unwrap_or(0),
             };
-            settle(producers().start_flow(&id, spec).await)
+            match producers().start_flow(&id, spec).await {
+                Ok(()) => match producers().view(&id) {
+                    Some(view) => ok(view),
+                    None => fail(AppError::Other("生产者会话已经结束".into())),
+                },
+                Err(error) => fail(error),
+            }
         }
         "producer:send" => {
             let id = string_of(&params, "sessionId");
             let template = params.get("template").cloned().unwrap_or_else(|| json!({}));
-            let count = params.get("count").and_then(Value::as_i64).unwrap_or(1).max(1);
+            let count = params
+                .get("count")
+                .and_then(Value::as_i64)
+                .unwrap_or(1)
+                .max(1);
             match build_items(&template, count, params.get("options")) {
                 Ok(items) => match producers().send(&id, items).await {
                     Ok(ids) => ok(json!({"messageIds": ids, "failures": []})),
@@ -304,7 +341,11 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
                 Err(payload) => return Some(payload),
             };
             let template = params.get("template").cloned().unwrap_or_else(|| json!({}));
-            let count = params.get("count").and_then(Value::as_i64).unwrap_or(1).max(1);
+            let count = params
+                .get("count")
+                .and_then(Value::as_i64)
+                .unwrap_or(1)
+                .max(1);
             let items = match build_items(&template, count, params.get("options")) {
                 Ok(items) => items,
                 Err(error) => return Some(fail(error)),
@@ -318,7 +359,14 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
                         message: String::new(),
                         ..Default::default()
                     };
-                    record_send(&context, &options, count, ids.first().cloned(), "success", None);
+                    record_send(
+                        &context,
+                        &options,
+                        count,
+                        ids.first().cloned(),
+                        "success",
+                        None,
+                    );
                     ok(json!({"messageIds": ids, "bytes": bytes, "failures": []}))
                 }
                 Err(error) => fail(error),
@@ -332,66 +380,103 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
                 Ok(config) => config,
                 Err(payload) => return Some(payload),
             };
-            let run_id = pm_core::new_id();
-            let template = params.get("template").cloned().unwrap_or_else(|| json!({}));
-            let spec = FlowSpec {
-                body: string_of(&template, "body"),
-                variables: variables_of(&template),
-                properties: map_of(&template, "properties"),
+            let total = params
+                .get("totalMessages")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            if total <= 0 {
+                return Some(fail(AppError::config("压测总条数必须大于 0")));
+            }
+            let spec = BenchmarkSpec {
+                producers: params.get("producers").and_then(Value::as_u64).unwrap_or(1) as usize,
+                total,
                 rate_per_sec: params
                     .get("ratePerSecond")
                     .and_then(Value::as_f64)
-                    .unwrap_or(1.0),
-                total: params
-                    .get("totalMessages")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0),
+                    .unwrap_or(0.0),
+                message_size_bytes: params
+                    .get("messageSizeBytes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize,
+                max_in_flight: params
+                    .get("maxInFlightPerProducer")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1) as usize,
+                batching: params
+                    .get("batchingEnabled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                compression: string_of(&params, "compression"),
+                consume_backlog: params
+                    .get("consumeBacklog")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                subscription: string_of(&params, "subscription"),
+                unsubscribe_after_run: params
+                    .get("unsubscribeAfterRun")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
             };
-            let duration = params
-                .get("durationSeconds")
-                .and_then(Value::as_i64)
-                .unwrap_or(0)
-                * 1000;
             let topic = topic_uri(&params);
+            let run_id = pm_core::new_id();
+            let cancel = Arc::new(AtomicBool::new(false));
+            if let Ok(mut runs) = benchmarks().lock() {
+                runs.insert(run_id.clone(), cancel.clone());
+            }
             let emit = emitter();
             let task_id = run_id.clone();
+            let task_topic = topic.clone();
             tokio::spawn(async move {
-                // 压测是「跑完才结束」的一次性任务：结束后再推一条 done，界面据此收尾
-                let outcome = producer::pump(&config, &topic, spec, duration, emit.clone(), &task_id).await;
-                let payload = match outcome {
-                    Ok(stats) => json!({
-                        "runId": task_id,
-                        "phase": "done",
-                        "sent": stats.sent,
-                        "failed": stats.failed,
-                        "bytesSent": stats.bytes_sent,
-                        "elapsedMs": stats.elapsed_ms,
-                        "msgPerSec": stats.msg_per_sec,
-                        "mbPerSec": stats.mb_per_sec,
-                        "latency": stats.latency,
-                        "lastError": stats.last_error,
-                        "done": true,
-                    }),
-                    Err(error) => json!({
-                        "runId": task_id,
-                        "phase": "done",
-                        "sent": 0,
-                        "failed": 0,
-                        "bytesSent": 0,
-                        "elapsedMs": 0,
-                        "latency": null,
-                        "lastError": error.to_string(),
-                        "done": true,
-                    }),
-                };
-                emit("benchmark:progress", payload);
+                let result = producer::run_benchmark(
+                    &config,
+                    &task_topic,
+                    spec,
+                    cancel,
+                    emit.clone(),
+                    &task_id,
+                )
+                .await;
+                if let Err(error) = result {
+                    emit(
+                        "benchmark:progress",
+                        json!({
+                            "runId": task_id,
+                            "phase": "error",
+                            "sent": 0,
+                            "failed": 0,
+                            "consumed": 0,
+                            "totalMessages": total,
+                            "messageSizeBytes": 0,
+                            "producerCount": 0,
+                            "bytesSent": 0,
+                            "elapsedMs": 0,
+                            "msgPerSec": 0.0,
+                            "mbPerSec": 0.0,
+                            "latency": null,
+                            "lastError": error.to_string(),
+                            "done": true,
+                        }),
+                    );
+                }
+                if let Ok(mut runs) = benchmarks().lock() {
+                    runs.remove(&task_id);
+                }
             });
-            ok(json!({"runId": run_id}))
+            ok(json!({"runId": run_id, "topic": topic}))
         }
         "benchmark:stop" => {
             let run_id = string_of(&params, "runId");
-            // 本轮压测跑在独立任务里，停止靠「标记 + 让它自己收尾」：这里只回一句已受理
-            ok(json!({"stopped": true, "runId": run_id}))
+            let stopped = benchmarks()
+                .lock()
+                .ok()
+                .and_then(|runs| runs.get(&run_id).cloned())
+                .map(|cancel| {
+                    cancel.store(true, Ordering::Relaxed);
+                    true
+                })
+                .unwrap_or(false);
+            // 任务自己会在收尾时推 stopped 终态帧；这里只确认标记已收到
+            ok(json!({"stopped": stopped, "runId": run_id}))
         }
 
         _ => return None,
@@ -427,7 +512,11 @@ fn consumer_snapshot(registry: &Arc<SessionRegistry>, session_id: &str) -> Value
 }
 
 /// 模板 -> 待发报文。逐条重新渲染：占位符里的随机量每次都要重算。
-fn build_items(template: &Value, count: i64, options: Option<&Value>) -> pm_core::AppResult<Vec<SendItem>> {
+fn build_items(
+    template: &Value,
+    count: i64,
+    options: Option<&Value>,
+) -> pm_core::AppResult<Vec<SendItem>> {
     let body = string_of(template, "body");
     let variables = variables_of(template);
     let properties = map_of(template, "properties");
@@ -464,7 +553,10 @@ fn message_options(options: Option<&Value>) -> (Option<String>, Option<i64>, Opt
         _ => None,
     };
     (
-        options.get("partitionKey").and_then(Value::as_str).map(str::to_string),
+        options
+            .get("partitionKey")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         event_time,
         deliver_at,
     )
@@ -542,10 +634,7 @@ fn short_topic(topic: &str) -> String {
     parts.last().copied().unwrap_or(stripped).to_string()
 }
 
-async fn connect(
-    context: &Shared,
-    cluster_id: &str,
-) -> Result<pm_core::AdminConfig, Value> {
+async fn connect(context: &Shared, cluster_id: &str) -> Result<pm_core::AdminConfig, Value> {
     let context = context.clone();
     let id = cluster_id.to_string();
     match tokio::task::spawn_blocking(move || context.connection_config(&id)).await {
@@ -591,7 +680,10 @@ fn optional(payload: &Value, key: &str) -> Option<String> {
 }
 
 fn boolean_of(payload: &Value, key: &str, fallback: bool) -> bool {
-    payload.get(key).and_then(Value::as_bool).unwrap_or(fallback)
+    payload
+        .get(key)
+        .and_then(Value::as_bool)
+        .unwrap_or(fallback)
 }
 
 fn map_of(payload: &Value, key: &str) -> std::collections::BTreeMap<String, String> {
@@ -600,7 +692,9 @@ fn map_of(payload: &Value, key: &str) -> std::collections::BTreeMap<String, Stri
         .and_then(Value::as_object)
         .map(|map| {
             map.iter()
-                .filter_map(|(key, value)| value.as_str().map(|text| (key.clone(), text.to_string())))
+                .filter_map(|(key, value)| {
+                    value.as_str().map(|text| (key.clone(), text.to_string()))
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -610,11 +704,6 @@ fn seqs_of(payload: &Value) -> Vec<u64> {
     payload
         .get("seqs")
         .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_u64)
-                .collect()
-        })
+        .map(|items| items.iter().filter_map(Value::as_u64).collect())
         .unwrap_or_default()
 }

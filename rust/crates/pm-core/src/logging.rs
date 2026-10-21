@@ -7,6 +7,7 @@
 //! 刻意不引第三方日志框架：这里只需要「带时间戳的一行」，链路上没有级别过滤、
 //! 没有结构化字段，多引一层依赖换不来什么。
 
+use std::io::Write;
 use std::sync::OnceLock;
 
 type Sink = Box<dyn Fn(&str) + Send + Sync>;
@@ -19,9 +20,13 @@ pub fn set_sink(sink: impl Fn(&str) + Send + Sync + 'static) {
     let _ = SINK.set(Box::new(sink));
 }
 
-/// 一行日志的实际出口：始终打 stderr（开发态直接可见），再交给 sink 落盘。
+/// 一行日志的实际出口：stderr（开发态直接可见）与 sink 各写一份。
+///
+/// stderr 写失败必须被吞掉：release 是 windows_subsystem = "windows"，
+/// 从资源管理器启动时根本没有有效控制台句柄，eprint! 失败会 panic，
+/// 结果是「日志一行没落盘，进程先没了」。落盘失败才由 sink 自己记。
 pub fn emit(line: &str) {
-    eprint!("{line}");
+    let _ = std::io::stderr().write_all(line.as_bytes());
     if let Some(sink) = SINK.get() {
         sink(line);
     }

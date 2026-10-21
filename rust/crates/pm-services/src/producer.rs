@@ -4,13 +4,14 @@
 //! 外部只通过命令通道排队。流量控制也在同一个任务里按 tick 推进，这样停止时能保证
 //! 「不再发出新的、在飞的等它落地」。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use pm_core::{AdminConfig, AppError, AppResult, TemplateVariable};
+use pm_core::{AdminConfig, AppError, AppResult, ConsumeOptions, TemplateVariable, TopicPath};
 use pm_pulsar::native::NativeClient;
+use pm_pulsar::AdminClient;
 use pulsar::producer;
 use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
@@ -24,6 +25,7 @@ const STATS_INTERVAL_MS: u64 = 500;
 const MAX_PER_TICK: i64 = 200;
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProducerSessionView {
     pub session_id: String,
     pub cluster_id: String,
@@ -37,6 +39,7 @@ pub struct ProducerSessionView {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Latency {
     pub count: i64,
     pub avg_ms: f64,
@@ -48,6 +51,7 @@ pub struct Latency {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RunStats {
     pub session_id: String,
     pub sent: i64,
@@ -152,6 +156,24 @@ impl ProducerRegistry {
             .collect();
         views.sort_by(|a, b| a.session_id.cmp(&b.session_id));
         views
+    }
+
+    pub fn view(&self, session_id: &str) -> Option<ProducerSessionView> {
+        let entries = match self.entries.lock() {
+            Ok(entries) => entries,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        entries.get(session_id).map(|entry| ProducerSessionView {
+            session_id: session_id.to_string(),
+            cluster_id: entry.cluster_id.clone(),
+            topic_uri: entry.topic_uri.clone(),
+            producer_name: entry.producer_name.clone(),
+            connected: true,
+            flow_running: entry.flow.load(Ordering::Relaxed),
+            owner_id: entry.owner_id.clone(),
+            sent: entry.sent.load(Ordering::Relaxed),
+            failed: entry.failed.load(Ordering::Relaxed),
+        })
     }
 
     pub fn stop(&self, session_id: &str) -> bool {
@@ -515,7 +537,11 @@ async fn send_one(
 ) -> AppResult<String> {
     let message = producer::Message {
         payload: item.payload.clone(),
-        properties: item.properties.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        properties: item
+            .properties
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
         partition_key: item.partition_key.clone(),
         event_time: item.event_time.map(|value| value as u64),
         deliver_at_time: item.deliver_at,
@@ -529,7 +555,14 @@ async fn send_one(
         .map_err(|e| AppError::Other(format!("broker 未确认消息: {e}")))?;
     Ok(receipt
         .message_id
-        .map(|id| format!("{}:{}:{}", id.ledger_id, id.entry_id, id.partition.unwrap_or(-1)))
+        .map(|id| {
+            format!(
+                "{}:{}:{}",
+                id.ledger_id,
+                id.entry_id,
+                id.partition.unwrap_or(-1)
+            )
+        })
         .unwrap_or_else(|| "sent".to_string()))
 }
 
@@ -590,101 +623,325 @@ pub async fn burst(
     Ok(ids)
 }
 
-/// 供压测复用：把一批消息按速率推进（内部用同一套 tick 逻辑的简化版）。
-pub async fn pump(
+/// 压测参数：与界面 `LoadTestParams` 一一对应。正文按消息大小生成，
+/// 不再依赖模板；producers / 压缩 / 批量 / 同轮消费都在这里真正生效。
+#[derive(Debug, Clone)]
+pub struct BenchmarkSpec {
+    pub producers: usize,
+    pub total: i64,
+    pub rate_per_sec: f64,
+    pub message_size_bytes: usize,
+    pub max_in_flight: usize,
+    pub batching: bool,
+    pub compression: String,
+    pub consume_backlog: bool,
+    pub subscription: String,
+    pub unsubscribe_after_run: bool,
+}
+
+impl Default for BenchmarkSpec {
+    fn default() -> Self {
+        Self {
+            producers: 1,
+            total: 1,
+            rate_per_sec: 0.0,
+            message_size_bytes: 1024,
+            max_in_flight: 1,
+            batching: false,
+            compression: "None".into(),
+            consume_backlog: false,
+            subscription: String::new(),
+            unsubscribe_after_run: false,
+        }
+    }
+}
+
+/// 跑一轮压测：N 个 producer、全局限速、可选同轮消费与结束后退订。
+/// 进度按 200ms 一帧推送，phase 使用前端契约的 running/completed/stopped。
+pub async fn run_benchmark(
     config: &AdminConfig,
     topic_uri: &str,
-    spec: FlowSpec,
-    duration_ms: i64,
+    spec: BenchmarkSpec,
+    cancel: Arc<AtomicBool>,
     emit: Emit,
     run_id: &str,
-) -> AppResult<RunStats> {
-    let client = NativeClient::connect(config).await?;
-    let mut producer = client.open_producer(topic_uri).await?;
-    let started = Instant::now();
-    let mut sent = 0i64;
-    let mut failed = 0i64;
-    let mut bytes_sent = 0i64;
-    let mut samples: Vec<f64> = Vec::new();
-    let mut last_error: Option<String> = None;
-    let mut due = 0.0f64;
-    let mut last_tick = Instant::now();
-    let mut ticker = tokio::time::interval(Duration::from_millis(100));
+) -> AppResult<()> {
+    if spec.total <= 0 {
+        return Err(AppError::config("压测总条数必须大于 0"));
+    }
+    let producers = spec.producers.clamp(1, 64);
+    let max_in_flight = spec.max_in_flight.clamp(1, 500);
+    let workers = (producers * max_in_flight).min(256);
+    let message_size = spec.message_size_bytes.min(10 * 1024 * 1024);
+    let total = spec.total;
+    let rate = spec.rate_per_sec.max(0.0);
 
-    loop {
-        ticker.tick().await;
-        if duration_ms > 0 && started.elapsed().as_millis() as i64 >= duration_ms {
-            break;
-        }
-        if spec.total > 0 && sent >= spec.total {
-            break;
-        }
-        let elapsed = last_tick.elapsed().as_secs_f64();
-        last_tick = Instant::now();
-        due += spec.rate_per_sec * elapsed;
-        let mut budget = due.min(MAX_PER_TICK as f64) as i64;
-        while budget > 0 {
-            if spec.total > 0 && sent >= spec.total {
-                break;
-            }
-            let rendered = crate::template::render(&spec.body, &spec.variables)?;
-            let item = SendItem {
-                payload: rendered.body.into_bytes(),
-                properties: spec.properties.clone(),
-                ..Default::default()
+    let client = NativeClient::connect(config).await?;
+    let options = producer::ProducerOptions {
+        batch_size: spec.batching.then_some(100),
+        batch_byte_size: spec.batching.then_some(128 * 1024),
+        batch_timeout: spec.batching.then_some(Duration::from_millis(10)),
+        compression: Some(NativeClient::compression_from(&spec.compression)),
+        ..Default::default()
+    };
+    let mut slots = Vec::with_capacity(producers);
+    for _ in 0..producers {
+        slots.push(Arc::new(tokio::sync::Mutex::new(
+            client
+                .open_producer_with(topic_uri, options.clone())
+                .await?,
+        )));
+    }
+    let slots = Arc::new(slots);
+
+    let sent = Arc::new(AtomicI64::new(0));
+    let failed = Arc::new(AtomicI64::new(0));
+    let bytes_sent = Arc::new(AtomicI64::new(0));
+    let consumed = Arc::new(AtomicI64::new(0));
+    let next_seq = Arc::new(AtomicI64::new(0));
+    let samples = Arc::new(Mutex::new(VecDeque::<f64>::new()));
+    let last_error = Arc::new(Mutex::new(None::<String>));
+    let stop_consumer = Arc::new(AtomicBool::new(false));
+    let started = Instant::now();
+
+    // 同轮消费：在独立连接上开一条 Shared 消费者，不抢生产的连接。
+    let consumer_task = if spec.consume_backlog && !spec.subscription.trim().is_empty() {
+        let cfg = config.clone();
+        let topic = topic_uri.to_string();
+        let subscription = spec.subscription.clone();
+        let cancel = cancel.clone();
+        let stop_consumer = stop_consumer.clone();
+        let consumed = consumed.clone();
+        Some(tokio::spawn(async move {
+            let options = ConsumeOptions {
+                cluster_id: String::new(),
+                topic,
+                subscription,
+                subscription_type: "Shared".into(),
+                initial_position: "Earliest".into(),
+                auto_ack: true,
+                max_messages: 0,
+                receiver_queue_size: Some(1_000),
+                ack_timeout_ms: None,
+                n_ack_redeliver_timeout_ms: None,
+                consumer_name: None,
+                owner_id: None,
             };
-            let at = Instant::now();
-            match send_one(&mut producer, &item).await {
-                Ok(_) => {
-                    sent += 1;
-                    bytes_sent += item.payload.len() as i64;
-                    samples.push(at.elapsed().as_secs_f64() * 1000.0);
-                    if samples.len() > 500 {
-                        samples.remove(0);
-                    }
-                }
+            let client = match NativeClient::connect(&cfg).await {
+                Ok(client) => client,
                 Err(error) => {
-                    failed += 1;
-                    last_error = Some(error.to_string());
+                    pm_core::pm_warn!("[benchmark] 同轮消费连接失败：{error}");
+                    return;
+                }
+            };
+            let mut consumer = match client.open_consumer(&options).await {
+                Ok(consumer) => consumer,
+                Err(error) => {
+                    pm_core::pm_warn!("[benchmark] 同轮消费订阅失败：{error}");
+                    return;
+                }
+            };
+            loop {
+                if cancel.load(Ordering::Relaxed) || stop_consumer.load(Ordering::Relaxed) {
                     break;
                 }
+                match tokio::time::timeout(Duration::from_millis(200), consumer.next()).await {
+                    Ok(Some(Ok(_))) => {
+                        consumed.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Ok(Some(Err(_))) | Ok(None) => break,
+                    Err(_) => {}
+                }
             }
-            budget -= 1;
-            due -= 1.0;
-        }
-        if due < 0.0 {
-            due = 0.0;
-        }
-        let progress = serde_json::json!({
-            "runId": run_id,
-            "phase": "produce",
-            "sent": sent,
-            "failed": failed,
-            "bytesSent": bytes_sent,
-            "elapsedMs": started.elapsed().as_millis() as i64,
-            "msgPerSec": rate_of(sent, started.elapsed()),
-            "mbPerSec": rate_of(bytes_sent, started.elapsed()) / (1024.0 * 1024.0),
-            "latency": latency_of(&samples),
-            "lastError": last_error,
-            "done": false,
+            consumer.close().await;
+        }))
+    } else {
+        None
+    };
+
+    let mut tasks = tokio::task::JoinSet::new();
+    for worker in 0..workers {
+        let slot = slots[worker % producers].clone();
+        let cancel = cancel.clone();
+        let sent = sent.clone();
+        let failed = failed.clone();
+        let bytes_sent = bytes_sent.clone();
+        let next_seq = next_seq.clone();
+        let samples = samples.clone();
+        let last_error = last_error.clone();
+        tasks.spawn(async move {
+            loop {
+                if cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+                let seq = next_seq.fetch_add(1, Ordering::Relaxed);
+                if seq >= total {
+                    break;
+                }
+                if rate > 0.0 {
+                    let target = started + Duration::from_secs_f64(seq as f64 / rate);
+                    let now = Instant::now();
+                    if target > now {
+                        tokio::time::sleep(target - now).await;
+                        if cancel.load(Ordering::Relaxed) {
+                            break;
+                        }
+                    }
+                }
+                let payload = vec![b'x'; message_size];
+                let message = producer::Message {
+                    payload: payload.clone(),
+                    ..Default::default()
+                };
+                let at = Instant::now();
+                let enqueued = {
+                    let mut producer = slot.lock().await;
+                    producer.send_non_blocking(message).await
+                };
+                match enqueued {
+                    Ok(receipt) => match receipt.await {
+                        Ok(_) => {
+                            sent.fetch_add(1, Ordering::Relaxed);
+                            bytes_sent.fetch_add(payload.len() as i64, Ordering::Relaxed);
+                            if let Ok(mut samples) = samples.lock() {
+                                samples.push_back(at.elapsed().as_secs_f64() * 1000.0);
+                                while samples.len() > 20_000 {
+                                    samples.pop_front();
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            failed.fetch_add(1, Ordering::Relaxed);
+                            if let Ok(mut slot) = last_error.lock() {
+                                *slot = Some(format!("broker 未确认消息: {error}"));
+                            }
+                        }
+                    },
+                    Err(error) => {
+                        failed.fetch_add(1, Ordering::Relaxed);
+                        if let Ok(mut slot) = last_error.lock() {
+                            *slot = Some(format!("发送失败: {error}"));
+                        }
+                    }
+                }
+            }
         });
-        emit("benchmark:progress", progress);
     }
 
-    let _ = producer.send_batch().await;
-    let _ = producer.close().await;
-    let stats = RunStats {
-        session_id: run_id.to_string(),
-        sent,
-        failed,
-        bytes_sent,
-        elapsed_ms: started.elapsed().as_millis() as i64,
-        msg_per_sec: rate_of(sent, started.elapsed()),
-        mb_per_sec: rate_of(bytes_sent, started.elapsed()) / (1024.0 * 1024.0),
-        latency: latency_of(&samples),
-        last_error,
-        flow_running: false,
-        error: None,
+    let mut ticker = tokio::time::interval(Duration::from_millis(200));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => emit_benchmark_progress(
+                &emit,
+                run_id,
+                "running",
+                &spec,
+                &sent,
+                &failed,
+                &bytes_sent,
+                &consumed,
+                &samples,
+                &last_error,
+                started,
+            ),
+            joined = tasks.join_next(), if !tasks.is_empty() => {
+                let _ = joined;
+            }
+        }
+        if tasks.is_empty() {
+            break;
+        }
+    }
+
+    // 把批量队列最后一段推出去；producer 在 Arc 里，锁住再 flush 即可。
+    for slot in slots.iter() {
+        let mut producer = slot.lock().await;
+        let _ = producer.send_batch().await;
+    }
+
+    stop_consumer.store(true, Ordering::Relaxed);
+    if let Some(task) = consumer_task {
+        let _ = task.await;
+    }
+
+    if spec.consume_backlog && spec.unsubscribe_after_run && !spec.subscription.trim().is_empty() {
+        if let Ok(path) = TopicPath::parse(topic_uri) {
+            if let Ok(admin) = AdminClient::new(config) {
+                let _ = admin
+                    .delete_subscription(
+                        &path.tenant,
+                        &path.namespace,
+                        &path.topic,
+                        &spec.subscription,
+                        path.persistent,
+                    )
+                    .await;
+            }
+        }
+    }
+
+    let phase = if cancel.load(Ordering::Relaxed) {
+        "stopped"
+    } else {
+        "completed"
     };
-    Ok(stats)
+    emit_benchmark_progress(
+        &emit,
+        run_id,
+        phase,
+        &spec,
+        &sent,
+        &failed,
+        &bytes_sent,
+        &consumed,
+        &samples,
+        &last_error,
+        started,
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_benchmark_progress(
+    emit: &Emit,
+    run_id: &str,
+    phase: &str,
+    spec: &BenchmarkSpec,
+    sent: &AtomicI64,
+    failed: &AtomicI64,
+    bytes_sent: &AtomicI64,
+    consumed: &AtomicI64,
+    samples: &Mutex<VecDeque<f64>>,
+    last_error: &Mutex<Option<String>>,
+    started: Instant,
+) {
+    let elapsed = started.elapsed();
+    let snapshot = samples
+        .lock()
+        .map(|samples| samples.iter().copied().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let latency = latency_of(&snapshot);
+    let sent = sent.load(Ordering::Relaxed);
+    let bytes = bytes_sent.load(Ordering::Relaxed);
+    emit(
+        "benchmark:progress",
+        serde_json::json!({
+            "runId": run_id,
+            "phase": phase,
+            "sent": sent,
+            "failed": failed.load(Ordering::Relaxed),
+            "consumed": consumed.load(Ordering::Relaxed),
+            "totalMessages": spec.total,
+            "messageSizeBytes": spec.message_size_bytes,
+            "producerCount": spec.producers,
+            "bytesSent": bytes,
+            "elapsedMs": elapsed.as_millis() as i64,
+            "msgPerSec": rate_of(sent, elapsed),
+            "mbPerSec": rate_of(bytes, elapsed) / (1024.0 * 1024.0),
+            "latency": latency,
+            "lastError": last_error.lock().ok().and_then(|slot| slot.clone()),
+            "done": phase != "running",
+        }),
+    );
 }

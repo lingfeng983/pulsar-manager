@@ -5,7 +5,7 @@ Apache Pulsar 集群的桌面运维客户端，后台是 Rust（Tauri 2 外壳�
 所有与 broker 的通信都在 Rust 后台完成，页面只有一个入口 `rpc(method, args)`，契约写在 `src/renderer/api-contract.ts`；凭据以 AES-256 加密后落库，加密密钥由系统密钥库保护（Windows DPAPI；平台不支持时默认拒绝降级为明文），数据存于本地 SQLite，不依赖任何外部服务。进程里没有 Node 运行时，也不打包 Chromium，页面跑在系统自带的 WebView2 上，安装包约 7 MB。
 
 ![License](https://img.shields.io/badge/License-Apache%202.0-blue)
-![Version](https://img.shields.io/badge/Version-v1.6.1-orange)
+![Version](https://img.shields.io/badge/Version-v1.6.2-orange)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![Tauri](https://img.shields.io/badge/Tauri-2-FFC131)
 ![Rust](https://img.shields.io/badge/Rust-1.98-DEA584)
@@ -313,7 +313,7 @@ Electron 时代的一键发版脚本（`release.sh` + `scripts/release-publish.m
 
 ```bash
 npm run app:build
-EXE="rust/target/release/bundle/nsis/Pulsar Manager_1.6.1_x64-setup.exe"
+EXE="rust/target/release/bundle/nsis/Pulsar Manager_1.6.2_x64-setup.exe"
 sha256sum "$EXE"
 ```
 
@@ -343,7 +343,7 @@ sha256sum "$EXE"
 ## 本地数据
 
 - SQLite 位于 `%APPDATA%\pulsar-manager\pulsar-manager.db`（其他平台是 `$HOME/.config/pulsar-manager/…`，与原 Electron 版 `app.getPath('userData')` 同目录，所以老数据直接能读），存集群配置、SSH/K8s 转发配置、操作日志、界面设置与快捷键绑定、报文模板、消费者会话配置、发送历史、巡检报告与历史、告警规则与事件、通知渠道与投递记录；表结构以 `PRAGMA user_version` 跟踪并增量迁移
-- 运行时日志默认在 `%APPDATA%\pulsar-manager\logs\main.log`（单文件超过 2 MB 轮转为 `main.1.log`，只留一份备份），排障要的完整链路都在这里；「设置 → 日志」可以直接打开目录、改存储位置（立即生效，落库 `user_settings.logDirectory`）或导出（系统「另存为」选位置，内容是操作日志 + 运行时日志的合并 JSON）
+- 运行时日志默认在 `%APPDATA%\pulsar-manager\logs\main.log`（单文件超过 2 MB 轮转为 `main.1.log`…`main.5.log`，保留最近 5 份、最多约 12 MB），排障要的完整链路都在这里；日志会记录启动基准线、每次 Admin REST 请求（方法/路径/状态码/耗时）、RPC 方法名以及原生协议的连接/发送/订阅结果，不记录凭据与消息正文；「设置 → 日志」可以直接打开目录、改存储位置（立即生效，落库 `user_settings.logDirectory`）或导出（系统「另存为」选位置，内容是操作日志 + 运行时日志的合并 JSON）
 - 卸载默认保留用户数据；在卸载确认页勾选「删除应用程序数据」后，会连同 `%APPDATA%\pulsar-manager`（数据库、日志、加密密钥）一起删除。升级时会清理旧版本遗留的安装文件，但不动用户数据
 - 已安装的插件是 `<userData>/plugins/*.json`（或 `plugins/<目录>/plugin.json`），启用状态记在 `user_settings` 的 `disabledPlugins` 里
 - 调试时想用一个干净的库：设 `PULSAR_MANAGER_DB=<临时路径>` 再起外壳（单实例锁按 userData 路径判定，同一份数据不会跑出两套后台任务）

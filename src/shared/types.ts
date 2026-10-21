@@ -217,7 +217,8 @@ export interface SubscriptionStats {
     // 积压字节数（API 的 backlogSize）
     backlogSize: number;
     msgRateExpired: number;
-    consumerCount: number;
+    // 订阅下的消费者明细；界面用长度显示消费者数
+    consumers: ConsumerStats[];
     unackedMessages: number;
     // exclusive / shared / failover / key_shared / None
     type: string;
@@ -278,9 +279,9 @@ export interface TopicStats {
     consumers: ConsumerStats[];
     subscriptions: Record<string, SubscriptionStats>;
     // 分区 URI 列表，长度即分区数：非分区 topic 为空数组。
-    // 分区 topic 的 /stats 不存在（实测 404），主进程改读 /partitioned-stats 并以
-    // 其 partitions 键集合填这里。
-    partitions: string[];
+    // broker 的 /partitioned-stats 把分区统计放在 partitions 对象里，
+    // 主进程派生的列表字段是 partitionList。
+    partitionList: string[];
     // 承载该 topic（或其某个分区）的 broker，实测为 `host:port`，
     // 与 /admin/v2/brokers 的取值一致。分区 topic 的分区可能落在不同 broker 上，
     // 所以是列表而不是单值。

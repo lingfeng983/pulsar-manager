@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use pm_core::{
-    AdminConfig, AppError, AppResult, Cluster, ClusterDraft, ClusterView, ConnectionTest, OperationLog,
+    AdminConfig, AppError, AppResult, Cluster, ClusterDraft, ClusterView, ConnectionTest,
+    OperationLog,
 };
 use pm_pulsar::AdminClient;
 use pm_store::{clusters, logs, Store};
@@ -18,11 +19,18 @@ pub struct AppContext {
 }
 
 impl AppContext {
-    pub fn open(db_path: impl AsRef<std::path::Path>, secret_dir: impl AsRef<std::path::Path>) -> AppResult<Self> {
+    pub fn open(
+        db_path: impl AsRef<std::path::Path>,
+        secret_dir: impl AsRef<std::path::Path>,
+    ) -> AppResult<Self> {
         let store = Arc::new(Store::open(db_path)?);
         let secrets = Arc::new(SecretBox::load_or_create(secret_dir)?);
         let warning = secrets.warning().map(str::to_string);
-        Ok(Self { store, secrets, warning })
+        Ok(Self {
+            store,
+            secrets,
+            warning,
+        })
     }
 
     pub fn list_clusters(&self) -> AppResult<Vec<ClusterView>> {
@@ -36,6 +44,12 @@ impl AppContext {
         clusters::get(&self.store, id)?.ok_or_else(|| AppError::NotFound(format!("集群 {id}")))
     }
 
+    /// 单集群的界面形态：保存后把落库结果回给前端，避免只返回 id、
+    /// 前端再猜 status/version（新增后显示离线就是那么来的）。
+    pub fn view_cluster(&self, id: &str) -> AppResult<ClusterView> {
+        Ok(self.to_view(&self.get_cluster(id)?))
+    }
+
     fn to_view(&self, cluster: &Cluster) -> ClusterView {
         ClusterView {
             id: cluster.id.clone(),
@@ -44,8 +58,14 @@ impl AppContext {
             web_service_url: cluster.web_service_url.clone(),
             auth_plugin: cluster.auth_plugin.clone(),
             tls_enabled: cluster.tls_enabled,
-            has_auth_params: cluster.auth_params_enc.as_deref().is_some_and(|v| !v.is_empty()),
-            has_tls_trust_certs: cluster.tls_trust_certs_enc.as_deref().is_some_and(|v| !v.is_empty()),
+            has_auth_params: cluster
+                .auth_params_enc
+                .as_deref()
+                .is_some_and(|v| !v.is_empty()),
+            has_tls_trust_certs: cluster
+                .tls_trust_certs_enc
+                .as_deref()
+                .is_some_and(|v| !v.is_empty()),
             use_ssh_tunnel: cluster.use_ssh_tunnel,
             ssh_config_id: cluster.ssh_config_id.clone(),
             use_k8s_forward: cluster.use_k8s_forward,
@@ -58,8 +78,8 @@ impl AppContext {
         }
     }
 
-    /// 保存（新增或更新）。`auth_params = None` 表示沿用已保存的凭据，
-    /// 空串表示清除——否则界面不显示明文时每次保存都会把凭据抹掉。
+    /// 保存（新增或更新）。`auth_params = None` 或空串表示沿用已保存的凭据——
+    /// 界面不显示明文时每次保存都会提交空值，不能把它当成「清除」。
     pub fn save_cluster(&self, draft: &ClusterDraft) -> AppResult<String> {
         if draft.name.trim().is_empty() {
             return Err(AppError::config("集群名称不能为空"));
@@ -75,13 +95,17 @@ impl AppContext {
         let now = pm_core::now_iso();
 
         let auth_params_enc = match draft.auth_params.as_deref() {
-            None => existing.as_ref().and_then(|cluster| cluster.auth_params_enc.clone()),
-            Some("") => None,
+            // 空串与未填同义：界面上的「留空表示沿用」必须和测试连接保持一致，
+            // 否则测试通过后保存反而把凭据删掉。
+            None | Some("") => existing
+                .as_ref()
+                .and_then(|cluster| cluster.auth_params_enc.clone()),
             Some(value) => Some(self.secrets.encrypt(value)?),
         };
         let trust_certs_enc = match draft.tls_trust_certs.as_deref() {
-            None => existing.as_ref().and_then(|cluster| cluster.tls_trust_certs_enc.clone()),
-            Some("") => None,
+            None | Some("") => existing
+                .as_ref()
+                .and_then(|cluster| cluster.tls_trust_certs_enc.clone()),
             Some(value) => Some(self.secrets.encrypt(value)?),
         };
 
@@ -118,7 +142,8 @@ impl AppContext {
                 .map(|cluster| cluster.status.clone())
                 .unwrap_or_else(|| "disconnected".into()),
             version: existing.and_then(|cluster| cluster.version),
-            created_at: existing_created(&self.store, draft.id.as_deref()).unwrap_or_else(|| now.clone()),
+            created_at: existing_created(&self.store, draft.id.as_deref())
+                .unwrap_or_else(|| now.clone()),
             updated_at: now,
         };
 
@@ -127,6 +152,16 @@ impl AppContext {
         } else {
             clusters::insert(&self.store, &cluster)?;
         }
+        pm_core::pm_log!(
+            "[cluster] 保存 {} serviceUrl={} webServiceUrl={}",
+            cluster.name,
+            pm_core::redact_endpoint(&cluster.service_url),
+            cluster
+                .web_service_url
+                .as_deref()
+                .map(pm_core::redact_endpoint)
+                .unwrap_or_else(|| "-".into())
+        );
         self.log(
             Some(&cluster.id),
             "cluster.save",
@@ -142,15 +177,22 @@ impl AppContext {
     pub fn delete_cluster(&self, id: &str) -> AppResult<()> {
         let cluster = self.get_cluster(id)?;
         clusters::delete(&self.store, id)?;
-        self.log(
-            Some(id),
+        pm_core::pm_log!("[cluster] 删除 {} ({})", cluster.name, id);
+        // 审计行必须在删除之后写，此时 cluster_id 已不能指向该行：
+        // operation_logs 的外键是 ON DELETE SET NULL，那只处理"删除时已存在"
+        // 的日志；再插入一条指向已删集群的日志会违反外键，导致删除明明成功、
+        // RPC 却报失败，界面于是弹一堆错误。用 NULL + resource_id 保留归属。
+        if let Err(error) = self.log(
+            None,
             "cluster.delete",
             "cluster",
             Some(id),
             Some(&cluster.name),
             "success",
             None,
-        )?;
+        ) {
+            pm_core::pm_warn!("[cluster] 删除审计日志写入失败 id={id}：{error}");
+        }
         Ok(())
     }
 
@@ -158,12 +200,20 @@ impl AppContext {
         clusters::set_status(&self.store, id, status, version)
     }
 
-    fn admin_config(&self, cluster: &Cluster, auth_params: Option<String>) -> AppResult<AdminConfig> {
+    fn admin_config(
+        &self,
+        cluster: &Cluster,
+        auth_params: Option<String>,
+    ) -> AppResult<AdminConfig> {
         let auth_params = match auth_params {
             Some(value) => Some(value),
-            None => self.secrets.decrypt_opt(cluster.auth_params_enc.as_deref())?,
+            None => self
+                .secrets
+                .decrypt_opt(cluster.auth_params_enc.as_deref())?,
         };
-        let trust_certs = self.secrets.decrypt_opt(cluster.tls_trust_certs_enc.as_deref())?;
+        let trust_certs = self
+            .secrets
+            .decrypt_opt(cluster.tls_trust_certs_enc.as_deref())?;
         Ok(cluster.admin_config(auth_params, trust_certs))
     }
 
@@ -211,14 +261,18 @@ impl AppContext {
         let auth_params = match draft.auth_params.clone() {
             Some(value) if !value.is_empty() => Some(value),
             _ => match existing.as_ref() {
-                Some(cluster) => self.secrets.decrypt_opt(cluster.auth_params_enc.as_deref())?,
+                Some(cluster) => self
+                    .secrets
+                    .decrypt_opt(cluster.auth_params_enc.as_deref())?,
                 None => None,
             },
         };
         let trust_certs = match draft.tls_trust_certs.clone() {
             Some(value) if !value.is_empty() => Some(value),
             _ => match existing.as_ref() {
-                Some(cluster) => self.secrets.decrypt_opt(cluster.tls_trust_certs_enc.as_deref())?,
+                Some(cluster) => self
+                    .secrets
+                    .decrypt_opt(cluster.tls_trust_certs_enc.as_deref())?,
                 None => None,
             },
         };
@@ -235,20 +289,46 @@ impl AppContext {
 
     pub async fn test_connection(&self, draft: &ClusterDraft) -> AppResult<ConnectionTest> {
         let config = self.test_config(draft)?;
+        let endpoint = pm_core::redact_endpoint(&config.service_url);
+        pm_core::pm_log!(
+            "[cluster] 测试连接 name={} serviceUrl={}",
+            draft.name,
+            endpoint
+        );
         let client = AdminClient::new(&config)?;
-        Ok(client.test_connection().await)
+        let result = client.test_connection().await;
+        if result.connected {
+            pm_core::pm_log!(
+                "[cluster] 连接成功 name={} serviceUrl={} version={}",
+                draft.name,
+                endpoint,
+                result.version.as_deref().unwrap_or("未知")
+            );
+        } else {
+            pm_core::pm_warn!(
+                "[cluster] 连接失败 name={} serviceUrl={}：{}",
+                draft.name,
+                endpoint,
+                result.error.as_deref().unwrap_or("未知原因")
+            );
+        }
+        Ok(result)
     }
 
     /// 连接探测：返回 (状态, 版本)。失败只更新状态，不把错误当成致命问题。
     pub async fn probe(&self, cluster_id: &str) -> AppResult<ConnectionTest> {
         let client = self.admin_for(cluster_id)?;
         let result = client.test_connection().await;
-        let status = if result.connected { "connected" } else { "disconnected" };
+        let status = if result.connected {
+            "connected"
+        } else {
+            "disconnected"
+        };
         self.set_status(cluster_id, status, result.version.as_deref())?;
         Ok(result)
     }
 
-#[allow(clippy::too_many_arguments)] // 参数就是这几列，拆成结构体只会多一层转发
+    #[allow(clippy::too_many_arguments)] // 参数就是这几列，拆成结构体只会多一层转发
     pub fn log(
         &self,
         cluster_id: Option<&str>,
@@ -280,7 +360,10 @@ impl AppContext {
 
 fn existing_created(store: &Store, id: Option<&str>) -> Option<String> {
     let id = id?;
-    clusters::get(store, id).ok().flatten().map(|cluster| cluster.created_at)
+    clusters::get(store, id)
+        .ok()
+        .flatten()
+        .map(|cluster| cluster.created_at)
 }
 
 #[cfg(test)]
@@ -291,6 +374,26 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pm-ctx-{tag}-{}", pm_core::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn deleting_cluster_reports_success_and_keeps_audit_row() {
+        let dir = temp_dir("delete");
+        let ctx = AppContext::open(dir.join("app.db"), &dir).unwrap();
+        let draft = ClusterDraft {
+            name: "local".into(),
+            service_url: "pulsar://127.0.0.1:6650".into(),
+            ..Default::default()
+        };
+        let id = ctx.save_cluster(&draft).unwrap();
+        ctx.delete_cluster(&id).expect("删除成功后不能再报错");
+        assert!(ctx.get_cluster(&id).is_err());
+        let rows = logs::list(&ctx.store, 20).unwrap();
+        assert!(rows
+            .iter()
+            .any(|row| row.action == "cluster.delete"
+                && row.resource_id.as_deref() == Some(id.as_str())));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -314,13 +417,15 @@ mod tests {
         ctx.save_cluster(&again).unwrap();
         assert!(ctx.list_clusters().unwrap()[0].has_auth_params);
 
-        let config = ctx.admin_config(&ctx.get_cluster(&id).unwrap(), None).unwrap();
+        let config = ctx
+            .admin_config(&ctx.get_cluster(&id).unwrap(), None)
+            .unwrap();
         assert_eq!(config.auth_params.as_deref(), Some("secret-token"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn empty_credentials_clear_the_secret() {
+    fn empty_credentials_keep_the_secret() {
         let dir = temp_dir("clear");
         let ctx = AppContext::open(dir.join("app.db"), &dir).unwrap();
         let draft = ClusterDraft {
@@ -334,7 +439,7 @@ mod tests {
         cleared.id = Some(id);
         cleared.auth_params = Some(String::new());
         ctx.save_cluster(&cleared).unwrap();
-        assert!(!ctx.list_clusters().unwrap()[0].has_auth_params);
+        assert!(ctx.list_clusters().unwrap()[0].has_auth_params);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

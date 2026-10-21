@@ -1,4 +1,4 @@
-use pm_core::{AppError, AppResult, AlertEvent, AlertRule};
+use pm_core::{AlertEvent, AlertRule, AppError, AppResult};
 use rusqlite::{params, OptionalExtension};
 
 use crate::db::{flag, Store};
@@ -163,8 +163,11 @@ pub fn insert_event(store: &Store, event: &AlertEvent) -> AppResult<i64> {
 
 pub fn update_open_event(store: &Store, id: i64, value: f64, message: &str) -> AppResult<()> {
     store.with(|conn| {
+        // 空串表示「这次没有新说明」，保留首次立案时的 message；否则第二轮评估
+        // 会把告警中心的说明列刷成空白。
         conn.execute(
-            "UPDATE alert_events SET last_value = ?2, value = ?2, message = ?3, last_seen_at = ?4 WHERE id = ?1",
+            "UPDATE alert_events SET last_value = ?2, value = ?2, \
+             message = CASE WHEN ?3 = '' THEN message ELSE ?3 END, last_seen_at = ?4 WHERE id = ?1",
             params![id, value, message, pm_core::now_ms()],
         )?;
         Ok(())
@@ -211,12 +214,19 @@ pub fn delete_events(store: &Store, ids: &[i64]) -> AppResult<i64> {
 
 pub fn ack_event(store: &Store, id: i64) -> AppResult<()> {
     store.with(|conn| {
-        conn.execute("UPDATE alert_events SET acked_at = ?2 WHERE id = ?1", params![id, pm_core::now_ms()])?;
+        conn.execute(
+            "UPDATE alert_events SET acked_at = ?2 WHERE id = ?1",
+            params![id, pm_core::now_ms()],
+        )?;
         Ok(())
     })
 }
 
-pub fn list_events(store: &Store, cluster_id: Option<&str>, limit: i64) -> AppResult<Vec<AlertEvent>> {
+pub fn list_events(
+    store: &Store,
+    cluster_id: Option<&str>,
+    limit: i64,
+) -> AppResult<Vec<AlertEvent>> {
     store.with(|conn| {
         let mut stmt = conn.prepare(
             "SELECT id, rule_id, cluster_id, rule_name, scope_label, metric, comparator, threshold, \

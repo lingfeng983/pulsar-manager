@@ -28,8 +28,15 @@ impl AdminClient {
     }
 
     pub async fn tenant_info(&self, name: &str) -> AppResult<Option<Tenant>> {
-        self.get_opt_json(&format!("/admin/v2/tenants/{}", seg(name)))
-            .await
+        // broker 返回的是 {adminRoles, allowedClusters}，不含 name；不补的话
+        // 反序列化会直接报 missing field `name`，租户详情页永远打不开。
+        let mut tenant = self
+            .get_opt_json::<Tenant>(&format!("/admin/v2/tenants/{}", seg(name)))
+            .await?;
+        if let Some(tenant) = tenant.as_mut() {
+            tenant.name = name.to_string();
+        }
+        Ok(tenant)
     }
 
     pub async fn create_tenant(&self, tenant: &Tenant) -> AppResult<()> {
@@ -153,7 +160,10 @@ impl AdminClient {
     ) -> AppResult<()> {
         let name = short_topic_name(topic);
         let base = topic_base(tenant, namespace, name, persistent);
-        let raw = match self.get_opt_json::<Value>(&format!("{base}/partitions")).await {
+        let raw = match self
+            .get_opt_json::<Value>(&format!("{base}/partitions"))
+            .await
+        {
             Ok(raw) => raw,
             // 端点被网关/旧版本挡掉时按"非分区"处理，删除本身仍然继续
             Err(error) if method_rejected(&error) => None,
@@ -215,13 +225,43 @@ impl AdminClient {
         let name = format!("{tenant}/{namespace}/{}", short_topic_name(topic));
         let base = topic_base(tenant, namespace, short_topic_name(topic), persistent);
 
-        if let Some(raw) = self.get_opt_json::<Value>(&format!("{base}/stats")).await? {
+        // 3.3 在 topic 刚创建、owner 还没分配完时会给 412「Failed to find ownership」，
+        // 这不是「topic 不存在」。短重试一次；仍拿不到就按空统计返回，下一轮刷新自然恢复。
+        let mut stats = None;
+        for attempt in 0..2 {
+            match self.get_opt_json::<Value>(&format!("{base}/stats")).await {
+                Ok(value) => {
+                    stats = value;
+                    break;
+                }
+                Err(AppError::Http { status: 412, .. }) if attempt == 0 => {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+                Err(AppError::Http { status: 412, .. }) => break,
+                Err(error) => return Err(error),
+            }
+        }
+        if let Some(raw) = stats {
             return parse_stats(raw, name, persistent, Vec::new());
         }
-        if let Some(raw) = self
-            .get_opt_json::<Value>(&format!("{base}/partitioned-stats"))
-            .await?
-        {
+        let mut partitioned = None;
+        for attempt in 0..2 {
+            match self
+                .get_opt_json::<Value>(&format!("{base}/partitioned-stats"))
+                .await
+            {
+                Ok(value) => {
+                    partitioned = value;
+                    break;
+                }
+                Err(AppError::Http { status: 412, .. }) if attempt == 0 => {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+                Err(AppError::Http { status: 412, .. }) => break,
+                Err(error) => return Err(error),
+            }
+        }
+        if let Some(raw) = partitioned {
             let partition_uris = raw
                 .get("partitions")
                 .and_then(Value::as_object)
@@ -855,7 +895,10 @@ fn is_partitioned_conflict(error: &AppError) -> bool {
 /// 补一句可执行的下一步，界面才知道该勾"强制删除"。
 fn busy_hint(error: AppError) -> AppError {
     match error {
-        AppError::Http { status: 412, message } if !message.contains("强制删除") => AppError::Http {
+        AppError::Http {
+            status: 412,
+            message,
+        } if !message.contains("强制删除") => AppError::Http {
             status: 412,
             message: format!("{message}（Topic 仍有生产/消费者或订阅，勾选「强制删除」后重试）"),
         },
@@ -1037,8 +1080,14 @@ mod tests {
             Some(PulsarVersion { major: 3, minor: 3 })
         );
         assert!(PulsarVersion::parse("unknown").is_none());
-        assert!(PulsarVersion::parse("2.10.6").unwrap().needs_delete_schema_param());
-        assert!(!PulsarVersion::parse("2.11.4").unwrap().needs_delete_schema_param());
-        assert!(!PulsarVersion::parse("4.0.0").unwrap().needs_delete_schema_param());
+        assert!(PulsarVersion::parse("2.10.6")
+            .unwrap()
+            .needs_delete_schema_param());
+        assert!(!PulsarVersion::parse("2.11.4")
+            .unwrap()
+            .needs_delete_schema_param());
+        assert!(!PulsarVersion::parse("4.0.0")
+            .unwrap()
+            .needs_delete_schema_param());
     }
 }

@@ -19,7 +19,8 @@ impl Store {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let conn = Connection::open(&path).map_err(|e| AppError::Storage(format!("打开数据库失败: {e}")))?;
+        let conn = Connection::open(&path)
+            .map_err(|e| AppError::Storage(format!("打开数据库失败: {e}")))?;
         Self::configure(&conn)?;
         Self::init(&conn)?;
         Ok(Self {
@@ -64,6 +65,13 @@ impl Store {
         }
 
         let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        // 旧版本打开新库会悄悄把版本号降回去，下次新版本再打开就以为迁移已完成。
+        // 宁可明确报错，也不要让用户在两版之间来回启动后丢列。
+        if current > SCHEMA_VERSION {
+            return Err(AppError::Storage(format!(
+                "数据库版本 {current} 高于当前应用支持的 {SCHEMA_VERSION}，请升级应用后再打开"
+            )));
+        }
         if current != SCHEMA_VERSION {
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }

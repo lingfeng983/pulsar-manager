@@ -27,7 +27,10 @@ pub fn insert(store: &Store, point: &MetricsPoint) -> AppResult<()> {
     })
 }
 
-/// 取时间范围内的序列（升序，便于直接画折线）。
+/// 取时间范围内最近 N 条（升序，便于直接画折线）。
+///
+/// 先按 DESC 取窗口内最新的 N 条，再反转；直接用 ASC+LIMIT 会拿到窗口最前面
+/// 的 N 条，保留 7 天、限 2000 点时当前时段永远画不出来。
 pub fn series(
     store: &Store,
     cluster_id: &str,
@@ -40,7 +43,7 @@ pub fn series(
             "SELECT cluster_id, topic_uri, msg_rate_in, msg_rate_out, throughput_in, throughput_out, \
              backlog, producers, consumers, captured_at FROM metrics_snapshots \
              WHERE cluster_id = ?1 AND topic_uri = ?2 AND captured_at >= ?3 \
-             ORDER BY captured_at ASC LIMIT ?4",
+             ORDER BY captured_at DESC LIMIT ?4",
         )?;
         let rows = stmt.query_map(params![cluster_id, topic_uri, from_ms, limit.max(1)], |row| {
             Ok(MetricsPoint {
@@ -56,7 +59,9 @@ pub fn series(
                 captured_at: row.get(9)?,
             })
         })?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        let mut points = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        points.reverse();
+        Ok(points)
     })
 }
 
@@ -91,7 +96,49 @@ pub fn latest(store: &Store, cluster_id: &str, topic_uri: &str) -> AppResult<Opt
 pub fn prune(store: &Store, keep_days: i64) -> AppResult<usize> {
     let cutoff = pm_core::now_ms() - keep_days.max(1) * 24 * 3600 * 1000;
     store.with(|conn| {
-        let removed = conn.execute("DELETE FROM metrics_snapshots WHERE captured_at < ?1", [cutoff])?;
+        let removed = conn.execute(
+            "DELETE FROM metrics_snapshots WHERE captured_at < ?1",
+            [cutoff],
+        )?;
         Ok(removed)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn series_keeps_the_latest_points_and_returns_ascending() {
+        let store = Store::open_in_memory().unwrap();
+        crate::clusters::insert(
+            &store,
+            &pm_core::Cluster {
+                id: "c1".into(),
+                name: "local".into(),
+                service_url: "pulsar://127.0.0.1:6650".into(),
+                admin_api_timeout: 5000,
+                status: "connected".into(),
+                created_at: pm_core::now_iso(),
+                updated_at: pm_core::now_iso(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for captured_at in 1..=5 {
+            insert(
+                &store,
+                &MetricsPoint {
+                    cluster_id: "c1".into(),
+                    topic_uri: String::new(),
+                    captured_at,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        let points = series(&store, "c1", "", 0, 3).unwrap();
+        let captured: Vec<i64> = points.iter().map(|point| point.captured_at).collect();
+        assert_eq!(captured, vec![3, 4, 5]);
+    }
 }
