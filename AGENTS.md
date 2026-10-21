@@ -14,6 +14,7 @@ Tauri 2 + React 18 + TypeScript 桌面端 Pulsar 管理工具。后台全在 Rus
 - `npm run test:rust` — `cargo test --workspace`（约 60 个单测，覆盖判定/折叠/加解密/策略 diff）
 - 自测：`npm run selftest`（模板引擎，直接 import `src/shared/template-engine.ts`）、`npm run selftest:docs`（内置文档中心的锚点、目录与检索，需要 `build:shared` 产物）
 - `npm run icon` — 图标唯一来源，产出 `rust/crates/pm-tauri/icons/`；改设计改脚本后必须重跑并把产物入库
+- `npm run release` — 发版：出包 → 门禁 → 建发行版 → 传安装包 → 匿名回读校验；`--dry-run` 只出包过门禁、不发布（规则见 README「发版」）
 
 ## 分层约束
 
@@ -24,7 +25,7 @@ Tauri 2 + React 18 + TypeScript 桌面端 Pulsar 管理工具。后台全在 Rus
 - 通道名（`cluster:list`、`msg:consume-batch` …）同时写在 `api-contract.ts` 和 Rust 侧，靠 `src/shared/types.ts` 里的通道常量与字面量类型钉住一致性：不一致不会让 typecheck 失败，只会运行时报「未知方法」。加方法时两边都要改。
 - 判定、折叠、diff 这类纯逻辑要留在可以不连集群的情况下被单测覆盖的形式（Rust `#[test]`，前端侧剩的两个 `.cjs`/`.mjs` 自测）。
 - 新增数据库列要写进 `pm-store` 的基线 DDL，并用 `column_exists()`（`PRAGMA table_info`）判存在；基线 DDL 每次启动都重跑，直接 ALTER 会让新库 duplicate column 顶掉整个启动事务。`SCHEMA_VERSION` 与 TS 时代对齐为 17。
-- Electron/Node 侧已经删除：`src/main/**`、`src/preload.ts`、electron 与 electron-builder 依赖、依赖 `dist/src/main` 的 8 个 selftest、`release.sh` 与整条 Electron 发版链。不要往回加；**发 Rust 版安装包目前没有一键发版脚本**，需要重新做（Gitee 分发仓 + 发行说明必须带 SHA256 行的规则见 README）。
+- Electron/Node 侧已经删除：`src/main/**`、`src/preload.ts`、electron 与 electron-builder 依赖、依赖 `dist/src/main` 的 8 个 selftest、`release.sh` 与整条 Electron 发版链。不要往回加；**发版走 `npm run release`**（`scripts/release-publish.mjs`：出包 → 门禁 → 建发行版 → 传安装包 → 匿名回读校验；Gitee 分发仓与发行说明必须带 SHA256 行的规则见 README）。
 
 ## 提交约定
 

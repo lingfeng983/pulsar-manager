@@ -309,21 +309,30 @@ npm run build          # 出 dist/renderer，确认 Vite 与 CSP 注入没问题
 
 ### 发版
 
-Electron 时代的一键发版脚本（`release.sh` + `scripts/release-publish.mjs` + `verify-package.mjs`）已随发版链一起删除，**Rust 版的一键发版脚本待重做**。当前手工流程：
+发版走 `scripts/release-publish.mjs`（`npm run release`），一条命令串起「出包 → 门禁 → 建发行版 → 传安装包 → 匿名回读校验」：
 
 ```bash
-npm run app:build
-EXE="rust/target/release/bundle/nsis/Pulsar Manager_1.6.2_x64-setup.exe"
-sha256sum "$EXE"
+npm run release -- --dry-run                   # 出包 + 全部门禁 + 打印发行说明，不建发行版
+npm run release                                # 正式发布（先 npm run app:build）
+npm run release -- --skip-build                # 复用已打好的包，不重新构建
+npm run release -- --verify-only --tag v1.6.2  # 只回读校验已发布的发行版
 ```
 
-发布到公开分发仓 [lingfeng983/pulsar-manager-dist](https://gitee.com/lingfeng983/pulsar-manager-dist/releases) 的对应标签，**发行说明正文里必须有一行 `- SHA256：`<64 位十六进制>``**。
+脚本会拦下这些事故，任何一条不过都不发：
 
-- 应用内「检查更新」的校验值**只从发行说明正文里取**（`rust/crates/pm-services/src/update.rs` 的 `sha256_from_notes`）：漏了这行，所有旧客户端会读得到新版本却拒绝下载；写错值，每个用户都下载成功却装不上。正文里带的那个 64 位必须与刚打出来的安装包一致。
+- 版本号三处不一致：`package.json`、`rust/Cargo.toml` 的 workspace version、`tauri.conf.json` 的 version。「设置 → 关于」与在线更新比对的都是它（`update:getVersion` 走后台返回应用版本，不是运行时版本）。
+- 标签 `v<版本>` 不存在、不指向 HEAD，或还没推到 origin；工作区有未提交的已跟踪改动（`--allow-dirty` 可跳过）。
+- 安装包大小不在 5–12 MB，或 exe 属性里的文件 / 产品版本不等于当前版本——拦的是被文件锁截断的半成品与误传的 Electron 包。
+- 发行说明缺文件：脚本按提交记录生成草稿后停下，等你补完再跑。
+
+发行说明正文存在 `docs/releases/v<版本>.md` 并随仓库入库。**正文里必须有一行 `- SHA256：` 加反引号包住的 64 位十六进制**：脚本会用刚算出的值替换或补上这一行，再与安装包逐位比对。应用内「检查更新」的校验值**只从正文里取**（`rust/crates/pm-services/src/update.rs` 的 `sha256_from_notes`）——漏了这行，所有旧客户端读得到新版本却拒绝下载；写错值，每个用户都下载成功却装不上。
+
+发布后用匿名请求回读，跑一遍客户端会做的事：最新发行版必须是这一版、附件名与大小要对、下载回来的 SHA256 与说明一致且与本地安装包逐字节一致。
+
+凭据按 `GITEE_TOKEN` → 仓库根 `.gitee_token`（已忽略）→ `GITEE_USER` / `GITEE_PASSWORD` → Windows 凭据管理器里的 `gitee.com` 账号 的顺序取，不会回显。其余约束：
+
 - **分发仓必须是公开的**：匿名就能读，应用内没有任何令牌入口，用户不用配凭证；源码仓不发版，避免同一版本两份包对不上号。
 - 分发仓只保留最近几个版本的安装包（Gitee 有仓库容量上限）；删发行版与附件不影响标签。
-- 附件大小门禁要重新按 Rust 产物校准：NSIS 包约 7 MB，不再需要原来 30 MB 下限（那是用来拦截被文件锁截断的 Electron 包）与 95 MB 上限。
-- 版本号有三个来源必须一致：`package.json`、`rust/Cargo.toml` 的 workspace version、`tauri.conf.json` 的 version。「设置 → 关于」与在线更新比对的都是它（`update:getVersion` 走后台返回应用版本，不是运行时版本）。
 
 ## 架构约束
 

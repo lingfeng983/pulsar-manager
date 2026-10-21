@@ -26,6 +26,7 @@
         "selftest": "node scripts/template-engine-selftest.mjs",
         "selftest:docs": "npm run build:shared && node scripts/doc-kb-selftest.cjs",
         "icon": "node scripts/make-icon.mjs",
+        "release": "node scripts/release-publish.mjs",
         "lint": "eslint src",
         "lint:fix": "eslint src --fix",
         "format": "prettier --write \"src/**/*.{ts,tsx}\"",

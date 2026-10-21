@@ -25,7 +25,10 @@ scripts/tunnel-selftest/certs/
 # electron-builder 清空目录时删不掉就直接失败。本机发版改用 OUT_DIR=<空目录> 绕开，
 # 这里统一忽略所有 electron-builder 输出目录（release/、release-alt/、release-next/ …）。
 # 注意 release.sh 是脚本文件，不带尾斜杠的写法不会误伤它。
-release*/
+# 这里统一忽略根目录下的 electron-builder 输出目录（release/、release-alt/、release-next/ …）；
+# 锚定根目录是必须的：不带前导斜杠会连 docs/releases/（发行说明）一起匹配掉。
+# 注意 release.sh 是脚本文件，不带尾斜杠的写法不会误伤它。
+/release*/
 
 # CDP 实机验证的探针脚本与快照，只对本机有意义
 .tmp-verify/
