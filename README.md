@@ -5,7 +5,7 @@ Apache Pulsar 集群的桌面运维客户端，后台是 Rust（Tauri 2 外壳�
 所有与 broker 的通信都在 Rust 后台完成，页面只有一个入口 `rpc(method, args)`，契约写在 `src/renderer/api-contract.ts`；凭据以 AES-256 加密后落库，加密密钥由系统密钥库保护（Windows DPAPI；平台不支持时默认拒绝降级为明文），数据存于本地 SQLite，不依赖任何外部服务。进程里没有 Node 运行时，也不打包 Chromium，页面跑在系统自带的 WebView2 上，安装包约 7 MB。
 
 ![License](https://img.shields.io/badge/License-Apache%202.0-blue)
-![Version](https://img.shields.io/badge/Version-v1.6.0-orange)
+![Version](https://img.shields.io/badge/Version-v1.6.1-orange)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![Tauri](https://img.shields.io/badge/Tauri-2-FFC131)
 ![Rust](https://img.shields.io/badge/Rust-1.98-DEA584)
@@ -287,6 +287,8 @@ npm run icon         # 重新生成应用图标（rust/crates/pm-tauri/icons/ico
 
 产物在 `rust/target/release/bundle/nsis/Pulsar Manager_<版本>_x64-setup.exe`（约 7 MB），单文件 exe 在 `rust/target/release/Pulsar Manager.exe`。
 
+安装/升级/卸载时对文件的处理写在 `rust/crates/pm-tauri/windows/installer-hooks.nsh`（Tauri 的 `bundle.windows.nsis.installerHooks` 挂载）：升级前清理旧 Electron 版与旧 Rust 版的安装目录/快捷方式/卸载注册表项，卸载时整目录删除，并在用户勾选「删除应用程序数据」时删掉 `%APPDATA%\pulsar-manager`。安装器语言固定为简体中文，改安装界面行为改这个文件后重新 `npm run app:build` 验证。
+
 改应用图标只改 `scripts/make-icon.mjs` 然后跑 `npm run icon`，产物要入库——`tauri.conf.json` 的 `bundle.icon` 指的就是它；ICO 容器必须用未压缩 DIB 目录项，Vista 之后允许的「目录项直接挂 PNG」体积小三倍，但按 DIB 解析的加载器（任务栏与属性面板走的就是它）会把 PNG 字节当位图读，画出来是一片彩色噪点。
 
 数据库结构以常量写在 `rust/crates/pm-store/src/schema.rs`，而不是外部 `.sql` 文件：基线 DDL 每次启动整份幂等执行，再按 `PRAGMA table_info` 补齐新增列。走文件读取的话产物里带的其实是某次手工复制的旧基线，干净环境甚至直接找不到文件而启动失败。
@@ -311,7 +313,7 @@ Electron 时代的一键发版脚本（`release.sh` + `scripts/release-publish.m
 
 ```bash
 npm run app:build
-EXE="rust/target/release/bundle/nsis/Pulsar Manager_1.6.0_x64-setup.exe"
+EXE="rust/target/release/bundle/nsis/Pulsar Manager_1.6.1_x64-setup.exe"
 sha256sum "$EXE"
 ```
 
@@ -341,6 +343,8 @@ sha256sum "$EXE"
 ## 本地数据
 
 - SQLite 位于 `%APPDATA%\pulsar-manager\pulsar-manager.db`（其他平台是 `$HOME/.config/pulsar-manager/…`，与原 Electron 版 `app.getPath('userData')` 同目录，所以老数据直接能读），存集群配置、SSH/K8s 转发配置、操作日志、界面设置与快捷键绑定、报文模板、消费者会话配置、发送历史、巡检报告与历史、告警规则与事件、通知渠道与投递记录；表结构以 `PRAGMA user_version` 跟踪并增量迁移
+- 运行时日志默认在 `%APPDATA%\pulsar-manager\logs\main.log`（单文件超过 2 MB 轮转为 `main.1.log`，只留一份备份），排障要的完整链路都在这里；「设置 → 日志」可以直接打开目录、改存储位置（立即生效，落库 `user_settings.logDirectory`）或导出（系统「另存为」选位置，内容是操作日志 + 运行时日志的合并 JSON）
+- 卸载默认保留用户数据；在卸载确认页勾选「删除应用程序数据」后，会连同 `%APPDATA%\pulsar-manager`（数据库、日志、加密密钥）一起删除。升级时会清理旧版本遗留的安装文件，但不动用户数据
 - 已安装的插件是 `<userData>/plugins/*.json`（或 `plugins/<目录>/plugin.json`），启用状态记在 `user_settings` 的 `disabledPlugins` 里
 - 调试时想用一个干净的库：设 `PULSAR_MANAGER_DB=<临时路径>` 再起外壳（单实例锁按 userData 路径判定，同一份数据不会跑出两套后台任务）
 

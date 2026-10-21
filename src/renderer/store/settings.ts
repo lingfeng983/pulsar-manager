@@ -5,6 +5,7 @@ import type {AppSettings, FontSizeLevel} from '../types';
 // 这里只是 IPC 失败时的兜底显示，真正生效的取值始终由主进程读库给出。
 export const DEFAULT_SETTINGS: AppSettings = {
     truncateLength: 50,
+    logDirectory: '',
     autoRefresh: true,
     refreshIntervalSeconds: 30,
     fontSize: 'large',

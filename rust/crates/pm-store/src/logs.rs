@@ -49,9 +49,10 @@ pub fn list(store: &Store, limit: i64) -> AppResult<Vec<OperationLog>> {
     })
 }
 
-pub fn clear(store: &Store) -> AppResult<()> {
+/// 返回实际删掉的行数：界面要显示"清空了多少条"，只回一个 null 会被当成失败。
+pub fn clear(store: &Store) -> AppResult<i64> {
     store.with(|conn| {
-        conn.execute("DELETE FROM operation_logs", [])?;
-        Ok(())
+        let deleted = conn.execute("DELETE FROM operation_logs", [])?;
+        Ok(deleted as i64)
     })
 }

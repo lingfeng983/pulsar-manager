@@ -139,7 +139,12 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
         }
 
         "resources:deleteTopic" => {
-            settle(client.delete_topic(&tenant, &namespace, &topic, persistent).await)
+            let force = boolean(&args, 5, false);
+            settle(
+                client
+                    .delete_topic(&tenant, &namespace, &topic, persistent, force)
+                    .await,
+            )
         }
         "resources:createTopic" => {
             let name = text(&args, 3);

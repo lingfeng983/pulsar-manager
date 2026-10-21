@@ -91,6 +91,14 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> AppResult<bool
     Ok(false)
 }
 
+/// 运行时日志默认目录：与数据库同级的 `logs`，和 Electron 版完全一致。
+pub fn default_log_dir() -> PathBuf {
+    default_db_path()
+        .parent()
+        .map(|parent| parent.join("logs"))
+        .unwrap_or_else(|| PathBuf::from("logs"))
+}
+
 /// 默认库路径：`%APPDATA%\pulsar-manager\pulsar-manager.db`，与 Electron 版
 /// `app.getPath('userData')` 同目录，切换版本后能直接读到原来的集群与模板。
 pub fn default_db_path() -> PathBuf {

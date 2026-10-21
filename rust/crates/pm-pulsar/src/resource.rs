@@ -133,20 +133,73 @@ impl AdminClient {
         }
     }
 
+    /// 删除 topic。这里有三处跨版本差异，都不能靠"按一个版本写死"处理：
+    ///
+    /// 1. 分区元数据：3.x 及以前只有分区 topic 才返回 `{"partitions":N}`（非分区
+    ///    404 或数组），4.0 起非分区 topic 也会返回 200 + `{"partitions":0}`；
+    /// 2. 端点：分区 topic 必须走 `DELETE {base}/partitions`，3.3+/4.0 的基名端点
+    ///    会明确回 409 让人改走 delete-partitioned-topic；
+    /// 3. 2.10 的基名端点多一个 `deleteSchema` 开关，2.11+ 由 broker 自己清理。
+    ///
+    /// 因此先按实际探测到的元数据选端点，失败再按 broker 的提示换另一个端点；
+    /// 版本只用于决定是否补 `deleteSchema`，探测不到版本也照样能删。
     pub async fn delete_topic(
         &self,
         tenant: &str,
         namespace: &str,
         topic: &str,
         persistent: bool,
+        force: bool,
     ) -> AppResult<()> {
-        let base = topic_base(tenant, namespace, topic, persistent);
-        let partitions: Option<Vec<String>> =
-            self.get_opt_json(&format!("{base}/partitions")).await?;
-        if partitions.as_ref().is_some_and(|list| !list.is_empty()) {
-            self.delete(&format!("{base}/partitions")).await
+        let name = short_topic_name(topic);
+        let base = topic_base(tenant, namespace, name, persistent);
+        let raw = match self.get_opt_json::<Value>(&format!("{base}/partitions")).await {
+            Ok(raw) => raw,
+            // 端点被网关/旧版本挡掉时按"非分区"处理，删除本身仍然继续
+            Err(error) if method_rejected(&error) => None,
+            Err(error) => return Err(error),
+        };
+        let meta = raw
+            .as_ref()
+            .map(|value| parse_partitions_meta(value, tenant, namespace, name, persistent))
+            .unwrap_or_default();
+
+        let mut query: Vec<(String, String)> = Vec::new();
+        if force {
+            query.push(("force".to_string(), "true".to_string()));
+        }
+        // 2.10 的 `?deleteSchema=true` 在更高版本会被忽略，但只在确认是 2.10
+        // 时才发：避免把"清 schema"这种有副作用的参数发给行为未知的私有分支。
+        if self
+            .version_quick()
+            .await
+            .and_then(|raw| PulsarVersion::parse(&raw))
+            .is_some_and(|version| version.needs_delete_schema_param())
+        {
+            query.push(("deleteSchema".to_string(), "true".to_string()));
+        }
+
+        if meta.partitions.is_empty() {
+            match self.delete_with_query(&base, &query).await {
+                // 元数据探测被挡住、但 broker 认得出这是分区 topic：按它的提示重试
+                Err(error) if is_partitioned_conflict(&error) => {
+                    self.delete_with_query(&format!("{base}/partitions"), &query)
+                        .await
+                }
+                other => other.map_err(busy_hint),
+            }
         } else {
-            self.delete(&base).await
+            match self
+                .delete_with_query(&format!("{base}/partitions"), &query)
+                .await
+            {
+                // 极旧的 broker（或代理只放行基名端点）没有 /partitions 删除路由
+                Err(error) if method_rejected(&error) => self
+                    .delete_with_query(&base, &query)
+                    .await
+                    .map_err(busy_hint),
+                other => other.map_err(busy_hint),
+            }
         }
     }
 
@@ -192,32 +245,15 @@ impl AdminClient {
         topic: &str,
         persistent: bool,
     ) -> AppResult<Vec<String>> {
-        let base = topic_base(tenant, namespace, short_topic_name(topic), persistent);
+        let short = short_topic_name(topic);
+        let base = topic_base(tenant, namespace, short, persistent);
         let Some(raw) = self
             .get_opt_json::<Value>(&format!("{base}/partitions"))
             .await?
         else {
             return Ok(Vec::new());
         };
-        let scheme = if persistent {
-            "persistent"
-        } else {
-            "non-persistent"
-        };
-        let short = short_topic_name(topic);
-        if let Some(array) = raw.as_array() {
-            return Ok(array
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect());
-        }
-        if let Some(count) = raw.get("partitions").and_then(Value::as_i64) {
-            return Ok((0..count)
-                .map(|index| format!("{scheme}://{tenant}/{namespace}/{short}-partition-{index}"))
-                .collect());
-        }
-        Ok(Vec::new())
+        Ok(parse_partitions_meta(&raw, tenant, namespace, short, persistent).partitions)
     }
 
     pub async fn topic_permissions(
@@ -715,6 +751,118 @@ pub fn topic_base(tenant: &str, namespace: &str, topic: &str, persistent: bool) 
     )
 }
 
+/// broker 版本只保留 major/minor：删除 topic 的 API 只需要区分
+/// 2.10（多一个 deleteSchema 参数）与之后的版本。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PulsarVersion {
+    pub major: u64,
+    pub minor: u64,
+}
+
+impl PulsarVersion {
+    pub fn parse(raw: &str) -> Option<Self> {
+        let core = raw.trim().trim_start_matches('v');
+        let mut parts = core
+            .split(|ch: char| !ch.is_ascii_digit())
+            .filter(|part| !part.is_empty());
+        let major = parts.next()?.parse().ok()?;
+        let minor = parts.next().and_then(|part| part.parse().ok()).unwrap_or(0);
+        Some(Self { major, minor })
+    }
+
+    /// 2.10 的 `DELETE {base}?deleteSchema=true` 用于连带删除 schema；
+    /// 2.11 起 broker 自己清理，再带这个参数只会被忽略。
+    pub fn needs_delete_schema_param(&self) -> bool {
+        self.major == 2 && self.minor == 10
+    }
+}
+
+/// `/partitions` 的归一化结果。`deleted` 是 Pulsar 4.0 新增的元数据字段，
+/// 目前删除流程用不到，但保留它让调用方不必再猜响应形状。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PartitionsMeta {
+    pub partitions: Vec<String>,
+    pub deleted: bool,
+}
+
+/// 解析 `/partitions` 响应：分区 URI 数组与 `{"partitions":N,"deleted":false}`
+/// 都要能落回 URI 列表，只有数量时按 Pulsar 固定的 `-partition-N` 规则还原。
+/// Pulsar 4.0 起非分区 topic 也会返回 200 + `{"partitions":0}`，所以不能把
+/// "能反序列化成 Vec" 当作"是分区 topic"。
+pub fn parse_partitions_meta(
+    raw: &Value,
+    tenant: &str,
+    namespace: &str,
+    topic: &str,
+    persistent: bool,
+) -> PartitionsMeta {
+    if let Some(array) = raw.as_array() {
+        return PartitionsMeta {
+            partitions: array
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect(),
+            deleted: false,
+        };
+    }
+    let Some(object) = raw.as_object() else {
+        return PartitionsMeta::default();
+    };
+    let deleted = object
+        .get("deleted")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let scheme = if persistent {
+        "persistent"
+    } else {
+        "non-persistent"
+    };
+    let base = format!("{scheme}://{tenant}/{namespace}/{topic}");
+    match object.get("partitions") {
+        Some(Value::Array(items)) => PartitionsMeta {
+            partitions: items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect(),
+            deleted,
+        },
+        Some(Value::Number(count)) => PartitionsMeta {
+            partitions: (0..count.as_i64().unwrap_or(0).max(0))
+                .map(|index| format!("{base}-partition-{index}"))
+                .collect(),
+            deleted,
+        },
+        _ => PartitionsMeta {
+            partitions: Vec::new(),
+            deleted,
+        },
+    }
+}
+
+/// 3.3+/4.0 的基名删除端点对分区 topic 返回 409，并明确要求改走
+/// delete-partitioned-topic。只认这一种冲突，别的 409（并发修改）原样上报。
+fn is_partitioned_conflict(error: &AppError) -> bool {
+    matches!(
+        error,
+        AppError::Http { status: 409, message }
+            if message.contains("partitioned topic") || message.contains("delete-partitioned-topic")
+    )
+}
+
+/// broker 的 412 原文只有一句 "Topic has active producers/subscriptions"，
+/// 补一句可执行的下一步，界面才知道该勾"强制删除"。
+fn busy_hint(error: AppError) -> AppError {
+    match error {
+        AppError::Http { status: 412, message } if !message.contains("强制删除") => AppError::Http {
+            status: 412,
+            message: format!("{message}（Topic 仍有生产/消费者或订阅，勾选「强制删除」后重试）"),
+        },
+        other => other,
+    }
+}
+
 /// 列表接口返回的 name 已是 `tenant/ns/topic`，再拼一次前缀会得到双重路径。
 pub fn short_topic_name(topic: &str) -> &str {
     let without_scheme = topic.rsplit("://").next().unwrap_or(topic);
@@ -850,5 +998,47 @@ mod tests {
         );
         assert_eq!(short_topic_name("public/default/my-topic"), "my-topic");
         assert_eq!(short_topic_name("my-topic"), "my-topic");
+    }
+
+    #[test]
+    fn parses_both_partition_metadata_shapes() {
+        let object = serde_json::json!({"partitions": 2, "deleted": false});
+        let meta = parse_partitions_meta(&object, "public", "default", "orders", true);
+        assert_eq!(
+            meta.partitions,
+            vec![
+                "persistent://public/default/orders-partition-0",
+                "persistent://public/default/orders-partition-1",
+            ]
+        );
+        assert!(!meta.deleted);
+
+        let array = serde_json::json!([
+            "non-persistent://public/default/orders-partition-1",
+            "non-persistent://public/default/orders-partition-0",
+        ]);
+        let meta = parse_partitions_meta(&array, "public", "default", "orders", false);
+        assert_eq!(meta.partitions.len(), 2);
+
+        // 4.0 对非分区 topic 也会回 200 + partitions=0
+        let empty = serde_json::json!({"partitions": 0, "deleted": false});
+        let meta = parse_partitions_meta(&empty, "public", "default", "orders", true);
+        assert!(meta.partitions.is_empty());
+    }
+
+    #[test]
+    fn parses_broker_versions() {
+        assert_eq!(
+            PulsarVersion::parse("4.0.0"),
+            Some(PulsarVersion { major: 4, minor: 0 })
+        );
+        assert_eq!(
+            PulsarVersion::parse("v3.3.9-SNAPSHOT"),
+            Some(PulsarVersion { major: 3, minor: 3 })
+        );
+        assert!(PulsarVersion::parse("unknown").is_none());
+        assert!(PulsarVersion::parse("2.10.6").unwrap().needs_delete_schema_param());
+        assert!(!PulsarVersion::parse("2.11.4").unwrap().needs_delete_schema_param());
+        assert!(!PulsarVersion::parse("4.0.0").unwrap().needs_delete_schema_param());
     }
 }

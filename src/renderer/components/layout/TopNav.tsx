@@ -45,7 +45,6 @@ import {
     notifyChannelsTab,
 } from '../../utils/tabIds';
 import {matchesFilter} from '../../utils/textFilter';
-import {downloadBlob} from '../../utils/download';
 import {useCommand} from '../../hooks/useKeybindings';
 import {useShortcutStore, resolveBinding} from '../../store/shortcuts';
 import {formatBinding} from '../../utils/keybinding';
@@ -361,21 +360,21 @@ const TopNav: React.FC = () => {
         addTab(alertTab());
     }, [addTab]);
 
-    // 导出日志
+    // 导出日志：位置由系统"另存为"对话框决定，成功提示里回显完整路径
     const handleExportLogs = async () => {
         try {
-            const response = await window.electronAPI.logs.getRecent(100);
-            if (response.success && response.data) {
-                downloadBlob(
-                    JSON.stringify(response.data, null, 2),
-                    `logs_${new Date().toISOString().slice(0, 10)}.json`,
-                );
-                message.success('日志导出成功');
-            } else {
+            const response = await window.electronAPI.logs.export();
+            if (!response.success) {
                 message.error(response.error || '导出失败');
+                return;
             }
-        } catch {
-            message.error('导出失败');
+            // 用户取消另存为不是失败，不弹"成功"也不弹错
+            if (!response.data) {
+                return;
+            }
+            message.success(`日志已导出到 ${response.data.path}`);
+        } catch (error) {
+            message.error((error as Error).message || '导出失败');
         }
     };
 

@@ -1,5 +1,5 @@
 import React, {useState, useEffect, useCallback, useMemo, useRef} from 'react';
-import {Tree, Space, Spin, message, Input} from 'antd';
+import {Tree, Space, Spin, message, Input, Checkbox} from 'antd';
 import type {DataNode} from 'antd/es/tree';
 import {
     ClusterOutlined,
@@ -810,9 +810,21 @@ const ResourceTree: React.FC = () => {
                         });
                     } else if (dataRef?.type === 'topic' && dataRef.clusterId && dataRef.tenant && dataRef.namespace) {
                         const {clusterId, tenant, namespace, topic, persistent} = dataRef;
+                        // 与详情页同一个口径：确认框本身就是"连消息与订阅一起删"的确认，
+                        // 默认强制删除，避免 topic 被占用时第一次必然失败。
+                        let force = true;
                         confirmDanger({
                             title: '删除 Topic',
-                            description: `删除 "${tenant}/${namespace}/${topic}" 会丢弃其全部消息与订阅游标，不可恢复。`,
+                            description: (
+                                <Space direction="vertical" size={8} style={{width: '100%'}}>
+                                    <div>
+                                        删除 "{tenant}/{namespace}/{topic}" 会丢弃其全部消息与订阅游标，不可恢复。
+                                    </div>
+                                    <Checkbox defaultChecked onChange={event => (force = event.target.checked)}>
+                                        强制删除（Topic 仍被生产者/消费者使用时也删除，并断开其连接）
+                                    </Checkbox>
+                                </Space>
+                            ),
                             requireExactName: topic ?? '',
                             onOk: async () => {
                                 const response = await window.electronAPI.resources.deleteTopic(
@@ -821,6 +833,7 @@ const ResourceTree: React.FC = () => {
                                     namespace,
                                     topic ?? '',
                                     persistent,
+                                    force,
                                 );
                                 if (!response.success) {
                                     throw new Error(response.error || '删除失败');

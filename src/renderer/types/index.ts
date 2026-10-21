@@ -86,6 +86,8 @@ export type {
     ConfigBundle,
     ConfigImportResult,
     ConfigMeta,
+    LogExportResult,
+    LogDirResult,
     ExportedClusterConfig,
     BenchmarkPreset,
     BenchmarkPresetParams,

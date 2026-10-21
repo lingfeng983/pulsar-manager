@@ -415,6 +415,28 @@ impl AdminClient {
         None
     }
 
+    /// 版本探测的快速路径：只读 `/clusters` 与集群详情，不碰 `/metrics`。
+    /// 删除 topic 只需要区分 2.10 的 deleteSchema 参数，不值得为一个可选参数
+    /// 在没开 metrics 的集群上等满 5 秒。
+    pub async fn version_quick(&self) -> Option<String> {
+        let clusters: Option<Vec<String>> = self
+            .get_json_or_none("/admin/v2/clusters")
+            .await
+            .ok()
+            .flatten();
+        for name in clusters.unwrap_or_default().into_iter().take(1) {
+            if let Ok(Some(info)) = self
+                .get_opt_json::<ClusterInfo>(&format!("/admin/v2/clusters/{name}"))
+                .await
+            {
+                if let Some(version) = info.version {
+                    return Some(version);
+                }
+            }
+        }
+        None
+    }
+
     pub async fn test_connection(&self) -> ConnectionTest {
         if !self.health_check().await {
             return ConnectionTest {

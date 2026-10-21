@@ -882,6 +882,9 @@ export type FontSizeLevel = 'small' | 'medium' | 'large' | 'xlarge';
 // 加了字段不接线，就是又一个死设置。
 export interface AppSettings {
     truncateLength: number;
+    // 运行时日志目录。空串表示默认的 <userData>/logs；只有设置页的
+    // "修改位置"会写它，改完主进程立即切换 sink，不需要重启。
+    logDirectory: string;
     autoRefresh: boolean;
     refreshIntervalSeconds: number;
     fontSize: FontSizeLevel;
@@ -1586,6 +1589,21 @@ export interface ConfigImportResult {
 export interface ConfigMeta {
     appVersion: string;
     databasePath: string;
+    // 运行时日志（%APPDATA%\pulsar-manager\logs\main.log 或用户改过的目录）
+    logPath: string;
+    logDir: string;
+}
+
+// 日志导出包：操作日志 + 运行时日志文本合并成一个文件，位置由系统另存对话框决定
+export interface LogExportResult {
+    path: string;
+    bytes: number;
+    operationLogCount: number;
+}
+
+export interface LogDirResult {
+    dir: string;
+    path: string;
 }
 
 // ========== 插件（本地声明式扩展） ==========

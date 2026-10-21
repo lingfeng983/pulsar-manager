@@ -3,6 +3,24 @@ use rusqlite::params;
 
 use crate::db::Store;
 
+/// 启动早期读一条设置：这时 `Store` 还没打开（数据库结构也可能刚重建），
+/// 用只读连接直接查，任何失败都当作"没有这条设置"——日志路径这类兜底配置
+/// 不该反过来把进程挡在启动阶段。
+pub fn configured(key: &str) -> Option<String> {
+    let path = crate::db::default_db_path();
+    let conn = rusqlite::Connection::open_with_flags(
+        &path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .ok()?;
+    conn.query_row(
+        "SELECT value FROM user_settings WHERE key = ?1",
+        [key],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+}
+
 pub fn get(store: &Store, key: &str) -> AppResult<Option<String>> {
     store.with(|conn| {
         let mut stmt = conn.prepare("SELECT value FROM user_settings WHERE key = ?1")?;

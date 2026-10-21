@@ -15,6 +15,7 @@ import {
     DatePicker,
     InputNumber,
     Tooltip,
+    Checkbox,
     message,
 } from 'antd';
 import dayjs from 'dayjs';
@@ -424,9 +425,19 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
 
     // 删除Topic
     const handleDeleteTopic = () => {
+        // 弹窗里关闭时不再读取；默认勾选：这个确认框本身就是在确认"连订阅和消息
+        // 一起删"，再让用户先失败一次去猜 force 参数没有意义。
+        let force = true;
         confirmDanger({
             title: '确认删除 Topic',
-            description: '此操作不可恢复，且会删除所有关联的订阅和消息！',
+            description: (
+                <Space direction="vertical" size={8} style={{width: '100%'}}>
+                    <div>此操作不可恢复，且会删除所有关联的订阅和消息！</div>
+                    <Checkbox defaultChecked onChange={event => (force = event.target.checked)}>
+                        强制删除（Topic 仍被生产者/消费者使用时也删除，并断开其连接）
+                    </Checkbox>
+                </Space>
+            ),
             okText: '确认删除',
             requireExactName: topic,
             onOk: async () => {
@@ -436,11 +447,12 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                     namespace,
                     topic,
                     persistent,
+                    force,
                 );
                 if (!response.success) {
                     throw new Error(response.error || '删除失败');
                 }
-                message.success('Topic 删除成功');
+                message.success(force ? 'Topic 已强制删除' : 'Topic 删除成功');
                 // Topic 已不存在，列表缓存必须失效，否则资源树仍显示它
                 invalidateTopics(clusterId, tenant, namespace);
                 invalidateTopicStats(clusterId, tenant, namespace, topic);

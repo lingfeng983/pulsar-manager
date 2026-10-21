@@ -15,7 +15,7 @@ import {
     Upload,
     message,
 } from 'antd';
-import {DownloadOutlined, UploadOutlined, ReloadOutlined, DeleteOutlined} from '@ant-design/icons';
+import {DownloadOutlined, UploadOutlined, ReloadOutlined, DeleteOutlined, FolderOpenOutlined} from '@ant-design/icons';
 import type {ConfigBundle, ConfigImportResult, ConfigMeta} from '../types';
 import {useSettingsStore} from '../store/settings';
 import {useThemeStore} from '../store/theme';
@@ -99,6 +99,7 @@ const ConfigCenter: React.FC = () => {
     // 重试与首屏加载可能同时在途，晚到的那一份不能覆盖新一轮的结果
     const metaRequestRef = useRef(0);
     const [busy, setBusy] = useState(false);
+    const [logBusy, setLogBusy] = useState(false);
     // 截断长度在输入过程中只改草稿，失焦/回车才落库：
     // 直接每敲一位就写一次设置，输入 500 会先落 5、50，再落 500。
     const [truncateDraft, setTruncateDraft] = useState<number | null>(null);
@@ -211,6 +212,64 @@ const ConfigCenter: React.FC = () => {
                 message.success(`已清空操作日志（删除 ${response.data?.deleted ?? 0} 条）`);
             },
         });
+    };
+
+    const handleOpenLogDir = async () => {
+        try {
+            const response = await window.electronAPI.logs.openDir();
+            if (!response.success) {
+                message.error(response.error || '打开日志目录失败');
+                return;
+            }
+            if (response.data?.failure) {
+                message.error(response.data.failure);
+                return;
+            }
+            message.success(`已打开日志目录：${response.data?.dir ?? ''}`);
+        } catch (error) {
+            message.error(`打开日志目录失败：${(error as Error).message}`);
+        }
+    };
+
+    const handleExportLogs = async () => {
+        setLogBusy(true);
+        try {
+            const response = await window.electronAPI.logs.export();
+            if (!response.success) {
+                message.error(response.error || '导出失败');
+                return;
+            }
+            // 用户在"另存为"里取消不是失败
+            if (!response.data) {
+                return;
+            }
+            message.success(`日志已导出到 ${response.data.path}`);
+        } catch (error) {
+            message.error(`导出失败：${(error as Error).message}`);
+        } finally {
+            setLogBusy(false);
+        }
+    };
+
+    const handleChooseLogDir = async () => {
+        setLogBusy(true);
+        try {
+            const response = await window.electronAPI.logs.chooseDir();
+            if (!response.success) {
+                message.error(response.error || '修改日志目录失败');
+                return;
+            }
+            if (!response.data) {
+                return;
+            }
+            message.success(`运行时日志已切换到 ${response.data.dir}，新的日志会写入该目录`);
+            // 路径显示直接读 config:meta，切换后必须重取
+            loadMeta();
+        } catch (error) {
+            message.error(`修改日志目录失败：${(error as Error).message}`);
+        } finally {
+            setLogBusy(false);
+        }
     };
 
     const handleResetSettings = () => {
@@ -479,9 +538,6 @@ const ConfigCenter: React.FC = () => {
                                 <Button icon={<ReloadOutlined />} onClick={handleResetSettings}>
                                     恢复默认
                                 </Button>
-                                <Button danger icon={<DeleteOutlined />} onClick={handleClearLogs}>
-                                    清空操作日志
-                                </Button>
                             </Space>
                             {/* 单行提示：带 description 的两段式 Alert 会占掉一整屏高度的三分之一 */}
                             <Alert
@@ -492,6 +548,41 @@ const ConfigCenter: React.FC = () => {
                                     '导入后需在集群配置里重新填一次凭据。导入只做新增，同名集群会被跳过。'
                                 }
                             />
+                        </Space>
+                    </Card>
+                </Col>
+
+                <Col span={24}>
+                    <Card title="日志" size="small">
+                        <Space direction="vertical" size={8} style={{width: '100%'}}>
+                            <Text copyable={meta?.logPath ? {text: meta.logPath} : undefined}>
+                                运行时日志：{meta?.logPath || '读取中…'}
+                            </Text>
+                            <Text className="hint-text">
+                                默认目录是 %APPDATA%\pulsar-manager\logs；单个文件超过 2MB 轮转为
+                                main.1.log，只保留一份备份。
+                            </Text>
+                            <Space wrap>
+                                <Button icon={<FolderOpenOutlined />} onClick={() => void handleOpenLogDir()}>
+                                    打开日志目录
+                                </Button>
+                                <Button onClick={() => void handleChooseLogDir()} loading={logBusy}>
+                                    修改位置
+                                </Button>
+                                <Button
+                                    icon={<DownloadOutlined />}
+                                    onClick={() => void handleExportLogs()}
+                                    loading={logBusy}
+                                >
+                                    导出日志
+                                </Button>
+                                <Button danger icon={<DeleteOutlined />} onClick={handleClearLogs}>
+                                    清空操作日志
+                                </Button>
+                            </Space>
+                            <Text className="hint-text">
+                                导出会把操作日志与运行时日志合并成一个 JSON 文件，位置由系统"另存为"对话框决定。
+                            </Text>
                         </Space>
                     </Card>
                 </Col>

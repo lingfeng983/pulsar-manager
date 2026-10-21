@@ -28,6 +28,9 @@ fn default_settings() -> Map<String, Value> {
     map.insert("alertEnabled".into(), json!(false));
     map.insert("alertCheckSeconds".into(), json!(60));
     map.insert("alertRetentionDays".into(), json!(30));
+    // 空串 = 使用默认目录（%APPDATA%\pulsar-manager\logs），不写死绝对路径，
+    // 这样导出/导入配置换机器后仍然可用。
+    map.insert("logDirectory".into(), json!(""));
     map
 }
 
@@ -117,16 +120,27 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
                 for (key, value) in default_settings() {
                     write_setting(&context, &key, &value)?;
                 }
+                // 恢复默认也把运行中的日志 sink 切回默认目录，否则要等下次启动
+                let _ = crate::logging::set_dir(&pm_store::default_log_dir());
                 merged_settings(&context)
             })
             .await
         }
         "config:meta" => {
             let path = pm_store::default_db_path().display().to_string();
-            json!({
-                "success": true,
-                "data": { "app_version": APP_VERSION, "database_path": path }
-            })
+            let log_path = crate::logging::path();
+            let log_dir = log_path
+                .parent()
+                .map(|dir| dir.display().to_string())
+                .unwrap_or_default();
+            // 走 bridge::ok 而不是手写 json!：前端契约是 camelCase，
+            // 这里手写 snake_case 会让"运行信息"里的路径整行显示为空。
+            crate::bridge::ok(json!({
+                "app_version": APP_VERSION,
+                "database_path": path,
+                "log_path": log_path.display().to_string(),
+                "log_dir": log_dir,
+            }))
         }
         "config:export" => {
             let context = context.clone();
@@ -150,6 +164,15 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
                     for (key, value) in settings {
                         write_setting(&context, key, value)?;
                     }
+                    // 导入的日志目录立即生效，不用等重启；空串回默认目录
+                    if let Some(value) = settings.get("logDirectory").and_then(Value::as_str) {
+                        let dir = if value.trim().is_empty() {
+                            pm_store::default_log_dir()
+                        } else {
+                            std::path::PathBuf::from(value.trim())
+                        };
+                        crate::logging::set_dir(&dir)?;
+                    }
                 }
                 merged_settings(&context)
             })
@@ -157,7 +180,8 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
         }
         "config:clearLogs" => {
             let context = context.clone();
-            blocking(move || logs::clear(&context.store)).await
+            blocking(move || logs::clear(&context.store).map(|deleted| json!({ "deleted": deleted })))
+                .await
         }
 
         // ---------- 日志与版本 ----------
@@ -165,6 +189,65 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
             let limit = args.first().and_then(Value::as_i64).unwrap_or(200);
             let context = context.clone();
             blocking(move || logs::list(&context.store, limit)).await
+        }
+        // 导出走系统"另存为"对话框：浏览器式 download 只会静默落到默认下载目录，
+        // 用户既看不到文件去了哪，也没法选位置。
+        "logs:export" => export_logs(context).await,
+        "logs:openDir" => {
+            let dir = crate::logging::path()
+                .parent()
+                .map(|dir| dir.to_path_buf())
+                .unwrap_or_else(pm_store::default_log_dir);
+            let _ = std::fs::create_dir_all(&dir);
+            #[cfg(target_os = "windows")]
+            let failure = std::process::Command::new("explorer").arg(&dir).spawn().err();
+            #[cfg(target_os = "macos")]
+            let failure = std::process::Command::new("open").arg(&dir).spawn().err();
+            #[cfg(all(unix, not(target_os = "macos")))]
+            let failure = std::process::Command::new("xdg-open").arg(&dir).spawn().err();
+            json!({
+                "success": true,
+                "data": {
+                    "dir": dir.display().to_string(),
+                    "failure": failure.map(|error| format!("打开目录失败：{error}")),
+                }
+            })
+        }
+        // 目录只能由系统对话框产生：开一条"按路径写日志"的通道等于把任意目录
+        // 交给页面。选完立刻切换 sink，并落库供下次启动使用。
+        "logs:chooseDir" => {
+            let picked = tokio::task::spawn_blocking(|| {
+                rfd::FileDialog::new()
+                    .set_title("选择运行时日志目录")
+                    .pick_folder()
+            })
+            .await;
+            match picked {
+                Ok(None) => json!({ "success": true, "data": null }),
+                Ok(Some(dir)) => match crate::logging::set_dir(&dir) {
+                    Ok(path) => {
+                        let text = dir.to_string_lossy().to_string();
+                        let context = context.clone();
+                        let saved = blocking(move || {
+                            settings::set(&context.store, "logDirectory", &text)
+                                .map(|_| json!({ "dir": text }))
+                        })
+                        .await;
+                        if saved.get("success").and_then(Value::as_bool) != Some(true) {
+                            return Some(saved);
+                        }
+                        json!({
+                            "success": true,
+                            "data": {
+                                "dir": dir.display().to_string(),
+                                "path": path.display().to_string(),
+                            }
+                        })
+                    }
+                    Err(error) => crate::bridge::fail(error),
+                },
+                Err(error) => crate::bridge::fail(AppError::Other(format!("对话框失败：{error}"))),
+            }
         }
         "update:getVersion" => json!({ "success": true, "data": APP_VERSION }),
 
@@ -408,6 +491,95 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
 
         _ => return None,
     })
+}
+
+/// 导出一份日志包（操作日志 + 运行时日志文本）到用户选的位置。
+///
+/// 两份日志本来就是排障时一起看的：操作日志回答"谁在什么时候做了什么"，
+/// 运行时日志回答"后台为什么失败"。合成一个 JSON 文件，用户只需选一次位置。
+async fn export_logs(context: Shared) -> Value {
+    let snapshot = {
+        let context = context.clone();
+        tokio::task::spawn_blocking(move || {
+            let items = logs::list(&context.store, 5000)?;
+            Ok::<_, AppError>((items, runtime_log_text()))
+        })
+        .await
+    };
+    let (items, runtime) = match snapshot {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => return crate::bridge::fail(error),
+        Err(error) => {
+            return crate::bridge::fail(AppError::Other(format!("任务失败：{error}")))
+        }
+    };
+    let operation_log_count = items.len();
+
+    let default_name = format!(
+        "pulsar-manager-logs_{}.json",
+        chrono::Local::now().format("%Y%m%d_%H%M%S")
+    );
+    let picked = tokio::task::spawn_blocking(move || {
+        rfd::FileDialog::new()
+            .set_title("导出日志")
+            .set_file_name(&default_name)
+            .add_filter("日志文件", &["json"])
+            .save_file()
+    })
+    .await;
+    let path = match picked {
+        Ok(None) => return json!({ "success": true, "data": null }),
+        Ok(Some(path)) => path,
+        Err(error) => {
+            return crate::bridge::fail(AppError::Other(format!("对话框失败：{error}")))
+        }
+    };
+
+    let payload = json!({
+        "format": "pulsar-manager-logs",
+        "version": 1,
+        "exportedAt": pm_core::now_iso(),
+        "appVersion": APP_VERSION,
+        "runtimeLogPath": crate::logging::path().display().to_string(),
+        "runtimeLog": runtime,
+        "operationLogs": items,
+    });
+    let text = match serde_json::to_string_pretty(&payload) {
+        Ok(text) => text,
+        Err(error) => {
+            return crate::bridge::fail(AppError::Other(format!("生成日志文件失败：{error}")))
+        }
+    };
+    match std::fs::write(&path, text.as_bytes()) {
+        Ok(()) => json!({
+            "success": true,
+            "data": {
+                "path": path.display().to_string(),
+                "bytes": text.len(),
+                "operationLogCount": operation_log_count,
+            }
+        }),
+        Err(error) => crate::bridge::fail(AppError::Other(format!(
+            "写日志文件失败 {}：{error}",
+            path.display()
+        ))),
+    }
+}
+
+/// 旧一轮 + 当前一轮按时间顺序拼接；文件都读不到时给一句人话，导出包仍是合法 JSON。
+fn runtime_log_text() -> String {
+    let path = crate::logging::path();
+    let backup = path.with_file_name("main.1.log");
+    let mut text = String::new();
+    for file in [backup, path] {
+        if let Ok(content) = std::fs::read_to_string(&file) {
+            text.push_str(&content);
+        }
+    }
+    if text.is_empty() {
+        text.push_str("（还没有运行时日志）\n");
+    }
+    text
 }
 
 /// 数据目录：更新包落在 <userData>/updates，插件目录在 <userData>/plugins。

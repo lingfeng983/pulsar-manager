@@ -13,4 +13,4 @@ pub mod schema;
 pub mod settings;
 pub mod templates;
 
-pub use db::{default_db_path, Store};
+pub use db::{default_db_path, default_log_dir, Store};

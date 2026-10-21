@@ -23,6 +23,8 @@ import type {
     ConfigBundle,
     ConfigImportResult,
     ConfigMeta,
+    LogExportResult,
+    LogDirResult,
     ConsumeStartParams,
     ConsumerAckParams,
     ConsumerSessionInfo,
@@ -272,8 +274,16 @@ export function createBridge(transport: BridgeTransport) {
                     count,
                     persistent,
                 ),
-            deleteTopic: (clusterId: string, tenant: string, namespace: string, topic: string, persistent?: boolean) =>
-                transport.invoke('resources:deleteTopic', clusterId, tenant, namespace, topic, persistent),
+            // force：断开仍连着的生产者/消费者与订阅后强制删除。旧版 broker 上
+            // 带 force 也只是多一个查询参数，服务端不认识时会忽略。
+            deleteTopic: (
+                clusterId: string,
+                tenant: string,
+                namespace: string,
+                topic: string,
+                persistent?: boolean,
+                force?: boolean,
+            ) => transport.invoke('resources:deleteTopic', clusterId, tenant, namespace, topic, persistent, force),
 
             getSchema: (clusterId: string, tenant: string, namespace: string, topic: string, persistent?: boolean) =>
                 transport.invoke('resources:getSchema', clusterId, tenant, namespace, topic, persistent),
@@ -648,9 +658,13 @@ export function createBridge(transport: BridgeTransport) {
             clearLogs: () => transport.invoke('config:clearLogs'),
         },
 
-        // 操作日志
+        // 操作日志与运行时日志
         logs: {
             getRecent: (limit?: number) => transport.invoke('logs:getRecent', limit),
+            // 用户在系统"另存为"里取消时 data 为 null，这不是失败
+            export: () => transport.invoke('logs:export'),
+            openDir: () => transport.invoke('logs:openDir'),
+            chooseDir: () => transport.invoke('logs:chooseDir'),
         },
 
         // 本地文件选择（函数 / 连接器的包）：只回路径与元信息，内容不进渲染进程
@@ -782,6 +796,7 @@ declare global {
                     namespace: string,
                     topic: string,
                     persistent?: boolean,
+                    force?: boolean,
                 ) => Promise<APIResponse<void>>;
                 getSchema: (
                     clusterId: string,
@@ -1095,6 +1110,9 @@ declare global {
             };
             logs: {
                 getRecent: (limit?: number) => Promise<APIResponse<OperationLog[]>>;
+                export: () => Promise<APIResponse<LogExportResult | null>>;
+                openDir: () => Promise<APIResponse<{dir: string; failure: string | null}>>;
+                chooseDir: () => Promise<APIResponse<LogDirResult | null>>;
             };
             file: {
                 // 用户取消时 data 为 null，这不是失败

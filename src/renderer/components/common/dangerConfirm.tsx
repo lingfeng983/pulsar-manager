@@ -1,5 +1,5 @@
 import React, {useCallback, useEffect, type ReactNode} from 'react';
-import {Input, Modal, Space} from 'antd';
+import {Input, Modal, Space, message} from 'antd';
 
 type ModalApi = ReturnType<typeof Modal.useModal>[0];
 
@@ -53,6 +53,19 @@ export function useConfirmDanger() {
         }
         let nameMatches = !requireExactName;
 
+        // antd 只会保持弹窗打开，不会把 onOk 抛出的错误渲染出来；不在这里补一条
+        // toast，用户看到的就是"点了删除没反应"。
+        const runOk = async () => {
+            try {
+                await onOk();
+            } catch (error) {
+                const text = error instanceof Error ? error.message : String(error);
+                message.error(text || '操作失败');
+                // 继续抛给 antd：失败时弹窗保持打开，用户可以改名重试或取消
+                throw error;
+            }
+        };
+
         const instance = modalApi.confirm({
             title,
             okText,
@@ -73,7 +86,7 @@ export function useConfirmDanger() {
             ) : (
                 description
             ),
-            onOk,
+            onOk: runOk,
         });
     }, []);
 }
