@@ -193,8 +193,12 @@ fn camelize_value(value: Value, preserve_keys: bool) -> Value {
                     out.insert(key, value);
                     continue;
                 }
-                let dynamic_map =
-                    matches!(key.as_str(), "subscriptions" | "properties" | "partitions");
+                // statusErrors 的键是集群 id，与 subscriptions/properties/partitions 同属
+                // 「调用方定义键名」的 map：键必须原样保留。
+                let dynamic_map = matches!(
+                    key.as_str(),
+                    "subscriptions" | "properties" | "partitions" | "statusErrors"
+                );
                 let value = if key == "raw" {
                     // raw 是 broker 原文，整体保持原样（内部键可能也是用户数据）
                     value
@@ -278,6 +282,7 @@ mod tests {
             "subscriptions": { "my_sub": { "msg_backlog": 3 } },
             "properties": { "order_id": "42" },
             "partitions": { "persistent://t/ns/topic-partition-0": { "msg_rate_in": 1 } },
+            "statusErrors": { "my_cluster_id": "无法连接 http://x:8080：connection refused" },
             "raw": { "custom_key": { "nested_key": true } }
         });
         let output = camelize(input);
@@ -290,6 +295,11 @@ mod tests {
         assert!(output["partitions"]
             .get("persistent://t/ns/topic-partition-0")
             .is_some());
+        // 探活失败原因是原文，键（集群 id）也不转
+        assert_eq!(
+            output["statusErrors"]["my_cluster_id"],
+            "无法连接 http://x:8080：connection refused"
+        );
         assert!(output["raw"].get("custom_key").is_some());
         assert!(output["raw"]["custom_key"].get("nested_key").is_some());
     }

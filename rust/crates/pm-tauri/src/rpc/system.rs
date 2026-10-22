@@ -28,6 +28,12 @@ fn default_settings() -> Map<String, Value> {
     map.insert("alertEnabled".into(), json!(false));
     map.insert("alertCheckSeconds".into(), json!(60));
     map.insert("alertRetentionDays".into(), json!(30));
+    // Admin 并发上限：出厂值取自 pm-pulsar，别在这里再写一个 8；
+    // 与前端 AppSettings.adminConcurrencyLimit / 库里的键同名同值。
+    map.insert(
+        pm_services::ADMIN_CONCURRENCY_KEY.into(),
+        json!(pm_pulsar::DEFAULT_ADMIN_CONCURRENCY),
+    );
     // 空串 = 使用默认目录（%APPDATA%\pulsar-manager\logs），不写死绝对路径，
     // 这样导出/导入配置换机器后仍然可用。
     map.insert("logDirectory".into(), json!(""));
@@ -66,6 +72,17 @@ fn write_setting(context: &AppContext, key: &str, value: &Value) -> pm_core::App
         Value::String(text) => text.clone(),
         other => other.to_string(),
     };
+    // 并发上限有区间。写入口就把值夹进范围：库、界面、运行时闸门三者始终同一个数，
+    // 导入别处的配置文件也不会因为一个越界值把整份导入带崩。写法上的错误（不是整数）
+    // 仍然报错，别悄悄退回默认值让人以为设置生效了。
+    if key == pm_services::ADMIN_CONCURRENCY_KEY {
+        let parsed = text
+            .trim()
+            .parse::<i64>()
+            .map_err(|_| AppError::config(format!("Admin 并发上限必须是整数，当前为「{text}」")))?;
+        let clamped = pm_pulsar::clamp_admin_concurrency(parsed.max(0) as usize);
+        return settings::set(&context.store, key, &clamped.to_string());
+    }
     settings::set(&context.store, key, &text)
 }
 
@@ -95,7 +112,15 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
             let key = text_arg(&args, 0);
             let value = text_arg(&args, 1);
             let context = context.clone();
-            blocking(move || settings::set(&context.store, &key, &value)).await
+            blocking(move || {
+                settings::set(&context.store, &key, &value)?;
+                // 这条通道是通用键值写入（快捷键在用），并发上限若从这里进来也要立即生效
+                if key == pm_services::ADMIN_CONCURRENCY_KEY {
+                    context.apply_admin_concurrency()?;
+                }
+                Ok(())
+            })
+            .await
         }
 
         // ---------- 配置 ----------
@@ -112,6 +137,8 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
                         write_setting(&context, key, value)?;
                     }
                 }
+                // 落库之后再推给运行时闸门：改完立即生效，不用重启
+                context.apply_admin_concurrency()?;
                 merged_settings(&context)
             })
             .await
@@ -124,6 +151,8 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
                 }
                 // 恢复默认也把运行中的日志 sink 切回默认目录，否则要等下次启动
                 let _ = crate::logging::set_dir(&pm_store::default_log_dir());
+                // 并发上限同样按默认值复位
+                context.apply_admin_concurrency()?;
                 merged_settings(&context)
             })
             .await
@@ -190,6 +219,8 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
                         write_setting(&context, key, value)?;
                     }
                     settings_applied = true;
+                    // 导入的并发上限立即生效，不用等重启
+                    context.apply_admin_concurrency()?;
                     // 导入的日志目录立即生效，不用等重启；空串回默认目录
                     if let Some(value) = settings.get("logDirectory").and_then(Value::as_str) {
                         let dir = if value.trim().is_empty() {
@@ -722,4 +753,67 @@ fn text_arg(args: &[Value], index: usize) -> String {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pm_services::AppContext;
+
+    fn temp_context(tag: &str) -> (AppContext, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("pm-tauri-system-{}-{tag}", pm_core::new_id()));
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        let context = AppContext::open(dir.join("app.db"), &dir).expect("打开临时上下文");
+        (context, dir)
+    }
+
+    // 设置页落下的值要真的驱动运行时闸门，不是只写进库给人看：
+    // 默认表、写入口的夹取、config:getAll 的合并结果三处都得是同一个数。
+    #[test]
+    fn admin_concurrency_is_defaulted_clamped_and_pushed_to_the_gate() {
+        let (context, dir) = temp_context("concurrency");
+
+        assert_eq!(
+            default_settings()
+                .get(pm_services::ADMIN_CONCURRENCY_KEY)
+                .and_then(Value::as_i64),
+            Some(pm_pulsar::DEFAULT_ADMIN_CONCURRENCY as i64),
+            "默认表里的出厂值要取自 pm-pulsar，别在这里另写一个数"
+        );
+
+        write_setting(&context, pm_services::ADMIN_CONCURRENCY_KEY, &json!("999"))
+            .expect("写入越界值");
+        assert_eq!(
+            settings::get(&context.store, pm_services::ADMIN_CONCURRENCY_KEY)
+                .unwrap()
+                .as_deref(),
+            Some("64"),
+            "写入口就要把值夹进范围，库里存的必须是真正生效的那个"
+        );
+        assert_eq!(
+            context.apply_admin_concurrency().unwrap(),
+            pm_pulsar::MAX_ADMIN_CONCURRENCY
+        );
+
+        assert!(
+            write_setting(&context, pm_services::ADMIN_CONCURRENCY_KEY, &json!("abc")).is_err(),
+            "非整数要报错，不能悄悄退回默认值"
+        );
+
+        write_setting(&context, pm_services::ADMIN_CONCURRENCY_KEY, &json!(3)).expect("写入合法值");
+        assert_eq!(context.apply_admin_concurrency().unwrap(), 3);
+        assert_eq!(pm_pulsar::admin_concurrency(), 3);
+        assert_eq!(
+            merged_settings(&context)
+                .unwrap()
+                .get(pm_services::ADMIN_CONCURRENCY_KEY)
+                .and_then(Value::as_i64),
+            Some(3),
+            "设置页读回来的值要跟生效值一致"
+        );
+
+        // 收尾还原全局闸门：它是进程级的，留着 3 会影响同进程里的其它测试
+        pm_pulsar::set_admin_concurrency(pm_pulsar::DEFAULT_ADMIN_CONCURRENCY);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

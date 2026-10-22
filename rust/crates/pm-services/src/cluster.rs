@@ -7,9 +7,13 @@ use pm_core::{
     OperationLog,
 };
 use pm_pulsar::AdminClient;
-use pm_store::{clusters, logs, Store};
+use pm_store::{clusters, logs, settings, Store};
 
 use crate::crypto::SecretBox;
+
+/// Admin 并发上限的设置键。库里的键名、`config:getAll` 的字段名、前端的
+/// `AppSettings.adminConcurrencyLimit` 三处靠这一个常量对齐，别再各写一遍字符串。
+pub const ADMIN_CONCURRENCY_KEY: &str = "adminConcurrencyLimit";
 
 pub struct AppContext {
     pub store: Arc<Store>,
@@ -31,6 +35,27 @@ impl AppContext {
             secrets,
             warning,
         })
+    }
+
+    /// 把库里的 Admin 并发上限推给运行时闸门：启动时调一次，设置改动后再调一次。
+    ///
+    /// 越界的值在写入口就被夹住，这里再夹一次只是兜底（比如有人直接改库、或
+    /// 通过通用的 `settings:set` 塞进来）——否则「库里存的值」和「实际生效的值」
+    /// 会分成两个数，排查时看不出请求为什么被卡。
+    pub fn apply_admin_concurrency(&self) -> AppResult<usize> {
+        let stored = settings::get(&self.store, ADMIN_CONCURRENCY_KEY)?;
+        let parsed = match stored.as_deref().map(str::trim) {
+            Some(raw) if !raw.is_empty() => raw.parse::<usize>().map_err(|_| {
+                AppError::config(format!("Admin 并发上限必须是整数，当前为「{raw}」"))
+            })?,
+            // 库里没这条设置就走出厂值，不写库：界面显示的默认值由默认表提供
+            _ => pm_pulsar::DEFAULT_ADMIN_CONCURRENCY,
+        };
+        let effective = pm_pulsar::set_admin_concurrency(parsed);
+        if effective != parsed {
+            settings::set(&self.store, ADMIN_CONCURRENCY_KEY, &effective.to_string())?;
+        }
+        Ok(effective)
     }
 
     pub fn list_clusters(&self) -> AppResult<Vec<ClusterView>> {
@@ -440,6 +465,52 @@ mod tests {
         cleared.auth_params = Some(String::new());
         ctx.save_cluster(&cleared).unwrap();
         assert!(ctx.list_clusters().unwrap()[0].has_auth_params);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 并发上限的运行时那一半：库里怎么写，闸门就怎么收；
+    /// 越界值夹住并写回库，别让界面显示 999 而实际只放 64 个。
+    #[test]
+    fn admin_concurrency_follows_stored_setting_and_clamps() {
+        let dir = temp_dir("concurrency");
+        let ctx = AppContext::open(dir.join("app.db"), &dir).unwrap();
+
+        // 还没写过这条设置：推的是出厂值，且不往库里塞行
+        assert_eq!(
+            ctx.apply_admin_concurrency().unwrap(),
+            pm_pulsar::DEFAULT_ADMIN_CONCURRENCY
+        );
+        assert_eq!(
+            settings::get(&ctx.store, ADMIN_CONCURRENCY_KEY).unwrap(),
+            None
+        );
+
+        settings::set(&ctx.store, ADMIN_CONCURRENCY_KEY, "3").unwrap();
+        assert_eq!(ctx.apply_admin_concurrency().unwrap(), 3);
+        assert_eq!(pm_pulsar::admin_concurrency(), 3);
+
+        settings::set(&ctx.store, ADMIN_CONCURRENCY_KEY, "999").unwrap();
+        assert_eq!(
+            ctx.apply_admin_concurrency().unwrap(),
+            pm_pulsar::MAX_ADMIN_CONCURRENCY
+        );
+        assert_eq!(
+            settings::get(&ctx.store, ADMIN_CONCURRENCY_KEY)
+                .unwrap()
+                .as_deref(),
+            Some("64"),
+            "被夹过的值要写回库，界面显示的才是真正生效的那个"
+        );
+
+        settings::set(&ctx.store, ADMIN_CONCURRENCY_KEY, "0").unwrap();
+        assert_eq!(ctx.apply_admin_concurrency().unwrap(), 1);
+
+        // 写得连整数都不是：报可读错误，而不是悄悄退回默认值
+        settings::set(&ctx.store, ADMIN_CONCURRENCY_KEY, "abc").unwrap();
+        assert!(ctx.apply_admin_concurrency().is_err());
+
+        // 收尾还原全局闸门，免得影响同进程里其它用例
+        pm_pulsar::set_admin_concurrency(pm_pulsar::DEFAULT_ADMIN_CONCURRENCY);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,15 +1,133 @@
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use pm_core::{AdminConfig, AppError, AppResult, ClusterInfo, ConnectionTest};
 use reqwest::{Method, Response, StatusCode};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tokio::sync::Semaphore;
+use tokio::sync::Notify;
 
 use pm_core::resolve_base_url;
 
 /// 错误体里常带完整 Java 堆栈，界面只有一行位置，原样透传既撑坏提示也没人看得懂。
 const MAX_ERROR_CHARS: usize = 300;
+
+/// 同时在途的 Admin REST 请求上限的出厂值（设置里可改，见 `set_admin_concurrency`）。
+pub const DEFAULT_ADMIN_CONCURRENCY: usize = 8;
+
+/// 上限的硬边界。下限 1：设成 0 等于让所有 Admin 请求都排不进来，页面会全空，
+/// 这种值只能是误输入；上限 64：再多也不会更快，只会把 broker 的连接与线程打满。
+pub const MAX_ADMIN_CONCURRENCY: usize = 64;
+
+/// 进程级并发闸门：所有 `AdminClient` 实例共享同一份在途计数。
+///
+/// 用计数 + `Notify` 而不是 `tokio::sync::Semaphore`，是因为信号量的许可数固定，
+/// 而这一项用户可以随时在设置里改；计数式闸门能在运行中升降上限，调小后已发出的
+/// 请求照常跑完，只是不再放新的进来。
+struct ConcurrencyGate {
+    state: Mutex<GateState>,
+    notify: Notify,
+}
+
+struct GateState {
+    limit: usize,
+    in_flight: usize,
+}
+
+/// 闸门被释放时用的凭据：作用域结束（含提前 return / panic）即归还一个名额。
+struct AdminPermit {
+    gate: Arc<ConcurrencyGate>,
+}
+
+/// 份额是**进程级**的：每个 RPC 都会 `AdminClient::new` 一次，若把闸门放进实例里，
+/// 「最多 N 个在途请求」就变成「每个实例最多 N 个」——多集群一起刷新时上限随实例数
+/// 线性放大，等于没有上限。放成 static 后所有集群共享同一份计数。
+static ADMIN_CONCURRENCY: LazyLock<Arc<ConcurrencyGate>> =
+    LazyLock::new(|| Arc::new(ConcurrencyGate::new(DEFAULT_ADMIN_CONCURRENCY)));
+
+/// 把上限夹到合法区间（`set_admin_concurrency` 与设置写入两侧共用一套边界）。
+pub fn clamp_admin_concurrency(limit: usize) -> usize {
+    limit.clamp(1, MAX_ADMIN_CONCURRENCY)
+}
+
+/// 设置 Admin 并发上限，返回实际生效的值（越界已夹到 `1..=MAX_ADMIN_CONCURRENCY`）。
+///
+/// 只改闸门，不落库：持久化由设置层负责，这里是运行时的那一半。
+pub fn set_admin_concurrency(limit: usize) -> usize {
+    ADMIN_CONCURRENCY.set_limit(limit)
+}
+
+/// 当前生效的并发上限。
+pub fn admin_concurrency() -> usize {
+    ADMIN_CONCURRENCY.limit()
+}
+
+impl ConcurrencyGate {
+    fn new(limit: usize) -> Self {
+        Self {
+            state: Mutex::new(GateState {
+                limit: clamp_admin_concurrency(limit),
+                in_flight: 0,
+            }),
+            notify: Notify::new(),
+        }
+    }
+
+    /// 取锁：被投毒也继续用——这里只保护两个 usize，没有"写了一半"的不变量，
+    /// 一次 panic 不该让后续所有 Admin 请求都拿不到名额。
+    fn lock(&self) -> std::sync::MutexGuard<'_, GateState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn limit(&self) -> usize {
+        self.lock().limit
+    }
+
+    /// 改上限，返回夹过的实际值。调小不回撤在途请求。
+    fn set_limit(&self, limit: usize) -> usize {
+        let limit = clamp_admin_concurrency(limit);
+        {
+            let mut state = self.lock();
+            state.limit = limit;
+        }
+        // 调大后可能有请求正卡在通知上等名额，唤醒它们重试一次判断。
+        self.notify.notify_waiters();
+        limit
+    }
+
+    /// 等到一个名额。名额只由 `AdminPermit::drop` 归还。
+    async fn acquire(self: &Arc<Self>) -> AdminPermit {
+        loop {
+            // 先登记等待、再判断名额：`notify_waiters` 只唤醒登记过的等待者，
+            // 顺序反过来的话，"判断完发现满员、还没开始等"这中间发生的归还会丢掉。
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let mut state = self.lock();
+                if state.in_flight < state.limit {
+                    state.in_flight += 1;
+                    return AdminPermit {
+                        gate: Arc::clone(self),
+                    };
+                }
+            }
+            notified.await;
+        }
+    }
+}
+
+impl Drop for AdminPermit {
+    fn drop(&mut self) {
+        {
+            let mut state = self.gate.lock();
+            state.in_flight = state.in_flight.saturating_sub(1);
+        }
+        self.gate.notify.notify_waiters();
+    }
+}
 
 /// Admin REST 客户端。一个集群一个实例，配置变了就换实例（与 TS 侧的
 /// fingerprint 缓存同一个理由：隧道重连后本地端口会变）。
@@ -18,7 +136,7 @@ pub struct AdminClient {
     pub(crate) http: reqwest::Client,
     pub(crate) base: String,
     pub(crate) auth_params: Option<String>,
-    limit: std::sync::Arc<Semaphore>,
+    limit: Arc<ConcurrencyGate>,
     timeout: Duration,
 }
 
@@ -29,6 +147,11 @@ impl AdminClient {
         let mut builder = reqwest::Client::builder()
             .timeout(timeout)
             .connect_timeout(Duration::from_secs(5))
+            // 这里**不保留**空闲连接：每个 RPC 新建一次客户端，池子跟着客户端一起丢，
+            // 留在池里的连接只会被下次 gc 前的后台任务试探——对端（broker / NAT）此时
+            // 若已把连接静默回收，复用它就会拿到 RST/半开连接，表现为「网络正常却连不上」。
+            // 置 0 让每条连接用完即关，失败就退回最干净的建连路径。
+            .pool_max_idle_per_host(0)
             .user_agent(concat!("pulsar-manager-rust/", env!("CARGO_PKG_VERSION")));
 
         if let Some(ca) = config
@@ -67,7 +190,7 @@ impl AdminClient {
             http,
             base,
             auth_params: config.auth_params.clone().filter(|s| !s.is_empty()),
-            limit: std::sync::Arc::new(Semaphore::new(8)),
+            limit: ADMIN_CONCURRENCY.clone(),
             timeout,
         })
     }
@@ -105,11 +228,8 @@ impl AdminClient {
         loop {
             let started = std::time::Instant::now();
             pm_core::pm_log!("[admin] -> {label}");
-            let _permit = self
-                .limit
-                .acquire()
-                .await
-                .map_err(|_| AppError::Other("请求队列已关闭".into()))?;
+            // 拿到名额才发请求；名额随本轮作用域结束归还（提前 return / 出错也一样）。
+            let _permit = self.limit.acquire().await;
 
             let mut request = self.http.request(method.clone(), self.url(path));
             if let Some(token) = &self.auth_params {
@@ -360,11 +480,8 @@ impl AdminClient {
         loop {
             let started = std::time::Instant::now();
             pm_core::pm_log!("[admin] -> {label}");
-            let _permit = self
-                .limit
-                .acquire()
-                .await
-                .map_err(|_| AppError::Other("请求队列已关闭".into()))?;
+            // 与 execute 同一套闸门：表单类请求同样算在在途上限里。
+            let _permit = self.limit.acquire().await;
             let mut builder = self.http.post(self.url(path));
             if let Some(token) = &self.auth_params {
                 builder = builder.header("Authorization", format!("Bearer {token}"));
@@ -606,5 +723,102 @@ mod tests {
     fn parses_version_label() {
         let text = "# HELP pulsar_version_info\npulsar_version_info{cluster=\"pulsar\",version=\"3.0.1\"} 1\n";
         assert_eq!(parse_version_metric(text).as_deref(), Some("3.0.1"));
+    }
+
+    fn test_config() -> AdminConfig {
+        AdminConfig {
+            service_url: "pulsar://127.0.0.1:6650".into(),
+            web_service_url: Some("http://127.0.0.1:8080".into()),
+            timeout_ms: 5000,
+            auth_plugin: None,
+            auth_params: None,
+            tls_enabled: false,
+            trust_certs: None,
+        }
+    }
+
+    /// 每个 RPC 都会新建客户端；两个实例必须落到同一道闸门上，
+    /// 否则「最多 N 个在途请求」会随实例数线性放大。
+    #[test]
+    fn concurrency_gate_is_process_wide() {
+        let config = test_config();
+        let first = AdminClient::new(&config).expect("第一个客户端应能构造");
+        let second = AdminClient::new(&config).expect("第二个客户端应能构造");
+        assert!(Arc::ptr_eq(&first.limit, &second.limit));
+        assert!(Arc::ptr_eq(&first.limit, &ADMIN_CONCURRENCY));
+        assert_eq!(ADMIN_CONCURRENCY.limit(), DEFAULT_ADMIN_CONCURRENCY);
+    }
+
+    /// 设置页能填的范围就是这里的边界：0 与超大值都被夹住，不再往下传。
+    #[test]
+    fn limit_bounds_are_clamped() {
+        assert_eq!(clamp_admin_concurrency(0), 1);
+        assert_eq!(clamp_admin_concurrency(1), 1);
+        assert_eq!(clamp_admin_concurrency(16), 16);
+        assert_eq!(clamp_admin_concurrency(usize::MAX), MAX_ADMIN_CONCURRENCY);
+    }
+
+    /// 名额用完要排队，归还后立刻放行；上限可在运行中升降——
+    /// 调大不凭空多出名额（在途数才决定），调小不撤回在途请求、只挡新的。
+    /// 用局部闸门，避免几个测试抢同一个 static。
+    #[tokio::test]
+    async fn gate_queues_when_full_and_follows_runtime_limit() {
+        let gate = Arc::new(ConcurrencyGate::new(2));
+        let first = gate.acquire().await;
+        let second = gate.acquire().await;
+        assert_eq!(gate.lock().in_flight, 2);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), gate.acquire())
+                .await
+                .is_err(),
+            "满员时第 3 个请求必须排队"
+        );
+
+        drop(first);
+        let third = tokio::time::timeout(Duration::from_millis(500), gate.acquire())
+            .await
+            .expect("归还名额后应立刻拿到");
+
+        assert_eq!(gate.set_limit(4), 4);
+        assert_eq!(gate.lock().in_flight, 2, "调大上限不该改变在途数");
+        let fourth = gate.acquire().await;
+        assert_eq!(gate.lock().in_flight, 3);
+
+        let fifth = gate.acquire().await;
+        assert_eq!(gate.lock().in_flight, 4);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), gate.acquire())
+                .await
+                .is_err(),
+            "上限调到 4 后第 5 个仍要排队"
+        );
+
+        // 调小到 1（0 也夹到 1）：在途的照常跑完，新的进不来
+        assert_eq!(gate.set_limit(0), 1);
+        drop(second);
+        drop(third);
+        drop(fourth);
+        drop(fifth);
+        assert_eq!(gate.lock().in_flight, 0);
+
+        let last = tokio::time::timeout(Duration::from_millis(500), gate.acquire())
+            .await
+            .expect("全空后应能拿到名额");
+        drop(last);
+        assert_eq!(gate.lock().in_flight, 0);
+    }
+
+    /// 设置项走的就是这两个函数：写入被夹住、现场能读回生效值。
+    #[test]
+    fn setting_limit_reports_effective_value() {
+        let original = admin_concurrency();
+        assert_eq!(set_admin_concurrency(3), 3);
+        assert_eq!(admin_concurrency(), 3);
+        assert_eq!(set_admin_concurrency(usize::MAX), MAX_ADMIN_CONCURRENCY);
+        assert_eq!(admin_concurrency(), MAX_ADMIN_CONCURRENCY);
+        assert_eq!(set_admin_concurrency(0), 1);
+        // 收尾还原，免得影响同一进程里其它读全局上限的测试
+        assert_eq!(set_admin_concurrency(original), original);
+        assert_eq!(admin_concurrency(), original);
     }
 }

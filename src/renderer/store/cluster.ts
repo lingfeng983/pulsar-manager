@@ -12,6 +12,9 @@ interface ClusterState {
     // 探活进行中。与 loading 分开：列表读的是本地库，一直很快；探活要打 broker，
     // 慢的时候不能把整页压成加载态把人挡在外面。
     checking: boolean;
+    // 最近一轮探活里失败的集群 id → 失败原因。整轮重新下发，所以某集群恢复在线后
+    // 它的旧原因会自动消失，不会留下一句过期的报错。
+    statusErrors: Record<string, string>;
 
     // Actions
     setClusters: (clusters: ClusterConfig[]) => void;
@@ -42,6 +45,7 @@ export const useClusterStore = create<ClusterState>((set, get) => ({
     expandedClusterId: null,
     loading: false,
     checking: false,
+    statusErrors: {},
     error: null,
 
     setClusters: clusters => set({clusters}),
@@ -97,11 +101,17 @@ export const useClusterStore = create<ClusterState>((set, get) => ({
             try {
                 const response = await window.electronAPI.cluster.checkStatus();
                 if (response.success && response.data) {
-                    set({clusters: response.data as ClusterConfig[]});
+                    set({
+                        clusters: response.data as ClusterConfig[],
+                        // 逐集群的失败原因一并收下：调用方（Home 的刷新按钮、列表行）
+                        // 就是靠它把「连不上」说清楚，不再只弹一句笼统的失败。
+                        statusErrors: response.statusErrors ?? {},
+                    });
                     return true;
                 }
                 // 不写 error：列表已经在页面上显示着，探活这一轮失败不该把它换成整页错误块，
-                // 由调用方弹一条 toast 就够了。
+                // 由调用方弹一条 toast 就够了。statusErrors 也不清：这一轮没拿到结论，
+                // 页面上显示的仍是上一轮的结果，原因与状态就应当保持同一轮。
                 return false;
             } catch {
                 return false;

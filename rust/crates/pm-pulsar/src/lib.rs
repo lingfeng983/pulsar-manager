@@ -9,6 +9,9 @@ pub mod native;
 pub mod policies;
 pub mod resource;
 
-pub use client::{condense_error, AdminClient};
+pub use client::{
+    admin_concurrency, clamp_admin_concurrency, condense_error, set_admin_concurrency, AdminClient,
+    DEFAULT_ADMIN_CONCURRENCY, MAX_ADMIN_CONCURRENCY,
+};
 pub use native::{NativeClient, NativeConsumer};
 pub use resource::{collapse_topic_uris, short_topic_name, topic_base};

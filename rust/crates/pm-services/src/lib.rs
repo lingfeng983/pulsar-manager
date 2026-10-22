@@ -15,4 +15,4 @@ pub mod template;
 pub mod tunnel;
 pub mod update;
 
-pub use cluster::AppContext;
+pub use cluster::{AppContext, ADMIN_CONCURRENCY_KEY};

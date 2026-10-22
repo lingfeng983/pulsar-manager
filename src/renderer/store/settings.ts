@@ -10,6 +10,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
     refreshIntervalSeconds: 30,
     fontSize: 'large',
     statusRefreshSeconds: 60,
+    // 与 pm-pulsar 的 DEFAULT_ADMIN_CONCURRENCY 保持一致（主进程默认表也取自它）
+    adminConcurrencyLimit: 8,
     sendHistoryFullBody: false,
     metricsSnapshotEnabled: false,
     metricsRetentionDays: 7,

@@ -58,6 +58,17 @@ export interface ClusterConfig {
 // 新增/测试连接时提交的集群配置，此时还没有 id
 export type ClusterConfigDraft = Omit<ClusterConfig, 'id'> & {id?: string};
 
+/**
+ * `cluster:checkStatus` 的返回体。
+ *
+ * statusErrors 与 data 平级，没有塞进 ClusterConfig：它是「这一轮探活」的临时结论，
+ * 不该被写回集群配置，也不该留给下一轮用（下一轮重新下发，拿不到就是没失败）。
+ * 键是集群 id，值是探活失败的具体原因（端口、TLS、Token……），只有失败的集群出现。
+ */
+export type ClusterStatusResponse = APIResponse<ClusterConfig[]> & {
+    statusErrors?: Record<string, string>;
+};
+
 export interface SSHConfig {
     // 已落库的隧道行 id；不带表示新建。测试通过后渲染层会把它回填到表单，
     // 避免"测一次留一条、保存再留一条"的孤儿配置。
@@ -879,7 +890,8 @@ export type FontSizeLevel = 'small' | 'medium' | 'large' | 'xlarge';
 
 // 界面与刷新相关的可持久化设置。每一项都必须被真实消费：
 // truncateLength 用于消息列表正文截断，autoRefresh / refreshIntervalSeconds
-// 是监控页的刷新节奏，statusRefreshSeconds 是首页与侧边栏集群状态的轮询节奏。
+// 是监控页的刷新节奏，statusRefreshSeconds 是首页与侧边栏集群状态的轮询节奏，
+// adminConcurrencyLimit 推给 Admin 请求的进程级并发闸门。
 // 加了字段不接线，就是又一个死设置。
 export interface AppSettings {
     truncateLength: number;
@@ -890,6 +902,10 @@ export interface AppSettings {
     refreshIntervalSeconds: number;
     fontSize: FontSizeLevel;
     statusRefreshSeconds: number;
+    // 同时在途的 Admin REST 请求上限（1 ~ 64，主进程写入时夹取）。
+    // 消费方是 pm-pulsar 的进程级并发闸门：主进程启动、改设置、导入配置与恢复默认
+    // 时都会把它推给闸门，改完立即生效，不需要重启。
+    adminConcurrencyLimit: number;
     // 发送历史是否连带正文全文落库（单行上限 512KB），关掉就只留 400 字符前缀。
     sendHistoryFullBody: boolean;
     // 监控曲线是否落库；关掉后趋势图只剩本次会话的内存点。

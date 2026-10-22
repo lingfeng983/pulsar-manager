@@ -1,5 +1,5 @@
 import React, {useEffect, useMemo, useState} from 'react';
-import {Card, Table, Tag, Button, Input, Select, Space, message} from 'antd';
+import {Card, Table, Tag, Button, Input, Select, Space, Tooltip, message} from 'antd';
 import {ClusterOutlined, PlusOutlined, BarChartOutlined, ReloadOutlined} from '@ant-design/icons';
 import {useClusterStore} from '../store/cluster';
 import {useTabStore} from '../store/tabs';
@@ -43,6 +43,7 @@ const HomePage: React.FC = () => {
         loading,
         checking,
         error,
+        statusErrors,
         fetchClusters,
         refreshClusterStatus,
         deleteClusterAsync,
@@ -56,9 +57,23 @@ const HomePage: React.FC = () => {
         // 这里只负责把本地库里的列表取出来。
     }, [fetchClusters]);
 
+    // 探活失败的原因就在这一轮的 statusErrors 里，直接说出来，不再只弹一句
+    // "刷新集群状态失败"——用户看到列表里几个集群离线，却不知道是端口不通、
+    // 认证失败还是超时，等于没给可用信息。原因按集群名列出，和列表行的 Tooltip 同源。
     const handleRefreshStatus = async () => {
         const ok = await refreshClusterStatus();
-        if (ok) {
+        const {statusErrors: latestErrors, clusters: latestClusters} = useClusterStore.getState();
+        // 只在整轮跑通（ok）时才按 statusErrors 报明细：那一轮的 statusErrors 与列表状态
+        // 来自同一次探活，对得上。整轮没跑通时 statusErrors 还是上一轮留下的，跟着列表
+        // 一起显示不矛盾，但作为「本次刷新失败」的说明会误导，所以退回笼统提示。
+        const failed = ok ? latestClusters.filter(cluster => latestErrors[cluster.id]) : [];
+        if (failed.length > 0) {
+            const detail = failed.map(cluster => `${cluster.name}：${latestErrors[cluster.id]}`).join('；');
+            message.warning({
+                content: `${failed.length} 个集群探活失败 —— ${detail}`,
+                duration: 6,
+            });
+        } else if (ok) {
             message.success('集群状态已刷新');
         } else {
             message.error('刷新集群状态失败');
@@ -132,7 +147,7 @@ const HomePage: React.FC = () => {
             title: '状态',
             dataIndex: 'status',
             key: 'status',
-            render: (status: string) => {
+            render: (status: string, record: ClusterConfig) => {
                 const config = {
                     connected: {color: 'success', text: '在线'},
                     disconnected: {color: 'error', text: '离线'},
@@ -143,7 +158,11 @@ const HomePage: React.FC = () => {
                     text: '未知',
                 };
                 // 表格里没有别的状态图标，这里保留文字；色块 Tag 只做强调
-                return <Tag color={color}>{text}</Tag>;
+                const tag = <Tag color={color}>{text}</Tag>;
+                // 本轮探活失败的具体原因挂在状态上，离线/警告的集群悬停即可看到，
+                // 不用点进去翻日志。没失败原因的（在线、或本轮没探到结论）保持原样。
+                const reason = statusErrors[record.id];
+                return reason ? <Tooltip title={reason}>{tag}</Tooltip> : tag;
             },
         },
         {
@@ -209,6 +228,7 @@ const HomePage: React.FC = () => {
 
             <Card variant="borderless">
                 <StateBlock
+                    loadingVariant="skeleton"
                     loading={loading && clusters.length === 0}
                     empty={clusters.length === 0 || filteredClusters.length === 0}
                     emptyText={clusters.length === 0 ? '暂无集群配置' : '没有符合筛选条件的集群'}

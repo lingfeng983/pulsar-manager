@@ -31,6 +31,7 @@ pub struct ProducerSessionView {
     pub cluster_id: String,
     pub topic_uri: String,
     pub producer_name: String,
+    /// 是否在线：由最近一次真实发送的结果决定，不再是写死的 true。
     pub connected: bool,
     pub flow_running: bool,
     pub owner_id: String,
@@ -108,6 +109,36 @@ enum Command {
     Stop,
 }
 
+/// 一条会话的在线状态。
+///
+/// pulsar crate 不对外暴露 producer 的底层连接状态，能拿到的可观测事实只有「最近一次
+/// 真实发送（手动发送或 flow）的结果」，在线与否就以它为准：建连失败根本建不出会话，
+/// 所以新会话按在线起步；某次发送失败（broker 未确认消息、连接已断）就置为已断开；
+/// 之后若又发送成功，说明底层已经重连，再回到在线。
+///
+/// 之前这里写死 `connected: true`，于是「发送失败、broker 早就断了」的会话在界面上
+/// 依然显示「已连接」，用户据此继续点发送只会一直失败。
+#[derive(Debug)]
+struct Liveness(AtomicBool);
+
+impl Liveness {
+    fn new() -> Self {
+        Self(AtomicBool::new(true))
+    }
+
+    fn is_connected(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    fn mark_online(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    fn mark_offline(&self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
 struct Entry {
     cluster_id: String,
     topic_uri: String,
@@ -118,7 +149,25 @@ struct Entry {
     sent: Arc<AtomicI64>,
     failed: Arc<AtomicI64>,
     flow: Arc<AtomicBool>,
+    connected: Arc<Liveness>,
     tx: mpsc::Sender<Command>,
+}
+
+/// 会话收尾守卫：任务退出（正常结束或 panic 展开）时统一停止 flow、标记已断开、
+/// 摘掉注册表条目。
+struct SessionGuard {
+    registry: Arc<ProducerRegistry>,
+    session_id: String,
+    liveness: Arc<Liveness>,
+    flow: Arc<AtomicBool>,
+}
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        self.flow.store(false, Ordering::Relaxed);
+        self.liveness.mark_offline();
+        self.registry.remove(&self.session_id);
+    }
 }
 
 #[derive(Default)]
@@ -147,7 +196,7 @@ impl ProducerRegistry {
                 cluster_id: entry.cluster_id.clone(),
                 topic_uri: entry.topic_uri.clone(),
                 producer_name: entry.producer_name.clone(),
-                connected: true,
+                connected: entry.connected.is_connected(),
                 flow_running: entry.flow.load(Ordering::Relaxed),
                 owner_id: entry.owner_id.clone(),
                 sent: entry.sent.load(Ordering::Relaxed),
@@ -168,7 +217,7 @@ impl ProducerRegistry {
             cluster_id: entry.cluster_id.clone(),
             topic_uri: entry.topic_uri.clone(),
             producer_name: entry.producer_name.clone(),
-            connected: true,
+            connected: entry.connected.is_connected(),
             flow_running: entry.flow.load(Ordering::Relaxed),
             owner_id: entry.owner_id.clone(),
             sent: entry.sent.load(Ordering::Relaxed),
@@ -294,6 +343,8 @@ pub async fn start(
     let sent = Arc::new(AtomicI64::new(0));
     let failed = Arc::new(AtomicI64::new(0));
     let flow_running = Arc::new(AtomicBool::new(false));
+    // 走到这里说明 broker 二进制口已经连上、producer 也开出来了，按在线起步。
+    let liveness = Arc::new(Liveness::new());
     let (tx, mut rx) = mpsc::channel::<Command>(64);
 
     registry.insert(
@@ -307,27 +358,31 @@ pub async fn start(
             sent: sent.clone(),
             failed: failed.clone(),
             flow: flow_running.clone(),
+            connected: liveness.clone(),
             tx,
         },
     );
 
-    let view = ProducerSessionView {
-        session_id: session_id.clone(),
-        cluster_id: cluster_id.to_string(),
-        topic_uri: topic_uri.to_string(),
-        producer_name: format!("producer-{}", &session_id[..8]),
-        connected: true,
-        flow_running: false,
-        owner_id: owner_id.to_string(),
-        sent: 0,
-        failed: 0,
-    };
+    // 视图统一从注册表取，`connected` 只有 Liveness 一个来源，避免两处各写一份。
+    let view = registry
+        .view(&session_id)
+        .ok_or_else(|| AppError::Other("会话刚建立就丢了".into()))?;
 
     let task_registry = registry.clone();
     let task_emit = emit.clone();
     let task_id = session_id.clone();
+    let task_liveness = liveness.clone();
+    let task_flow = flow_running.clone();
 
     tokio::spawn(async move {
+        // 任务无论正常结束还是 panic 展开，都在这里统一摘掉会话并标记已断开，
+        // 免得留下一个永远「已连接」的幽灵条目。
+        let _guard = SessionGuard {
+            registry: task_registry,
+            session_id: task_id.clone(),
+            liveness: task_liveness,
+            flow: task_flow,
+        };
         let started = Instant::now();
         let mut flow: Option<FlowState> = None;
         let mut ticker = tokio::time::interval(Duration::from_millis(100));
@@ -359,10 +414,14 @@ pub async fn start(
                                 if samples.len() > 500 {
                                     samples.remove(0);
                                 }
+                                liveness.mark_online();
                             }
                             Err(failure) => {
                                 failed.fetch_add(1, Ordering::Relaxed);
                                 last_error = Some(failure.to_string());
+                                // broker 没确认或连接已断：如实标成已断开，别让界面继续
+                                // 显示「已连接」引用户接着发。
+                                liveness.mark_offline();
                                 error = Some(failure);
                                 break;
                             }
@@ -374,12 +433,16 @@ pub async fn start(
                     });
                 }
                 Event::Cmd(Some(Command::Flush { done })) => {
-                    let _ = done.send(
-                        producer
-                            .send_batch()
-                            .await
-                            .map_err(|e| AppError::Other(format!("flush 失败: {e}"))),
-                    );
+                    let flushed = producer
+                        .send_batch()
+                        .await
+                        .map_err(|e| AppError::Other(format!("flush 失败: {e}")));
+                    // 失败说明这一轮推送没走通；成功不做「恢复在线」——队列空时它不发包，
+                    // 拿它当在线的证据会误报。
+                    if flushed.is_err() {
+                        liveness.mark_offline();
+                    }
+                    let _ = done.send(flushed);
                 }
                 Event::Cmd(Some(Command::StartFlow { spec, done })) => {
                     if spec.rate_per_sec <= 0.0 {
@@ -450,10 +513,12 @@ pub async fn start(
                                     if samples.len() > 500 {
                                         samples.remove(0);
                                     }
+                                    liveness.mark_online();
                                 }
                                 Err(error) => {
                                     failed.fetch_add(1, Ordering::Relaxed);
                                     last_error = Some(error.to_string());
+                                    liveness.mark_offline();
                                     end_error = Some(error.to_string());
                                     break;
                                 }
@@ -499,8 +564,7 @@ pub async fn start(
 
         let _ = producer.send_batch().await;
         let _ = producer.close().await;
-        flow_running.store(false, Ordering::Relaxed);
-        task_registry.remove(&task_id);
+        // 会话的摘除与「已断开」标记交给 _guard（正常结束与 panic 都覆盖）。
 
         // 终态再推一次：界面靠它把「运行中」改成「已结束」
         let stats = RunStats {
@@ -944,4 +1008,76 @@ fn emit_benchmark_progress(
             "done": phase != "running",
         }),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(liveness: Arc<Liveness>, flow: Arc<AtomicBool>) -> Entry {
+        let (tx, _rx) = mpsc::channel::<Command>(1);
+        Entry {
+            cluster_id: "c1".into(),
+            topic_uri: "persistent://public/default/t".into(),
+            producer_name: "producer-test".into(),
+            owner_id: "owner".into(),
+            started_at: pm_core::now_ms(),
+            sent: Arc::new(AtomicI64::new(0)),
+            failed: Arc::new(AtomicI64::new(0)),
+            flow,
+            connected: liveness,
+            tx,
+        }
+    }
+
+    #[test]
+    fn liveness_follows_last_send_result() {
+        let live = Liveness::new();
+        assert!(live.is_connected(), "新会话按在线起步");
+        live.mark_offline();
+        assert!(!live.is_connected(), "最近一次发送失败之后就是已断开");
+        live.mark_online();
+        assert!(live.is_connected(), "再次发送成功说明底层已重连");
+    }
+
+    /// 会话视图的 `connected` 必须来自实际发送结果，不能再是写死的 true。
+    #[test]
+    fn session_view_reports_offline_after_failure() {
+        let registry = ProducerRegistry::new();
+        let liveness = Arc::new(Liveness::new());
+        let flow = Arc::new(AtomicBool::new(false));
+        registry.insert("s1".into(), entry(liveness.clone(), flow));
+
+        assert!(registry.view("s1").expect("会话应在").connected);
+
+        liveness.mark_offline();
+        assert!(!registry.view("s1").expect("会话仍在").connected);
+        let listed = registry.list(None);
+        assert_eq!(listed.len(), 1);
+        assert!(!listed[0].connected, "列表也必须如实反映离线");
+
+        liveness.mark_online();
+        assert!(registry.view("s1").expect("会话仍在").connected);
+    }
+
+    /// 任务退出守卫：无论正常结束还是 panic，会话都要被摘掉且标记已断开。
+    #[test]
+    fn session_guard_clears_entry_and_marks_offline() {
+        let registry = Arc::new(ProducerRegistry::new());
+        let liveness = Arc::new(Liveness::new());
+        let flow = Arc::new(AtomicBool::new(true));
+        registry.insert("s1".into(), entry(liveness.clone(), flow.clone()));
+
+        drop(SessionGuard {
+            registry: registry.clone(),
+            session_id: "s1".into(),
+            liveness: liveness.clone(),
+            flow: flow.clone(),
+        });
+
+        assert!(registry.view("s1").is_none(), "会话必须从注册表摘掉");
+        assert!(registry.list(None).is_empty());
+        assert!(!liveness.is_connected());
+        assert!(!flow.load(Ordering::Relaxed));
+    }
 }

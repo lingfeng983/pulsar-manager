@@ -47,20 +47,58 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
                 let context = context.clone();
                 tasks.spawn(async move {
                     let probe = context.probe(&id).await;
-                    if let Ok(result) = &probe {
-                        let status = if result.connected {
-                            "connected"
-                        } else {
-                            "disconnected"
-                        };
-                        let _ = context.set_status(&id, status, result.version.as_deref());
+                    match &probe {
+                        Ok(result) => {
+                            let status = if result.connected {
+                                "connected"
+                            } else {
+                                "disconnected"
+                            };
+                            let _ = context.set_status(&id, status, result.version.as_deref());
+                            if result.connected {
+                                (id, None)
+                            } else {
+                                // 探活失败的具体原因（webServiceUrl 端口、TLS、Token……）
+                                // 必须跟着结果回到界面：只写日志的话，用户点完「刷新」
+                                // 只看得到一个笼统的失败提示，无从下手。
+                                (
+                                    id,
+                                    Some(result.error.clone().unwrap_or_else(|| {
+                                        "探活失败，未返回具体原因（详见「设置 → 日志」）".into()
+                                    })),
+                                )
+                            }
+                        }
+                        // 连探活都没发起（可达性检查拦下、凭据/证书读不到等）。
+                        Err(error) => {
+                            let reason = error.to_string();
+                            pm_core::pm_warn!("[cluster] 探活 {id} 未能发起：{reason}");
+                            (id, Some(reason))
+                        }
                     }
                 });
             }
-            while tasks.join_next().await.is_some() {}
+
+            let mut probes: Vec<(String, Option<String>)> = Vec::new();
+            while let Some(joined) = tasks.join_next().await {
+                match joined {
+                    Ok(result) => probes.push(result),
+                    // 任务 panic 的集群这一轮没有结论，如实记一笔，别静默当成探活通过。
+                    Err(error) => pm_core::pm_warn!("[cluster] 探活任务异常退出：{error}"),
+                }
+            }
+            let status_errors = collect_status_errors(probes);
 
             let context = context.clone();
-            crate::bridge::blocking(move || context.list_clusters()).await
+            let mut body = crate::bridge::blocking(move || context.list_clusters()).await;
+            if body.get("success").and_then(Value::as_bool) == Some(true) {
+                if let Some(object) = body.as_object_mut() {
+                    // 原因与 data 平级下发：它是「本轮探活的结论」，不该被写回集群配置，
+                    // 也不该顶掉已有的 status/version。
+                    object.insert("statusErrors".into(), json!(status_errors));
+                }
+            }
+            body
         }
 
         "cluster:testConnection" => {
@@ -119,6 +157,17 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
     })
 }
 
+/// 把一轮探活结果压成 id → 失败原因：只有真正失败的集群才进表，
+/// 探活通过的集群不占位（前端据此判断「全绿」还是「有失败」）。
+fn collect_status_errors(
+    probes: Vec<(String, Option<String>)>,
+) -> std::collections::BTreeMap<String, String> {
+    probes
+        .into_iter()
+        .filter_map(|(id, reason)| reason.map(|reason| (id, reason)))
+        .collect()
+}
+
 /// add 的载荷只有第 1 个参数；update 是 (id, payload)，载荷在第 2 个。
 fn draft_payload<'a>(method: &str, args: &'a [Value]) -> Option<&'a Value> {
     if method == "cluster:update" {
@@ -169,6 +218,30 @@ mod tests {
             &[json!({ "serviceUrl": "pulsar://x" })],
         ));
         assert_eq!(add.unwrap().service_url, "pulsar://x");
+    }
+
+    #[test]
+    fn status_errors_keep_failures_and_drop_successes() {
+        let errors = collect_status_errors(vec![
+            ("a".into(), None),
+            (
+                "b".into(),
+                Some("无法连接 http://192.168.222.121:8080：connection refused".into()),
+            ),
+            ("c".into(), Some("集群尚未配置 Admin API 地址".into())),
+        ]);
+        assert_eq!(errors.len(), 2);
+        assert!(
+            !errors.contains_key("a"),
+            "探活通过的集群不该出现在错误表里"
+        );
+        assert_eq!(
+            errors.get("b").map(String::as_str).unwrap_or_default(),
+            "无法连接 http://192.168.222.121:8080：connection refused"
+        );
+        assert!(errors
+            .get("c")
+            .is_some_and(|reason| reason.contains("Admin API")));
     }
 
     #[test]

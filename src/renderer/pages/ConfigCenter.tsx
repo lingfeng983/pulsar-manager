@@ -88,7 +88,9 @@ const ConfigCenter: React.FC = () => {
     const settings = useSettingsStore(state => state.settings);
     const updateSettings = useSettingsStore(state => state.update);
     const resetSettings = useSettingsStore(state => state.reset);
-    const theme = useThemeStore(state => state.theme);
+    // 单选回显的是「偏好」而不是生效值：选了跟随系统时，radio 应该停在"跟随系统"上，
+    // 而不是跳到当前解析出来的那套主题。
+    const themePreference = useThemeStore(state => state.preference);
     const setTheme = useThemeStore(state => state.setTheme);
     const fetchClusters = useClusterStore(state => state.fetchClusters);
     const loadShortcuts = useShortcutStore(state => state.load);
@@ -103,6 +105,8 @@ const ConfigCenter: React.FC = () => {
     // 截断长度在输入过程中只改草稿，失焦/回车才落库：
     // 直接每敲一位就写一次设置，输入 500 会先落 5、50，再落 500。
     const [truncateDraft, setTruncateDraft] = useState<number | null>(null);
+    // 并发上限同理：输入 12 会先经过 1 再落库，草稿挡住中间值。
+    const [concurrencyDraft, setConcurrencyDraft] = useState<number | null>(null);
 
     const loadMeta = useCallback(() => {
         const requestId = ++metaRequestRef.current;
@@ -149,6 +153,13 @@ const ConfigCenter: React.FC = () => {
         setTruncateDraft(null);
         if (typeof value === 'number' && value !== settings.truncateLength) {
             void patch({truncateLength: value});
+        }
+    };
+
+    const commitConcurrency = (value: number | null) => {
+        setConcurrencyDraft(null);
+        if (typeof value === 'number' && value !== settings.adminConcurrencyLimit) {
+            void patch({adminConcurrencyLimit: value});
         }
     };
 
@@ -290,14 +301,15 @@ const ConfigCenter: React.FC = () => {
     return (
         <PageShell subtitle="这里改的是应用自身的设置，全部落在本机 SQLite，改完立即生效。">
             <Row gutter={[12, 12]}>
-                <Col span={12}>
+                <Col xs={24} xl={12}>
                     <Card title="界面" size="small">
                         <Space direction="vertical" size={8} style={{width: '100%'}}>
                             <div>
                                 <Text>主题</Text>
                                 <div style={{marginTop: 4}}>
                                     <Radio.Group
-                                        value={theme}
+                                        aria-label="界面主题"
+                                        value={themePreference}
                                         onChange={event => setTheme(event.target.value)}
                                         optionType="button"
                                         buttonStyle="solid"
@@ -306,8 +318,10 @@ const ConfigCenter: React.FC = () => {
                                         <Radio.Button value="light">亮色</Radio.Button>
                                         <Radio.Button value="dark">暗色</Radio.Button>
                                         <Radio.Button value="eyeCare">护眼</Radio.Button>
+                                        <Radio.Button value="system">跟随系统</Radio.Button>
                                     </Radio.Group>
                                 </div>
+                                <Text className="hint-text">跟随系统时在亮色与暗色之间切换，护眼需手动选。</Text>
                             </div>
                             <div>
                                 <Text>字号</Text>
@@ -462,7 +476,7 @@ const ConfigCenter: React.FC = () => {
                     </Card>
                 </Col>
 
-                <Col span={12}>
+                <Col xs={24} xl={12}>
                     <Card title="刷新节奏" size="small">
                         <Space direction="vertical" size={8} style={{width: '100%'}}>
                             <div>
@@ -512,6 +526,30 @@ const ConfigCenter: React.FC = () => {
                                 </div>
                                 <Text className="hint-text">
                                     首页与侧边栏的集群在线状态启动时自动探一次，之后按此节奏轮询；选"仅启动时"则只探一次
+                                </Text>
+                            </div>
+                            <div>
+                                <Text>Admin 并发上限（1 ~ 64）</Text>
+                                <div style={{marginTop: 4}}>
+                                    <InputNumber
+                                        aria-label="Admin 并发上限"
+                                        min={1}
+                                        max={64}
+                                        step={1}
+                                        precision={0}
+                                        value={concurrencyDraft ?? settings.adminConcurrencyLimit}
+                                        onChange={value =>
+                                            setConcurrencyDraft(typeof value === 'number' ? value : null)
+                                        }
+                                        onBlur={() => commitConcurrency(concurrencyDraft)}
+                                        onPressEnter={() => commitConcurrency(concurrencyDraft)}
+                                        addonAfter="并发"
+                                        style={{width: 160}}
+                                    />
+                                </div>
+                                <Text className="hint-text">
+                                    同时在途的 Admin REST 请求数上限，超出就排队。调大能更快刷完 Topic 统计， 但会占更多
+                                    broker 连接；调小则更省资源。改完立即生效，不用重启。
                                 </Text>
                             </div>
                         </Space>

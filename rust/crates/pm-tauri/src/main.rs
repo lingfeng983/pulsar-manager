@@ -124,6 +124,15 @@ fn main() {
         }
     };
 
+    // 设置里的 Admin 并发上限在这里推给 pm-pulsar 的进程级闸门：闸门是进程级的，
+    // 谁先建 AdminClient 都一样，启动时先落一次才能保证首轮请求就按用户设置跑。
+    // 读库失败不阻断启动（闸门停在该 crate 的出厂值上），但必须留痕——否则用户
+    // 看到的就是"改了设置没生效"却查不到原因。
+    match context.apply_admin_concurrency() {
+        Ok(limit) => pm_core::pm_log!("[app] Admin 并发上限 {limit}，取自设置"),
+        Err(error) => pm_core::pm_warn!("[app] Admin 并发上限读取失败，沿用出厂值：{error}"),
+    }
+
     // 诊断模式：页面脚本执行前挂上错误捕获，白屏时能直接看到 CSP 违规或
     // 运行时异常，而不是对着一片白猜。
     let diagnose = std::env::var("PM_RPC_LOG").is_ok();

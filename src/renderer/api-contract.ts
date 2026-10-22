@@ -15,6 +15,7 @@ import type {
     BrokerInfo,
     ClusterConfig,
     ClusterConfigDraft,
+    ClusterStatusResponse,
     ClusterTopology,
     AppSettings,
     ConsumerConfigCopyParams,
@@ -707,7 +708,8 @@ declare global {
         electronAPI: {
             cluster: {
                 list: () => Promise<APIResponse<ClusterConfig[]>>;
-                checkStatus: () => Promise<APIResponse<ClusterConfig[]>>;
+                // 探活失败的原因随 statusErrors 一起回来，见 shared/types 的注释
+                checkStatus: () => Promise<ClusterStatusResponse>;
                 add: (config: ClusterConfigDraft) => Promise<APIResponse<ClusterConfig>>;
                 update: (id: string, config: ClusterConfigDraft) => Promise<APIResponse<ClusterConfig>>;
                 delete: (id: string) => Promise<APIResponse<void>>;
