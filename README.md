@@ -5,7 +5,7 @@ Apache Pulsar 集群的桌面运维客户端，后台是 Rust（Tauri 2 外壳�
 所有与 broker 的通信都在 Rust 后台完成，页面只有一个入口 `rpc(method, args)`，契约写在 `src/renderer/api-contract.ts`；凭据以 AES-256 加密后落库，加密密钥由系统密钥库保护（Windows DPAPI；平台不支持时默认拒绝降级为明文），数据存于本地 SQLite，不依赖任何外部服务。进程里没有 Node 运行时，也不打包 Chromium，页面跑在系统自带的 WebView2 上，安装包约 7 MB。
 
 ![License](https://img.shields.io/badge/License-Apache%202.0-blue)
-![Version](https://img.shields.io/badge/Version-v1.6.3-orange)
+![Version](https://img.shields.io/badge/Version-v1.7.0-orange)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![Tauri](https://img.shields.io/badge/Tauri-2-FFC131)
 ![Rust](https://img.shields.io/badge/Rust-1.98-DEA584)

@@ -1,6 +1,6 @@
 {
     "name": "pulsar-manager",
-    "version": "1.6.3",
+    "version": "1.7.0",
     "description": "Apache Pulsar 桌面运维客户端：集群管理、消息收发、快速压测、监控巡检、告警通知一站式工具",
     "private": true,
     "author": "Pulsar Manager Team",
