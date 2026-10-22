@@ -13,22 +13,22 @@ Apache Pulsar 集群的桌面运维客户端，后台是 Rust（Tauri 2 外壳�
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178C6)
 ![PRs](https://img.shields.io/badge/PRs-welcome-brightgreen)
 
-- **下载安装**：前往分发仓 [pulsar-manager-dist](https://gitee.com/lingfeng983/pulsar-manager-dist/releases) 下载最新安装包（Windows 一键安装，应用内支持在线更新）
+- **下载安装**：前往 [GitHub Releases](https://github.com/lingfeng983/pulsar-manager/releases) 下载最新安装包（Windows 一键安装，应用内支持在线更新）
 - **一键体验**：不想先装集群？用 docker 起一个 standalone Pulsar，5 分钟跑通全部功能，见 [一键体验指南](./docs/guides/一键体验指南.md)
-- **反馈与贡献**：Bug / 需求请走 [Issue 模板](./.gitee/ISSUE_TEMPLATE/)，参与开发见 [CONTRIBUTING.md](./CONTRIBUTING.md)
+- **反馈与贡献**：Bug / 需求请走 [Issue 模板](./.github/ISSUE_TEMPLATE/)，参与开发见 [CONTRIBUTING.md](./CONTRIBUTING.md)
 
 ## 功能矩阵
 
-| 能力域 | 一句话 | 详见 |
-| --- | --- | --- |
-| 集群与资源管理 | 集群增删改查、探活、租户/命名空间/Topic 三层资源树 | [集群管理](#集群管理)、[资源浏览与管理](#资源浏览与管理) |
-| 消息收发 | 发送测试、订阅消费、Reader 按位置读、生产者/消费者工作台 | [消息收发](#消息收发)、[生产者与消费者工作台](#生产者与消费者工作台) |
-| 快速压测 | 并发写入、实时吞吐与延迟统计（P50/P95/P99） | [快速压测](#快速压测) |
-| 监控与拓扑 | 集群聚合统计、broker 列表、多集群/单集群拓扑、时序快照留存 | [监控与拓扑](#监控与拓扑) |
-| 巡检与告警 | 集群巡检、定时巡检、跨集群汇总、告警规则、通知渠道 | [集群巡检与告警](#集群巡检与告警) |
-| 策略管理 | 命名空间/Topic 级策略读写、批量同步、跨集群对比 | [策略管理](#策略管理) |
-| 函数与连接器 | Functions / Connectors 管理、本机包上传 | [函数与连接器](#函数与连接器) |
-| 接入与扩展 | SSH 隧道、K8s 端口转发、Schema、ACL、插件市场、文档中心 | [接入通道](#接入通道)、[Schema 与权限](#schema-与权限)、[文档中心](#文档中心)、[插件市场](#插件市场) |
+| 能力域         | 一句话                                                     | 详见                                                                                                 |
+| -------------- | ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| 集群与资源管理 | 集群增删改查、探活、租户/命名空间/Topic 三层资源树         | [集群管理](#集群管理)、[资源浏览与管理](#资源浏览与管理)                                             |
+| 消息收发       | 发送测试、订阅消费、Reader 按位置读、生产者/消费者工作台   | [消息收发](#消息收发)、[生产者与消费者工作台](#生产者与消费者工作台)                                 |
+| 快速压测       | 并发写入、实时吞吐与延迟统计（P50/P95/P99）                | [快速压测](#快速压测)                                                                                |
+| 监控与拓扑     | 集群聚合统计、broker 列表、多集群/单集群拓扑、时序快照留存 | [监控与拓扑](#监控与拓扑)                                                                            |
+| 巡检与告警     | 集群巡检、定时巡检、跨集群汇总、告警规则、通知渠道         | [集群巡检与告警](#集群巡检与告警)                                                                    |
+| 策略管理       | 命名空间/Topic 级策略读写、批量同步、跨集群对比            | [策略管理](#策略管理)                                                                                |
+| 函数与连接器   | Functions / Connectors 管理、本机包上传                    | [函数与连接器](#函数与连接器)                                                                        |
+| 接入与扩展     | SSH 隧道、K8s 端口转发、Schema、ACL、插件市场、文档中心    | [接入通道](#接入通道)、[Schema 与权限](#schema-与权限)、[文档中心](#文档中心)、[插件市场](#插件市场) |
 
 ## 架构（Rust 后台 + 复用 React 界面）
 
@@ -184,7 +184,7 @@ Topic 详情页的「消息浏览器」有三种模式，互不混淆（不是�
 - 配置迁移：一键导出集群配置与应用设置为 JSON；导出**不含任何凭据**（Token / TLS 证书、SSH 密码与私钥都以加密形式存在本机），导入方需要重新填一次凭据。导入只做新增，同名集群跳过并列出名字，整包在一个事务里完成
 - 「恢复默认」只重置界面与刷新设置，不动集群配置；「清空操作日志」带二次确认
 - 本地数据库带 `user_version` 增量迁移，旧库升级按版本逐步改造，不要求删库重建
-- 「设置 → 检查更新」比对公开分发仓库的最新发行版版本号，下载 exe 附件后静默安装并重启（无需令牌）
+- 「设置 → 检查更新」比对 GitHub 公开仓库 Releases 的最新发行版版本号，下载 exe 附件后静默安装并重启（无需令牌）
 
 ### 插件市场
 
@@ -196,22 +196,22 @@ Topic 详情页的「消息浏览器」有三种模式，互不混淆（不是�
 
 ## 技术栈
 
-| 层          | 选型                                                                 |
-| ----------- | -------------------------------------------------------------------- |
-| 桌面容器    | Tauri 2（Rust 后台 + 系统 WebView2，安装包约 7 MB）                    |
-| 后台语言    | Rust 2021（tokio + reqwest + serde），五个 crate 分层                 |
-| 前端        | React 18 + TypeScript 5.6 + Vite 5                                   |
-| UI / 状态   | Ant Design 5、Zustand 4                                              |
-| 图表        | ECharts 5.4                                                          |
+| 层          | 选型                                                                    |
+| ----------- | ----------------------------------------------------------------------- |
+| 桌面容器    | Tauri 2（Rust 后台 + 系统 WebView2，安装包约 7 MB）                     |
+| 后台语言    | Rust 2021（tokio + reqwest + serde），五个 crate 分层                   |
+| 前端        | React 18 + TypeScript 5.6 + Vite 5                                      |
+| UI / 状态   | Ant Design 5、Zustand 4                                                 |
+| 图表        | ECharts 5.4                                                             |
 | 本地存储    | rusqlite（bundled SQLite，幂等基线 DDL + `PRAGMA table_info` 增量补列） |
-| Pulsar 通信 | reqwest（Admin REST）+ pulsar crate（原生消息收发，二进制协议直连）    |
-| 接入通道    | 拉起系统 `ssh -L`（SSH 隧道）、复用本机 `kubectl port-forward`         |
-| 通知渠道    | lettre（SMTP 邮件）+ 钉钉/企微/飞书/Slack Webhook                      |
+| Pulsar 通信 | reqwest（Admin REST）+ pulsar crate（原生消息收发，二进制协议直连）     |
+| 接入通道    | 拉起系统 `ssh -L`（SSH 隧道）、复用本机 `kubectl port-forward`          |
+| 通知渠道    | lettre（SMTP 邮件）+ 钉钉/企微/飞书/Slack Webhook                       |
 | 凭据加密    | AES-256-GCM，密钥由 Windows DPAPI 保护（不可用时默认拒绝降级为明文）    |
-| 文档渲染    | marked + dompurify（内置文档中心，渲染层）                            |
-| 参数校验    | zod 3（前端表单）+ Rust 侧 serde/校验                                 |
-| 打包        | tauri-bundler（Windows NSIS，currentUser 安装）                       |
-| 代码质量    | ESLint 9 + Prettier 3（前端）、`cargo test --workspace`（后台）        |
+| 文档渲染    | marked + dompurify（内置文档中心，渲染层）                              |
+| 参数校验    | zod 3（前端表单）+ Rust 侧 serde/校验                                   |
+| 打包        | tauri-bundler（Windows NSIS，currentUser 安装）                         |
+| 代码质量    | ESLint 9 + Prettier 3（前端）、`cargo test --workspace`（后台）         |
 
 ## 目录结构
 
@@ -237,7 +237,7 @@ pulsar-manager/
 ├── docs/rust/                 # Rust 版实现说明与迁移方案
 ├── docs/screenshots/          # 界面截图素材与采集清单
 ├── docs/reference/            # 数据来源等内部参考说明
-├── .gitee/ISSUE_TEMPLATE/     # Issue 模板（Bug 报告 / 功能建议）
+├── .github/ISSUE_TEMPLATE/    # Issue 模板（Bug 报告 / 功能建议）
 ├── CONTRIBUTING.md            # 贡献指南
 ├── docker-compose.yml         # 一键体验：standalone Pulsar 示例集群
 ├── scripts/make-icon.mjs      # 图标唯一来源：纯 Node 画图标，产出 rust/crates/pm-tauri/icons/*
@@ -329,10 +329,10 @@ npm run release -- --verify-only --tag v1.6.2  # 只回读校验已发布的发�
 
 发布后用匿名请求回读，跑一遍客户端会做的事：最新发行版必须是这一版、附件名与大小要对、下载回来的 SHA256 与说明一致且与本地安装包逐字节一致。
 
-凭据按 `GITEE_TOKEN` → 仓库根 `.gitee_token`（已忽略）→ `GITEE_USER` / `GITEE_PASSWORD` → Windows 凭据管理器里的 `gitee.com` 账号 的顺序取，不会回显。其余约束：
+发版凭据只从环境变量 `GITHUB_TOKEN`（或 GitHub CLI 惯用的 `GH_TOKEN`）读，不会回显；令牌只需要对仓库有 `Contents: write`。令牌不落文件，仓库里也没有任何令牌文件。其余约束：
 
-- **分发仓必须是公开的**：匿名就能读，应用内没有任何令牌入口，用户不用配凭证；源码仓不发版，避免同一版本两份包对不上号。
-- 分发仓只保留最近几个版本的安装包（Gitee 有仓库容量上限）；删发行版与附件不影响标签。
+- **发行版仓库必须是公开的**：匿名就能读，应用内没有任何令牌入口，用户不用配凭证；源码仓与发行版在同一个公开仓库（`pulsar-manager`），避免同一版本两份包对不上号。
+- 仓库只保留最近几个版本的大体积安装包；删发行版与附件不影响标签。
 
 ## 架构约束
 
@@ -362,7 +362,7 @@ npm run release -- --verify-only --tag v1.6.2  # 只回读校验已发布的发�
 以下是**当前确实没做**的部分，界面不会假装它们可用：
 
 - **SSH 隧道 / K8s 转发的边界**：隧道管理器本身在 Rust 侧已实现（拉起系统的 `ssh -L` 与 `kubectl port-forward`，见 `pm-services/src/tunnel.rs` 与「接入通道」页面），但**集群配置里勾选「走 SSH 隧道 / K8s 端口转发」这条自动改写地址的路径还没接上**：`pm-services/src/cluster.rs` 的 `reject_unported_reachability` 会对这类集群直接返回「暂未实现」的可执行提示，而不是悄悄直连卡到超时。当前用法：在本机（或应用的隧道面板）手动建好转发，再在集群配置里直接填本地可达地址。另两点限制：SSH 只支持密钥认证——`ssh` 从终端读密码，桌面进程里无法自动完成，密码登录会明确报错请改用密钥或 agent；原生收发路径不做隧道可达性检查，地址不可达时表现为连接超时。
-- **在线更新走公开分发仓库**：设置→检查更新 读取 `lingfeng983/pulsar-manager-dist`（公开，只放发行版与安装包）的最新发行版，比对版本号后下载 exe 附件并校验 SHA256，再静默安装重启。公开仓库匿名就能读，应用内没有任何令牌入口，用户不用配任何东西；源码仓库保持私有也不发版。仓库地址写死在应用侧 `rust/crates/pm-services/src/update.rs` 的 `REPO` 常量里，发版侧目前靠手工发布（一键脚本待重做）——换仓库两处必须一起改，否则发出去的包读不到新版本。
+- **在线更新走公开仓库的 Releases**：设置→检查更新 读取 `lingfeng983/pulsar-manager`（公开）的最新发行版，比对版本号后下载 exe 附件并校验 SHA256，再静默安装重启。公开仓库匿名就能读，应用内没有任何令牌入口，用户不用配任何东西。仓库地址写死在应用侧 `rust/crates/pm-services/src/update.rs` 的 `OWNER` / `REPO` 常量里（GitHub 匿名 API 有每小时 60 次的请求上限，单机日常检查更新的量级远用不到）——换仓库时应用侧常量与发版脚本 `scripts/release-publish.mjs` 的 `DEFAULT_REPO` 两处必须一起改，否则发出去的包读不到新版本。
 - **快速压测的延迟口径**：统计的是 `send()` 调用到 broker 确认的时间，包含客户端在途队列的排队；单生产者并发调大时 P50 会显著上升，这不是 broker 变慢
 - **发送历史只存前缀**：每次发送（单发、直接发送、连续发送的每一轮）都往 `send_history` 落一行，生产者工作台的「发送历史」按 集群 + topic 读最近 200 条；正文只留前 400 字符与平均单条字节数，整篇载荷当时就在原生层释放，所以历史不能拿来重发
 - **跨集群巡检汇总是快照对比**：汇总页读的是各集群最近一份历史报告，屏幕上的数字可能已是几小时前的；页面按新鲜度分级提示，并以报告生成时间为准，导出文档会写明"这不是同一时刻的快照"
@@ -372,9 +372,9 @@ npm run release -- --verify-only --tag v1.6.2  # 只回读校验已发布的发�
 
 ## 社区与贡献
 
-- **反馈问题 / 提需求**：请使用 [Bug 报告模板](./.gitee/ISSUE_TEMPLATE/bug_report.md) 与 [功能建议模板](./.gitee/ISSUE_TEMPLATE/feature_request.md) 提交 Issue
+- **反馈问题 / 提需求**：请使用 [Bug 报告模板](./.github/ISSUE_TEMPLATE/bug_report.md) 与 [功能建议模板](./.github/ISSUE_TEMPLATE/feature_request.md) 提交 Issue
 - **参与开发**：见 [CONTRIBUTING.md](./CONTRIBUTING.md)——开发环境、自测清单、提交前四道门、提交约定与发版流程
-- **安装与更新**：安装包与版本说明统一在分发仓 [pulsar-manager-dist](https://gitee.com/lingfeng983/pulsar-manager-dist/releases) 发布，应用内「设置 → 检查更新」自动比对
+- **安装与更新**：安装包与版本说明统一在 [GitHub Releases](https://github.com/lingfeng983/pulsar-manager/releases) 发布，应用内「设置 → 检查更新」自动比对
 - 如果你觉得这个工具顺手，欢迎点个 Star；也欢迎把使用中遇到的坑提成 Issue，一起把 Pulsar 运维这件事做得更顺
 
 ## 版本与许可证

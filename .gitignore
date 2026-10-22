@@ -14,10 +14,6 @@ release/
 release-backup-*/
 /*.png
 
-# 发布令牌（release.sh 使用，严禁入库）
-.gitee_token
-
-
 # SSH 隧道自检的临时主机密钥/证书，只在本机生成，严禁入库
 scripts/tunnel-selftest/certs/
 

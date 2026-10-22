@@ -13,9 +13,9 @@ use sha2::{Digest, Sha256};
 
 use crate::messaging::Emit;
 
-const API_BASE: &str = "https://gitee.com/api/v5";
+const API_BASE: &str = "https://api.github.com";
 const OWNER: &str = "lingfeng983";
-const REPO: &str = "pulsar-manager-dist";
+const REPO: &str = "pulsar-manager";
 /// 安装包上限 512MB：谎报 Content-Length 的响应不能把磁盘写满
 const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
 
@@ -90,13 +90,17 @@ fn sha256_from_notes(notes: &str) -> Option<String> {
     None
 }
 
-/// 只信任 gitee 域名的附件地址：不能拿发行说明里的任意 URL 去下载并执行。
+/// 只信任 GitHub 的附件地址：不能拿发行说明里的任意 URL 去下载并执行。
+/// 下载会跟随 302 跳到 `*.githubusercontent.com`，这里把两类域名都放行。
 fn allowed_asset(url: &str) -> bool {
     match url::Url::parse(url) {
         Ok(parsed) => match parsed.host_str() {
             Some(host) => {
                 let host = host.to_lowercase();
-                host == "gitee.com" || host.ends_with(".gitee.com")
+                host == "github.com"
+                    || host.ends_with(".github.com")
+                    || host == "githubusercontent.com"
+                    || host.ends_with(".githubusercontent.com")
             }
             None => false,
         },
@@ -115,8 +119,9 @@ fn client() -> AppResult<reqwest::Client> {
 pub async fn check(current_version: &str, watermark: &str) -> AppResult<UpdateCheck> {
     let client = client()?;
     let releases: serde_json::Value = client
-        .get(format!("{API_BASE}/repos/{OWNER}/{REPO}/releases"))
+        .get(format!("{API_BASE}/repos/{OWNER}/{REPO}/releases?per_page=100"))
         .header("X-PM-Client", watermark)
+        .header("Accept", "application/vnd.github+json")
         .send()
         .await
         .map_err(|e| AppError::Network(format!("检查更新失败: {e}")))?
@@ -170,24 +175,11 @@ pub async fn check(current_version: &str, watermark: &str) -> AppResult<UpdateCh
         return Ok(result);
     }
 
-    let id = latest
-        .get("id")
-        .and_then(|value| value.as_i64().map(|number| number.to_string()))
-        .or_else(|| latest.get("id").and_then(serde_json::Value::as_str).map(str::to_string))
-        .ok_or_else(|| AppError::Other("最新发行版缺少 id".into()))?;
-
-    // 路由是 attach_files：`/releases/{id}/attachments` 在 Gitee 上不存在
-    let attachments: serde_json::Value = client
-        .get(format!("{API_BASE}/repos/{OWNER}/{REPO}/releases/{id}/attach_files"))
-        .header("X-PM-Client", watermark)
-        .send()
-        .await
-        .map_err(|e| AppError::Network(format!("读取发行附件失败: {e}")))?
-        .error_for_status()
-        .map_err(|e| AppError::Network(format!("更新源不可读: {e}")))?
-        .json()
-        .await
-        .map_err(|e| AppError::Other(format!("解析附件列表失败: {e}")))?;
+    // GitHub 的发行版对象里直接带 assets，不用再单独请求附件列表。
+    let attachments = latest
+        .get("assets")
+        .cloned()
+        .unwrap_or(serde_json::Value::Array(Vec::new()));
 
     let mut candidates: Vec<(String, i64, String, bool)> = attachments
         .as_array()
@@ -214,7 +206,7 @@ pub async fn check(current_version: &str, watermark: &str) -> AppResult<UpdateCh
         .next()
         .ok_or_else(|| AppError::Other(format!("最新版本 {latest_version} 没有可下载的 exe 安装包附件")))?;
     if !allowed_asset(&url) {
-        return Err(AppError::Other("发行版附件地址不是受信任的 gitee 域名".into()));
+        return Err(AppError::Other("发行版附件地址不是受信任的 GitHub 域名".into()));
     }
     let sha256 = sha256_from_notes(&notes).ok_or_else(|| {
         AppError::Other("该发行版的说明里没有 SHA256，无法校验安装包，请让发布方补上 SHA256 行后重新发布".into())

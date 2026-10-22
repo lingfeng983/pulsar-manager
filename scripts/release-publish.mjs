@@ -1,6 +1,6 @@
-// 一键发版：出包 → 门禁 → 在分发仓建发行版 → 传安装包 → 匿名回读校验。
+// 一键发版：出包 → 门禁 → 在 GitHub 建发行版 → 传安装包 → 匿名回读校验。
 //
-// 为什么要有这个脚本：应用内「检查更新」只认两样东西——分发仓里版本号最大的发行版，
+// 为什么要有这个脚本：应用内「检查更新」只认两样东西——仓库里版本号最大的发行版，
 // 以及它说明正文里那行 `- SHA256：<64 位>`（见 pm-services/src/update.rs 的 sha256_from_notes）。
 // 这两样任何一处写错，用户看到的是「有新版本」却下载校验失败或根本装不上，服务端没有兜底的机会：
 // 所以把「版本号三处一致、标签已推、包大小与 exe 版本对、说明里恰好一个正确的 SHA256、
@@ -13,8 +13,9 @@
 //   npm run release -- --verify-only --tag v1.6.2  # 只回读校验已发布的发行版
 //   npm run release -- --notes <路径>              # 指定发行说明（默认 docs/releases/v<版本>.md）
 //
-// 凭据：优先 GITEE_TOKEN，其次仓库根的 .gitee_token（已忽略），再次 GITEE_USER / GITEE_PASSWORD，
-// 最后从 Windows 凭据管理器取 gitee.com 的账号。凭据只进请求，不进日志。
+// 凭据：只从环境变量 GITHUB_TOKEN（或 GitHub CLI 惯用的 GH_TOKEN）读，不接受文件里的令牌。
+//   令牌只进请求头，不进日志；需要的最小权限是「对 lingfeng983/pulsar-manager 有 Contents: write」。
+//   只回读校验（--verify-only）走匿名请求，不需要任何令牌。
 import {createHash} from 'node:crypto';
 import {execFileSync, spawnSync} from 'node:child_process';
 import {existsSync, mkdirSync, readFileSync, statSync, writeFileSync} from 'node:fs';
@@ -22,8 +23,9 @@ import {createInterface} from 'node:readline';
 import path from 'node:path';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
-const API = 'https://gitee.com/api/v5';
-const DEFAULT_REPO = 'lingfeng983/pulsar-manager-dist';
+const API = 'https://api.github.com';
+const UPLOAD_API = 'https://uploads.github.com';
+const DEFAULT_REPO = 'lingfeng983/pulsar-manager';
 const NOTES_DIR = 'docs/releases';
 
 // Rust 版 NSIS 包实测约 7.4 MB。上下限只拦两类事故：被文件锁截断的半成品、
@@ -59,7 +61,7 @@ function parseArgs(argv) {
         verifyOnly: false,
         allowDirty: false,
         notes: null,
-        repo: process.env.GITEE_REPO || DEFAULT_REPO,
+        repo: process.env.GITHUB_REPO || DEFAULT_REPO,
         tag: null,
     };
     for (let index = 0; index < argv.length; index += 1) {
@@ -377,83 +379,40 @@ function assertShaInNotes(notes, sha256) {
     ok('说明里的 SHA256 与安装包一致');
 }
 
-function basicHeader(username, password) {
-    return `Basic ${Buffer.from(`${username}:${password}`, 'utf8').toString('base64')}`;
-}
-
-function fillCredential() {
-    for (const helper of ['manager', 'manager-core', 'store']) {
-        const result = spawnSync('git', ['-c', `credential.helper=${helper}`, 'credential', 'fill'], {
-            cwd: ROOT,
-            input: 'protocol=https\nhost=gitee.com\n\n',
-            encoding: 'utf8',
-            env: {...process.env, GIT_TERMINAL_PROMPT: '0'},
-        });
-        if (result.status !== 0 || !result.stdout) {
-            continue;
-        }
-        const username = /^username=(.+)$/m.exec(result.stdout)?.[1]?.trim();
-        const password = /^password=(.+)$/m.exec(result.stdout)?.[1]?.trim();
-        if (username && password) {
-            return {username, password};
-        }
-    }
-    return null;
-}
-
 function resolveAuth() {
-    step('Gitee 凭据');
-    const tokenFile = path.join(ROOT, '.gitee_token');
-    const token =
-        (process.env.GITEE_TOKEN || '').trim() || (existsSync(tokenFile) ? readFileSync(tokenFile, 'utf8').trim() : '');
-    if (token) {
-        ok('使用 GITEE_TOKEN / .gitee_token');
-        return {kind: 'token', token};
+    step('GitHub 凭据');
+    const token = (process.env.GITHUB_TOKEN || process.env.GH_TOKEN || '').trim();
+    if (!token) {
+        fail(
+            '没有可用的 GitHub 凭据：设置环境变量 GITHUB_TOKEN（或 GH_TOKEN），' +
+                '需要「对 ' +
+                DEFAULT_REPO +
+                ' 有 Contents: write」的令牌。令牌只从环境变量读，别写进仓库里的文件。',
+        );
     }
-    const username = process.env.GITEE_USER;
-    const password = process.env.GITEE_PASSWORD;
-    if (username && password) {
-        ok(`使用 GITEE_USER（${username}）`);
-        return {kind: 'basic', header: basicHeader(username, password)};
-    }
-    const filled = fillCredential();
-    if (filled) {
-        ok(`使用系统凭据管理器里的 gitee.com 账号（${filled.username}）`);
-        return {kind: 'basic', header: basicHeader(filled.username, filled.password)};
-    }
-    fail(
-        '没有可用的 Gitee 凭据：设置 GITEE_TOKEN，或把令牌写进仓库根的 .gitee_token，或让 Windows 凭据管理器保存 gitee.com 账号。',
-    );
+    ok('使用 GITHUB_TOKEN / GH_TOKEN');
+    return {token};
 }
 
-function apiUrl(pathname, auth) {
-    const url = new URL(`${API}${pathname}`);
-    if (auth?.kind === 'token') {
-        url.searchParams.set('access_token', auth.token);
+async function api(pathname, {method = 'GET', auth = null, json, raw, base = API, headers = {}} = {}) {
+    const init = {method, headers: {...headers}};
+    if (auth) {
+        init.headers.Authorization = `Bearer ${auth.token}`;
     }
-    return url.toString();
-}
-
-async function request(method, pathname, auth, options = {}) {
-    const headers = {};
-    if (auth?.kind === 'basic') {
-        headers.Authorization = auth.header;
+    init.headers.Accept = 'application/vnd.github+json';
+    init.headers['X-GitHub-Api-Version'] = '2022-11-28';
+    init.headers['User-Agent'] = 'pulsar-manager-release-script';
+    if (json !== undefined) {
+        init.headers['Content-Type'] = 'application/json';
+        init.body = JSON.stringify(json);
+    } else if (raw !== undefined) {
+        init.headers['Content-Type'] = raw.type || 'application/octet-stream';
+        init.body = raw.body;
     }
-    const init = {method, headers};
-    if (options.form) {
-        const form = new URLSearchParams(options.form);
-        if (auth?.kind === 'token') {
-            form.set('access_token', auth.token);
-        }
-        headers['Content-Type'] = 'application/x-www-form-urlencoded;charset=UTF-8';
-        init.body = form.toString();
-    } else if (options.multipart) {
-        init.body = options.multipart;
-    }
-    const response = await fetch(apiUrl(pathname, auth), init);
+    const response = await fetch(`${base}${pathname}`, init);
     if (!response.ok) {
         const detail = (await response.text()).slice(0, 300);
-        fail(`Gitee API ${method} ${pathname} 失败：HTTP ${response.status} ${detail}`);
+        fail(`GitHub API ${method} ${pathname} 失败：HTTP ${response.status} ${detail}`);
     }
     if (response.status === 204) {
         return null;
@@ -461,46 +420,44 @@ async function request(method, pathname, auth, options = {}) {
     return response.json();
 }
 
-async function ensureReleaseAbsent(repo, tag) {
-    step('分发仓检查');
-    const releases = await request('GET', `/repos/${repo}/releases`, null);
-    const existing = (Array.isArray(releases) ? releases : []).find(release => release.tag_name === tag);
+async function listReleases(repo, auth) {
+    const releases = await api(`/repos/${repo}/releases?per_page=100`, {auth});
+    return Array.isArray(releases) ? releases : [];
+}
+
+async function ensureReleaseAbsent(repo, tag, auth) {
+    step('仓库发行版检查');
+    const releases = await listReleases(repo, auth);
+    const existing = releases.find(release => release.tag_name === tag);
     if (existing) {
-        fail(`分发仓里已有 ${tag} 的发行版（id ${existing.id}）。要重发先删掉它：https://gitee.com/${repo}/releases`);
+        fail(`仓库里已有 ${tag} 的发行版（id ${existing.id}）。要重发先删掉它：https://github.com/${repo}/releases`);
     }
     ok(`还没有 ${tag} 的发行版`);
 }
 
-async function distTarget(repo) {
-    const info = await request('GET', `/repos/${repo}`, null);
-    const branch = info?.default_branch || 'master';
-    const commits = await request('GET', `/repos/${repo}/commits?per_page=1&sha=${encodeURIComponent(branch)}`, null);
-    const sha = Array.isArray(commits) ? commits[0]?.sha : null;
-    if (!sha) {
-        fail('读不到分发仓默认分支的提交，无法给标签定位置。');
-    }
-    return sha;
-}
-
 async function createRelease(repo, tag, notes, auth) {
-    const target = await distTarget(repo);
-    const release = await request('POST', `/repos/${repo}/releases`, auth, {
-        form: {
+    const release = await api(`/repos/${repo}/releases`, {
+        method: 'POST',
+        auth,
+        json: {
             tag_name: tag,
             name: `Pulsar 管理工具 ${tag}`,
             body: notes,
-            prerelease: 'false',
-            target_commitish: target,
+            draft: false,
+            prerelease: false,
         },
     });
-    ok(`发行版已创建（id ${release.id}，标签指向 ${target.slice(0, 7)}）`);
+    ok(`发行版已创建（id ${release.id}，标签 ${release.tag_name}）`);
     return release;
 }
 
 async function uploadAsset(repo, releaseId, artifact, auth) {
-    const form = new FormData();
-    form.append('file', new Blob([readFileSync(artifact.file)]), artifact.name);
-    const upload = await request('POST', `/repos/${repo}/releases/${releaseId}/attach_files`, auth, {multipart: form});
+    const upload = await api(`/repos/${repo}/releases/${releaseId}/assets?name=${encodeURIComponent(artifact.name)}`, {
+        method: 'POST',
+        auth,
+        base: UPLOAD_API,
+        raw: {body: readFileSync(artifact.file)},
+    });
     if (!upload?.name) {
         fail('附件上传没有返回文件名，请到发行页确认。');
     }
@@ -511,12 +468,12 @@ async function uploadAsset(repo, releaseId, artifact, auth) {
 /** 用匿名请求跑一遍客户端会做的事：读发行版列表 → 解析说明里的 SHA256 → 下载附件 → 比对字节。 */
 async function verifyRelease(repo, tag, expected = {}) {
     step('匿名回读校验');
-    const releases = await request('GET', `/repos/${repo}/releases`, null);
-    if (!Array.isArray(releases) || releases.length === 0) {
-        fail('分发仓里读不到任何发行版。');
+    const releases = await listReleases(repo, null);
+    if (releases.length === 0) {
+        fail('仓库里读不到任何发行版。');
     }
     const latest = releases
-        .filter(release => typeof release.tag_name === 'string')
+        .filter(release => typeof release.tag_name === 'string' && !release.draft)
         .reduce((best, item) => (!best || compareVersions(item.tag_name, best.tag_name) > 0 ? item : best), null);
     if (!latest) {
         fail('发行版列表里没有能比较的 tag。');
@@ -533,10 +490,8 @@ async function verifyRelease(repo, tag, expected = {}) {
     }
     ok(`说明里的 SHA256 ${parsed}`);
 
-    const attachments = await request('GET', `/repos/${repo}/releases/${release.id}/attach_files`, null);
-    const asset = (Array.isArray(attachments) ? attachments : []).find(
-        item => typeof item.name === 'string' && item.name.toLowerCase().endsWith('.exe'),
-    );
+    const assets = Array.isArray(release.assets) ? release.assets : [];
+    const asset = assets.find(item => typeof item.name === 'string' && item.name.toLowerCase().endsWith('.exe'));
     if (!asset) {
         fail('发行版里没有 .exe 附件；应用内更新找不到可下载的安装包。');
     }
@@ -549,10 +504,16 @@ async function verifyRelease(repo, tag, expected = {}) {
     ok(`附件 ${asset.name}（${formatSize(asset.size)}）`);
 
     const host = new URL(asset.browser_download_url).hostname.toLowerCase();
-    if (host !== 'gitee.com' && !host.endsWith('.gitee.com')) {
-        fail(`附件地址不是 gitee 域名：${host}；客户端只信任 gitee.com。`);
+    const trusted =
+        host === 'github.com' ||
+        host.endsWith('.github.com') ||
+        host === 'githubusercontent.com' ||
+        host.endsWith('.githubusercontent.com');
+    if (!trusted) {
+        fail(`附件地址不是 GitHub 域名：${host}；客户端只信任 GitHub 的下载地址。`);
     }
-    const response = await fetch(asset.browser_download_url);
+    // 下载会跟随 302 跳到 release-assets.githubusercontent.com，匿名可读即通过。
+    const response = await fetch(asset.browser_download_url, {redirect: 'follow'});
     if (!response.ok) {
         fail(`匿名下载附件失败：HTTP ${response.status}。`);
     }
@@ -571,8 +532,7 @@ async function verifyRelease(repo, tag, expected = {}) {
     if (expected.sha256) {
         ok('下载回来的附件与本地安装包逐字节一致');
     }
-    // Gitee 对发行页的 HEAD 返回 405，用 GET 只判状态码。
-    const page = await fetch(`https://gitee.com/${repo}/releases/tag/${tag}`);
+    const page = await fetch(`https://github.com/${repo}/releases/tag/${tag}`);
     if (!page.ok) {
         warn(`发行页返回 ${page.status}，请手工打开确认页面正常`);
     }
@@ -605,7 +565,7 @@ async function main() {
               }
             : {};
         await verifyRelease(options.repo, tag, expected);
-        console.log(`\n✔ ${tag} 校验通过：https://gitee.com/${options.repo}/releases/tag/${tag}`);
+        console.log(`\n✔ ${tag} 校验通过：https://github.com/${options.repo}/releases/tag/${tag}`);
         return;
     }
 
@@ -636,12 +596,12 @@ async function main() {
     }
 
     const auth = resolveAuth();
-    await ensureReleaseAbsent(options.repo, tag);
+    await ensureReleaseAbsent(options.repo, tag, auth);
     const release = await createRelease(options.repo, tag, notes, auth);
     await uploadAsset(options.repo, release.id, artifact, auth);
     await verifyRelease(options.repo, tag, artifact);
     console.log(
-        `\n✔ ${tag} 已发布：https://gitee.com/${options.repo}/releases/tag/${tag}\n` +
+        `\n✔ ${tag} 已发布：https://github.com/${options.repo}/releases/tag/${tag}\n` +
             `  SHA256 ${artifact.sha256}\n` +
             `  发行说明源文件：${path.relative(ROOT, notesFile)}\n` +
             `  版本号、标签与安装包一致；旧客户端下次检查更新即可看到 ${version}。`,

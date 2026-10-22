@@ -4,8 +4,8 @@
 
 ## 提 Issue
 
-- **Bug 报告**：使用 [Bug 报告模板](./.gitee/ISSUE_TEMPLATE/bug_report.md)，说明环境（操作系统 / Pulsar 版本 / 应用版本）、复现步骤、期望行为与实际行为；能附日志或截图更好
-- **功能建议**：使用 [功能建议模板](./.gitee/ISSUE_TEMPLATE/feature_request.md)，说明场景、想要的能力与可接受的替代方案
+- **Bug 报告**：使用 [Bug 报告模板](./.github/ISSUE_TEMPLATE/bug_report.md)，说明环境（操作系统 / Pulsar 版本 / 应用版本）、复现步骤、期望行为与实际行为；能附日志或截图更好
+- **功能建议**：使用 [功能建议模板](./.github/ISSUE_TEMPLATE/feature_request.md)，说明场景、想要的能力与可接受的替代方案
 - 提交前先搜索是否已有相同 Issue，避免重复
 
 ## 开发环境
@@ -58,10 +58,10 @@ npm run selftest:docs  # 内置文档中心：目录锚点、跨篇检索、已�
 
 ## 发版
 
-发版由维护者执行，流程与硬性规则见 [README「发版」](./README.md#发版)。`npm run release`（`scripts/release-publish.mjs`）会依次做出包、门禁、建发行版、传安装包与匿名回读校验；先跑 `npm run release -- --dry-run` 看门禁结果与发行说明，再去掉 `--dry-run` 发布到公开分发仓 `pulsar-manager-dist`。发行说明正文**必须带一行 `- SHA256：`<64 位>``**（应用内更新只从正文取校验值，缺了这条等于给所有旧客户端发一条读得到却装不上的更新）；这一行由脚本自动写入并与安装包逐位比对。
+发版由维护者执行，流程与硬性规则见 [README「发版」](./README.md#发版)。`npm run release`（`scripts/release-publish.mjs`）会依次做出包、门禁、建发行版、传安装包与匿名回读校验；先跑 `npm run release -- --dry-run` 看门禁结果与发行说明，再去掉 `--dry-run` 发布到公开仓库 `lingfeng983/pulsar-manager` 的 Releases（需要环境变量 `GITHUB_TOKEN`）。发行说明正文**必须带一行 `- SHA256：`<64 位>``**（应用内更新只从正文取校验值，缺了这条等于给所有旧客户端发一条读得到却装不上的更新）；这一行由脚本自动写入并与安装包逐位比对。
 
 ## 行为准则
 
 - 友善沟通，就事论事；新人问题值得被认真回答
-- 不把凭据、Token 或任何密钥写进代码、Issue 或 PR（`.gitee_token` 已在 `.gitignore`，严禁入库）
+- 不把凭据、Token 或任何密钥写进代码、Issue 或 PR（发版令牌只从环境变量 `GITHUB_TOKEN` 读，别落进文件）
 - 讨论与答疑也请遵守 Apache-2.0 的开源精神：尊重原作者与贡献者的时间

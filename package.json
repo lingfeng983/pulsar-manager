@@ -5,13 +5,13 @@
     "private": true,
     "author": "Pulsar Manager Team",
     "license": "Apache-2.0",
-    "homepage": "https://gitee.com/lingfeng983/pulsar-manager",
+    "homepage": "https://github.com/lingfeng983/pulsar-manager",
     "repository": {
         "type": "git",
-        "url": "https://gitee.com/lingfeng983/pulsar-manager.git"
+        "url": "git+https://github.com/lingfeng983/pulsar-manager.git"
     },
     "bugs": {
-        "url": "https://gitee.com/lingfeng983/pulsar-manager/issues"
+        "url": "https://github.com/lingfeng983/pulsar-manager/issues"
     },
     "scripts": {
         "dev": "vite",
