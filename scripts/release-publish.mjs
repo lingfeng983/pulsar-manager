@@ -258,6 +258,13 @@ function installerPath(version) {
     return path.join(ROOT, 'rust/target/release/bundle/nsis', `Pulsar Manager_${version}_x64-setup.exe`);
 }
 
+// 发行版附件名。GitHub 会把上传时的文件名里除字母数字与 `.` `_` `-` 以外的字符改写（空格会变成 `.`），
+// 本地构建产物却固定带空格，两边不一致会让「说明里写的名字」「附件实际名字」「门禁的预期」对不上。
+// 所以上传时显式指定一个不含空格的名字：本地文件名里的空白统一换成 `-`，三处用同一个函数推出来。
+function publishedAssetName(file) {
+    return path.basename(file).replace(/\s+/g, '-');
+}
+
 function checkExeVersion(file, version) {
     const quoted = `'${file.replace(/'/g, "''")}'`;
     const script = `$v=(Get-Item -LiteralPath ${quoted}).VersionInfo; $v.FileVersion + '|' + $v.ProductVersion`;
@@ -295,7 +302,7 @@ function inspectArtifact(file, version) {
     }
     const sha256 = createHash('sha256').update(readFileSync(file)).digest('hex');
     ok(`SHA256 ${sha256}`);
-    return {file, name: path.basename(file), size: stat.size, sha256};
+    return {file, localName: path.basename(file), name: publishedAssetName(file), size: stat.size, sha256};
 }
 
 function notesPathFor(version) {
@@ -318,7 +325,7 @@ function writeDraftNotes(file, version, tag) {
     const draft = [
         `Pulsar 管理工具 v${version}，Windows x64 安装包。`,
         '',
-        `- 附件 \`Pulsar Manager_${version}_x64-setup.exe\`（约 7 MB），双击安装（当前用户安装，不需要管理员权限）`,
+        `- 附件 \`${publishedAssetName(installerPath(version))}\`（约 7 MB），双击安装（当前用户安装，不需要管理员权限）`,
         '- SHA256：`{{SHA256}}`',
         `- 对应提交：\`${short}\`（master 分支）`,
         '- 数据兼容：沿用 `%APPDATA%\\pulsar-manager\\pulsar-manager.db`（user_version 17）与同一套 DPAPI 凭据密钥，老库直接读，不需要迁移',
@@ -550,6 +557,12 @@ async function uploadAsset(repo, releaseId, artifact, auth) {
     if (!upload?.name) {
         fail('附件上传没有返回文件名，请到发行页确认。');
     }
+    if (upload.name !== artifact.name) {
+        fail(
+            `GitHub 把附件名改写成了 ${upload.name}，与预期的 ${artifact.name} 不一致；` +
+                '发行说明里写的名字和门禁的预期都要跟着改，否则客户端与说明对不上号。',
+        );
+    }
     ok(`附件已上传：${upload.name}（${formatSize(upload.size)}）`);
     return upload;
 }
@@ -655,7 +668,7 @@ async function main() {
             ? {
                   sha256: createHash('sha256').update(readFileSync(local)).digest('hex'),
                   size: statSync(local).size,
-                  name: path.basename(local),
+                  name: publishedAssetName(local),
               }
             : {};
         await verifyRelease(options.repo, tag, expected);
