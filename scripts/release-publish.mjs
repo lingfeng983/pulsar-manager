@@ -11,9 +11,13 @@
 //   npm run release -- --dry-run                   # 只出包、过门禁、打印发行说明，不建发行版
 //   npm run release -- --skip-build                # 复用 rust/target/release/bundle/nsis 里已有的包
 //   npm run release -- --verify-only --tag v1.6.2  # 只回读校验已发布的发行版
+//   npm run release -- --check-auth                # 只验凭据能不能通过 GitHub 认证，不发版
 //   npm run release -- --notes <路径>              # 指定发行说明（默认 docs/releases/v<版本>.md）
 //
-// 凭据：只从环境变量 GITHUB_TOKEN（或 GitHub CLI 惯用的 GH_TOKEN）读，不接受文件里的令牌。
+// 凭据：按「环境变量 GITHUB_TOKEN（或 GitHub CLI 惯用的 GH_TOKEN）→ Windows 凭据管理器」的顺序取，
+//   不接受文件里的令牌。Windows 上推荐一次性把令牌存进凭据管理器（交互式，不回显、不进 shell 历史）：
+//     powershell -NoProfile -ExecutionPolicy Bypass -File scripts/wincred.ps1 -Action store
+//   存好后直接跑 npm run release 即可自己取用；查看与删除改用 -Action get / -Action delete。
 //   令牌只进请求头，不进日志；需要的最小权限是「对 lingfeng983/pulsar-manager 有 Contents: write」。
 //   只回读校验（--verify-only）走匿名请求，不需要任何令牌。
 import {createHash} from 'node:crypto';
@@ -27,6 +31,9 @@ const API = 'https://api.github.com';
 const UPLOAD_API = 'https://uploads.github.com';
 const DEFAULT_REPO = 'lingfeng983/pulsar-manager';
 const NOTES_DIR = 'docs/releases';
+// Windows 凭据管理器里的目标名。ps1 与这里必须逐字一致，改一处就得改两处。
+const WINCRED_TARGET = 'pulsar-manager:github-token';
+const WINCRED_SCRIPT = 'scripts/wincred.ps1';
 
 // Rust 版 NSIS 包实测约 7.4 MB。上下限只拦两类事故：被文件锁截断的半成品、
 // 以及误把 80 MB 的 Electron 包传成新版。真要涨过 12 MB，先确认是预期内再调这里。
@@ -59,6 +66,7 @@ function parseArgs(argv) {
         skipBuild: false,
         yes: false,
         verifyOnly: false,
+        checkAuth: false,
         allowDirty: false,
         notes: null,
         repo: process.env.GITHUB_REPO || DEFAULT_REPO,
@@ -81,6 +89,8 @@ function parseArgs(argv) {
             options.yes = true;
         } else if (arg === '--verify-only') {
             options.verifyOnly = true;
+        } else if (arg === '--check-auth') {
+            options.checkAuth = true;
         } else if (arg === '--allow-dirty') {
             options.allowDirty = true;
         } else if (arg === '--notes') {
@@ -91,7 +101,7 @@ function parseArgs(argv) {
             options.tag = value();
         } else {
             fail(
-                `不认识的参数：${arg}\n  可用：--dry-run --skip-build --yes --verify-only --allow-dirty --notes <路径> --repo <owner/name> --tag <tag>`,
+                `不认识的参数：${arg}\n  可用：--dry-run --skip-build --yes --verify-only --check-auth --allow-dirty --notes <路径> --repo <owner/name> --tag <tag>`,
             );
         }
     }
@@ -379,19 +389,98 @@ function assertShaInNotes(notes, sha256) {
     ok('说明里的 SHA256 与安装包一致');
 }
 
+const WINCRED_HINT =
+    'Windows 上可把令牌一次性存进凭据管理器（交互式，不回显、不进 shell 历史）：\n' +
+    '    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/wincred.ps1 -Action store\n' +
+    '  存好后重跑本脚本即可；查看与删除改用 -Action get / -Action delete。';
+
+/**
+ * 从 Windows 凭据管理器取令牌：只读已知目标名，不落任何令牌文件。
+ * 非 Windows、ps1 不在、或条目不存在都返回 null，由 resolveAuth 统一给提示。
+ * 子进程 stdout 只用于取值（失败时是空的），stderr 直接丢弃——任何情况下都不把输出写进日志。
+ */
+function tokenFromWindowsCredential() {
+    if (process.platform !== 'win32') {
+        return null;
+    }
+    const script = path.join(ROOT, WINCRED_SCRIPT);
+    if (!existsSync(script)) {
+        return null;
+    }
+    try {
+        const token = execFileSync(
+            'powershell',
+            [
+                '-NoProfile',
+                '-NonInteractive',
+                '-ExecutionPolicy',
+                'Bypass',
+                '-File',
+                script,
+                '-Action',
+                'get',
+                '-Target',
+                WINCRED_TARGET,
+            ],
+            {encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true},
+        ).trim();
+        return token || null;
+    } catch {
+        return null;
+    }
+}
+
 function resolveAuth() {
     step('GitHub 凭据');
-    const token = (process.env.GITHUB_TOKEN || process.env.GH_TOKEN || '').trim();
-    if (!token) {
-        fail(
-            '没有可用的 GitHub 凭据：设置环境变量 GITHUB_TOKEN（或 GH_TOKEN），' +
-                '需要「对 ' +
-                DEFAULT_REPO +
-                ' 有 Contents: write」的令牌。令牌只从环境变量读，别写进仓库里的文件。',
-        );
+    const fromEnv = (process.env.GITHUB_TOKEN || process.env.GH_TOKEN || '').trim();
+    if (fromEnv) {
+        ok('使用环境变量 GITHUB_TOKEN / GH_TOKEN');
+        return {token: fromEnv};
     }
-    ok('使用 GITHUB_TOKEN / GH_TOKEN');
-    return {token};
+    const fromCredential = tokenFromWindowsCredential();
+    if (fromCredential) {
+        ok(`使用 Windows 凭据管理器里的 ${WINCRED_TARGET}`);
+        return {token: fromCredential};
+    }
+    fail(
+        '没有可用的 GitHub 凭据：环境变量 GITHUB_TOKEN / GH_TOKEN 都为空，' +
+            `Windows 凭据管理器里也没有目标名为 ${WINCRED_TARGET} 的条目。\n  ` +
+            WINCRED_HINT +
+            '\n  令牌需要「对 ' +
+            DEFAULT_REPO +
+            ' 有 Contents: write」的权限；只存在凭据管理器里，不要写进仓库里的文件。',
+    );
+}
+
+/** 只验凭据：确认仓库可见、令牌有 push 权限、令牌属于哪个账号。全程只读，不创建任何东西。 */
+async function checkAuth(options) {
+    const auth = resolveAuth();
+    const getJson = async pathname => {
+        const response = await fetch(`${API}${pathname}`, {
+            headers: {
+                Authorization: `Bearer ${auth.token}`,
+                Accept: 'application/vnd.github+json',
+                'X-GitHub-Api-Version': '2022-11-28',
+                'User-Agent': 'pulsar-manager-release-script',
+            },
+        });
+        const body = await response.text();
+        if (!response.ok) {
+            fail(`GitHub API GET ${pathname} 失败：HTTP ${response.status} ${body.slice(0, 300)}`);
+        }
+        return JSON.parse(body);
+    };
+
+    step('校验凭据');
+    const repo = await getJson(`/repos/${options.repo}`);
+    ok(`仓库 ${repo.full_name}（${repo.private ? 'private' : 'public'}）可读`);
+    if (!repo.permissions || !repo.permissions.push) {
+        fail(`令牌对 ${options.repo} 没有 push 权限，创建发行版会被拒。`);
+    }
+    ok('令牌有 push 权限，可创建发行版');
+    const user = await getJson('/user');
+    ok(`令牌身份：${user.login}`);
+    console.log('\n✔ 凭据可用；去掉 --check-auth 即可正式发版。');
 }
 
 async function api(pathname, {method = 'GET', auth = null, json, raw, base = API, headers = {}} = {}) {
@@ -550,8 +639,13 @@ async function confirmPublish() {
 
 async function main() {
     const options = parseArgs(process.argv.slice(2));
-    if (process.platform !== 'win32' && !options.verifyOnly) {
+    if (process.platform !== 'win32' && !options.verifyOnly && !options.checkAuth) {
         fail('一键发版目前只出 Windows NSIS 包。');
+    }
+
+    if (options.checkAuth) {
+        await checkAuth(options);
+        return;
     }
 
     if (options.verifyOnly) {

@@ -329,7 +329,13 @@ npm run release -- --verify-only --tag v1.6.2  # 只回读校验已发布的发�
 
 发布后用匿名请求回读，跑一遍客户端会做的事：最新发行版必须是这一版、附件名与大小要对、下载回来的 SHA256 与说明一致且与本地安装包逐字节一致。
 
-发版凭据只从环境变量 `GITHUB_TOKEN`（或 GitHub CLI 惯用的 `GH_TOKEN`）读，不会回显；令牌只需要对仓库有 `Contents: write`。令牌不落文件，仓库里也没有任何令牌文件。其余约束：
+发版凭据按「环境变量 `GITHUB_TOKEN`（或 GitHub CLI 惯用的 `GH_TOKEN`）→ Windows 凭据管理器」的顺序取，不会回显；令牌只需要对仓库有 `Contents: write`。令牌不落文件，仓库里也没有任何令牌文件。Windows 上推荐一次性把令牌存进凭据管理器（交互式，不回显、不进 shell 历史）：
+
+```bash
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/wincred.ps1 -Action store
+```
+
+存好后 `npm run release` 会自己取用，不必再设环境变量；想先单独确认令牌可用就跑 `npm run release -- --check-auth`（只读校验，不创建发行版），查看与删除改用 `-Action get` / `-Action delete`（对应 `scripts/wincred.ps1`，目标名 `pulsar-manager:github-token`）。其余约束：
 
 - **发行版仓库必须是公开的**：匿名就能读，应用内没有任何令牌入口，用户不用配凭证；源码仓与发行版在同一个公开仓库（`pulsar-manager`），避免同一版本两份包对不上号。
 - 仓库只保留最近几个版本的大体积安装包；删发行版与附件不影响标签。
