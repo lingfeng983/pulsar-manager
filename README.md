@@ -368,7 +368,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/wincred.ps1 -Action 
 以下是**当前确实没做**的部分，界面不会假装它们可用：
 
 - **SSH 隧道 / K8s 转发的边界**：隧道管理器本身在 Rust 侧已实现（拉起系统的 `ssh -L` 与 `kubectl port-forward`，见 `pm-services/src/tunnel.rs` 与「接入通道」页面），但**集群配置里勾选「走 SSH 隧道 / K8s 端口转发」这条自动改写地址的路径还没接上**：`pm-services/src/cluster.rs` 的 `reject_unported_reachability` 会对这类集群直接返回「暂未实现」的可执行提示，而不是悄悄直连卡到超时。当前用法：在本机（或应用的隧道面板）手动建好转发，再在集群配置里直接填本地可达地址。另两点限制：SSH 只支持密钥认证——`ssh` 从终端读密码，桌面进程里无法自动完成，密码登录会明确报错请改用密钥或 agent；原生收发路径不做隧道可达性检查，地址不可达时表现为连接超时。
-- **在线更新走公开仓库的 Releases**：设置→检查更新 读取 `lingfeng983/pulsar-manager`（公开）的最新发行版，比对版本号后下载 exe 附件并校验 SHA256，再静默安装重启。公开仓库匿名就能读，应用内没有任何令牌入口，用户不用配任何东西。仓库地址写死在应用侧 `rust/crates/pm-services/src/update.rs` 的 `OWNER` / `REPO` 常量里（GitHub 匿名 API 有每小时 60 次的请求上限，单机日常检查更新的量级远用不到）——换仓库时应用侧常量与发版脚本 `scripts/release-publish.mjs` 的 `DEFAULT_REPO` 两处必须一起改，否则发出去的包读不到新版本。
+- **在线更新走公开仓库的 Releases**：设置→检查更新 读取 `lingfeng983/pulsar-manager`（公开）的最新发行版，比对版本号后下载 exe 附件并校验 SHA256，再静默安装、装完自动重启。公开仓库匿名就能读，应用内没有任何令牌入口。仓库地址写死在应用侧 `rust/crates/pm-services/src/update.rs` 的 `OWNER` / `REPO` 常量里——换仓库时应用侧常量与发版脚本 `scripts/release-publish.mjs` 的 `DEFAULT_REPO` 两处必须一起改，否则发出去的包读不到新版本。机制上的几个要点：
+  - **只认稳定版**：草稿、`prerelease` 与 tag 带 `-rc1`/`-beta` 后缀的发行版一律跳过。把 RC 当正式版推下去等于给所有人降级。
+  - **条件请求省额度**：检查带 `If-None-Match`（ETag 缓存在 `<userData>/updates/release-cache.json`），GitHub 对 304 不计入限流；匿名额度是每小时 60 次，撞上时提示"约 N 分钟后再试"而不是含糊的"更新源不可读"。
+  - **检查与下载用不同超时**：检查 25 秒总超时；下载不设总超时、只设连接与读超时（reqwest 的 timeout 覆盖整个响应体，7 MB 的包在慢网下必然被打断），断流保留 `.part` 并用 `Range` 续传，最多重试 3 次。
+  - **装完自动重启**：NSIS 的 `/SILENT` 不执行"安装完运行应用"，所以拉起安装器时同时挂一个 `powershell -WindowStyle Hidden` 观察者：等安装器退出再启动应用。本进程随即退出让出 exe 与 dll。
+  - **代理**：设置→刷新节奏→更新代理，只接受 `http://`/`https://`；留空表示直连（并沿用 `HTTPS_PROXY` 环境变量）。写入口就校验协议，不会等到点"检查更新"才报错。
 - **快速压测的延迟口径**：统计的是 `send()` 调用到 broker 确认的时间，包含客户端在途队列的排队；单生产者并发调大时 P50 会显著上升，这不是 broker 变慢
 - **发送历史只存前缀**：每次发送（单发、直接发送、连续发送的每一轮）都往 `send_history` 落一行，生产者工作台的「发送历史」按 集群 + topic 读最近 200 条；正文只留前 400 字符与平均单条字节数，整篇载荷当时就在原生层释放，所以历史不能拿来重发
 - **跨集群巡检汇总是快照对比**：汇总页读的是各集群最近一份历史报告，屏幕上的数字可能已是几小时前的；页面按新鲜度分级提示，并以报告生成时间为准，导出文档会写明"这不是同一时刻的快照"

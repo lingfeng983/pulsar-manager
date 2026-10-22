@@ -4,6 +4,7 @@ import {
     Button,
     Card,
     Col,
+    Input,
     InputNumber,
     Radio,
     Row,
@@ -107,6 +108,8 @@ const ConfigCenter: React.FC = () => {
     const [truncateDraft, setTruncateDraft] = useState<number | null>(null);
     // 并发上限同理：输入 12 会先经过 1 再落库，草稿挡住中间值。
     const [concurrencyDraft, setConcurrencyDraft] = useState<number | null>(null);
+    // 更新代理也是：写入口会校验协议，逐字落库会让用户敲到 "ht" 时就挨一条错误提示。
+    const [proxyDraft, setProxyDraft] = useState<string | null>(null);
 
     const loadMeta = useCallback(() => {
         const requestId = ++metaRequestRef.current;
@@ -160,6 +163,14 @@ const ConfigCenter: React.FC = () => {
         setConcurrencyDraft(null);
         if (typeof value === 'number' && value !== settings.adminConcurrencyLimit) {
             void patch({adminConcurrencyLimit: value});
+        }
+    };
+
+    const commitProxy = (value: string | null) => {
+        setProxyDraft(null);
+        const text = (value ?? '').trim();
+        if (text !== settings.updateProxy) {
+            void patch({updateProxy: text});
         }
     };
 
@@ -477,7 +488,7 @@ const ConfigCenter: React.FC = () => {
                 </Col>
 
                 <Col xs={24} xl={12}>
-                    <Card title="刷新节奏" size="small">
+                    <Card title="刷新、并发与更新" size="small">
                         <Space direction="vertical" size={8} style={{width: '100%'}}>
                             <div>
                                 <Space size={4}>
@@ -550,6 +561,40 @@ const ConfigCenter: React.FC = () => {
                                 <Text className="hint-text">
                                     同时在途的 Admin REST 请求数上限，超出就排队。调大能更快刷完 Topic 统计， 但会占更多
                                     broker 连接；调小则更省资源。改完立即生效，不用重启。
+                                </Text>
+                            </div>
+                            <div>
+                                <Text>更新代理</Text>
+                                <div style={{marginTop: 4}}>
+                                    <Input
+                                        aria-label="更新代理地址"
+                                        placeholder="http://127.0.0.1:7890（留空直连）"
+                                        value={proxyDraft ?? settings.updateProxy}
+                                        onChange={event => setProxyDraft(event.target.value)}
+                                        onBlur={() => commitProxy(proxyDraft)}
+                                        onPressEnter={() => commitProxy(proxyDraft)}
+                                        style={{width: 260}}
+                                        allowClear
+                                    />
+                                </div>
+                                <Text className="hint-text">
+                                    检查更新与下载安装包走这个代理（只支持 http/https）。留空表示直连， 同时沿用系统的
+                                    HTTPS_PROXY 环境变量。
+                                </Text>
+                            </div>
+                            <div>
+                                <Text>启动时检查更新</Text>
+                                <div style={{marginTop: 4}}>
+                                    <Switch
+                                        aria-label="启动时检查更新"
+                                        size="small"
+                                        checked={settings.updateAutoCheck}
+                                        onChange={checked => void patch({updateAutoCheck: checked})}
+                                    />
+                                </div>
+                                <Text className="hint-text">
+                                    开着时启动后静默检查一次、之后每 6
+                                    小时一次；发现新版本只在顶栏的「设置」上点一个点， 不会弹窗打断。
                                 </Text>
                             </div>
                         </Space>

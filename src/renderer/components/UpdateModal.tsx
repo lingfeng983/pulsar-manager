@@ -1,110 +1,163 @@
-import React, {useState, useEffect, useCallback, useRef} from 'react';
+import React, {useState, useEffect, useRef} from 'react';
 import {Modal, Alert, Button, Space, Progress, Typography, Descriptions, message} from 'antd';
-
-type CheckResult = NonNullable<Awaited<ReturnType<typeof window.electronAPI.update.check>>['data']>;
+import {useUpdateStore, isFresh} from '../store/update';
+import {renderMarkdown} from '../utils/markdown';
 
 const formatBytes = (n: number): string =>
-    n > 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${(n / 1024).toFixed(0)} KB`;
+    n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
 
-const UpdateModal: React.FC<{open: boolean; onClose: () => void}> = ({open, onClose}) => {
-    const [checking, setChecking] = useState(false);
-    const [result, setResult] = useState<CheckResult | null>(null);
-    const [error, setError] = useState<string | null>(null);
+/**
+ * 软件更新弹窗。
+ *
+ * 检查结果放在 store 里：顶栏的提示点与这个弹窗看的是同一份数据，打开弹窗不该再花一次
+ * 匿名限流额度。下载进度仍在本地——它是"这一次点击"的过程状态，关掉弹窗就没了意义
+ * （主进程的下载不会因为关窗中断，重新打开时会以返回值兜底成"已下载"）。
+ */
+const UpdateModal: React.FC<{open: boolean; onClose: () => void; force?: boolean}> = ({open, onClose, force}) => {
+    const result = useUpdateStore(state => state.result);
+    const checking = useUpdateStore(state => state.checking);
+    const checkError = useUpdateStore(state => state.error);
+    const checkedAt = useUpdateStore(state => state.checkedAt);
+    const check = useUpdateStore(state => state.check);
+    const remindLater = useUpdateStore(state => state.remindLater);
+    const skipVersion = useUpdateStore(state => state.skipVersion);
+
     const [downloading, setDownloading] = useState(false);
     const [progress, setProgress] = useState<{received: number; total: number} | null>(null);
+    const [retrying, setRetrying] = useState('');
     const [downloaded, setDownloaded] = useState(false);
-    // 检查请求代次：开窗触发的检查与错误条上的"重试"并发时，
-    // 晚到的旧响应不能覆盖新结果。
-    const checkRequestRef = useRef(0);
+    const [downloadError, setDownloadError] = useState<string | null>(null);
+    // 每次"打开"只自动检查一次：结果还新鲜就复用，避免反复开窗反复吃限流额度
+    const requestedRef = useRef(false);
 
-    const runCheck = useCallback(async () => {
-        const requestId = ++checkRequestRef.current;
-        const isStale = () => requestId !== checkRequestRef.current;
-        setChecking(true);
-        setError(null);
-        setResult(null);
-        setDownloaded(false);
-        setProgress(null);
-        try {
-            const response = await window.electronAPI.update.check();
-            if (isStale()) {
-                return;
-            }
-            if (response.success && response.data) {
-                setResult(response.data);
-            } else {
-                setError(response.error || '检查更新失败');
-            }
-        } catch (e) {
-            if (isStale()) {
-                return;
-            }
-            setError(String(e));
-        } finally {
-            if (!isStale()) {
-                setChecking(false);
-            }
+    useEffect(() => {
+        if (!open) {
+            requestedRef.current = false;
+            return;
         }
-    }, []);
+        if (requestedRef.current) {
+            return;
+        }
+        requestedRef.current = true;
+        setDownloadError(null);
+        // force = 用户在菜单里明确点了「检查更新」：这时不能拿十分钟前的缓存糊弄他
+        if (force || !isFresh(result, checkedAt)) {
+            void check();
+        }
+    }, [open, force, result, checkedAt, check]);
 
     useEffect(() => {
-        if (!open) return;
-        void runCheck();
-    }, [open, runCheck]);
-
-    useEffect(() => {
-        // 订阅常开：下载可能比弹窗活得更久，关闭弹窗期间不能丢 done 事件，
-        // 否则重新打开时会永远停在“下载中”。
-        return window.electronAPI.update.onProgress(p => {
-            if (p.error) {
+        // 订阅常开：下载可能比弹窗活得更久，关窗期间不能丢 done 事件，
+        // 否则重新打开时会永远停在"下载中"。
+        return window.electronAPI.update.onProgress(event => {
+            if (event.cancelled) {
                 setDownloading(false);
-                setError(p.error);
-            } else if (p.done) {
-                setDownloading(false);
-                setDownloaded(true);
-            } else {
-                setProgress({received: p.received, total: p.total});
+                setProgress(null);
+                setRetrying('');
+                message.info('已取消下载');
+                return;
             }
+            if (event.error) {
+                setDownloading(false);
+                setProgress(null);
+                setRetrying('');
+                setDownloadError(event.error);
+                return;
+            }
+            if (event.retrying) {
+                // 断线重连：进度会从断点继续，这里只说明"在重试"，不清空进度条
+                setRetrying(`网络中断，正在续传（第 ${event.retrying}/${event.attempts ?? 3} 次重试）`);
+                return;
+            }
+            if (event.done) {
+                setDownloading(false);
+                setProgress(null);
+                setRetrying('');
+                setDownloaded(true);
+                return;
+            }
+            setProgress({received: event.received, total: event.total});
         });
     }, []);
 
     const handleDownload = async () => {
-        if (!result?.downloadUrl) return;
+        if (!result?.downloadUrl) {
+            return;
+        }
         setDownloading(true);
-        setError(null);
+        setDownloadError(null);
+        setRetrying('');
         setProgress({received: 0, total: result.size || 0});
         try {
             const response = await window.electronAPI.update.download(result.downloadUrl);
             if (response.success) {
-                // download() 只在文件落地后返回；done 事件可能在弹窗关闭期间错过，
-                // 这里以返回值兜底，保证重新打开时能看到“立即安装”。
-                setDownloading(false);
+                // 下载只在文件落地后返回；done 事件可能在弹窗关闭期间错过，这里兜底
                 setDownloaded(true);
-            } else {
-                setDownloading(false);
-                setError(response.error || '下载失败');
+            } else if (!(response.error || '').includes('取消')) {
+                setDownloadError(response.error || '下载失败');
             }
-        } catch (e) {
-            setDownloading(false);
-            setError(String(e));
+        } catch (error) {
+            setDownloadError(String(error));
         } finally {
+            setDownloading(false);
             setProgress(null);
+            setRetrying('');
         }
+    };
+
+    const handleCancelDownload = () => {
+        void window.electronAPI.update.cancel();
     };
 
     const handleInstall = async () => {
         const response = await window.electronAPI.update.install();
         if (!response.success) {
             message.error(response.error || '启动安装程序失败');
+            return;
         }
-        // 成功时主进程随即退出，应用整体关闭
+        // 成功时主进程随即退出；安装器装完会把新版本拉起来
+        message.success('安装程序已启动，应用将在安装完成后自动重启');
     };
 
     const percent =
         progress && progress.total > 0 ? Math.min(99, Math.floor((progress.received / progress.total) * 100)) : 0;
+    const error = downloadError || checkError;
+    const hasUpdate = Boolean(result?.hasUpdate);
 
     return (
-        <Modal title="软件更新" open={open} onCancel={onClose} footer={<Button onClick={onClose}>关闭</Button>}>
+        <Modal
+            title="软件更新"
+            open={open}
+            onCancel={onClose}
+            maskClosable={!downloading}
+            footer={
+                <Space>
+                    {hasUpdate && !downloading && !downloaded && (
+                        <>
+                            {/* 两个按钮都顺手关窗：选完就不再需要盯着这一屏 */}
+                            <Button
+                                onClick={() => {
+                                    remindLater();
+                                    onClose();
+                                }}
+                            >
+                                稍后提醒（7 天）
+                            </Button>
+                            <Button
+                                onClick={() => {
+                                    skipVersion();
+                                    onClose();
+                                }}
+                            >
+                                跳过此版本
+                            </Button>
+                        </>
+                    )}
+                    {downloading && <Button onClick={handleCancelDownload}>取消下载</Button>}
+                    <Button onClick={onClose}>关闭</Button>
+                </Space>
+            }
+        >
             <Space direction="vertical" style={{width: '100%'}} size="small">
                 {error && (
                     <Alert
@@ -112,7 +165,18 @@ const UpdateModal: React.FC<{open: boolean; onClose: () => void}> = ({open, onCl
                         showIcon
                         message={error}
                         action={
-                            <Button size="small" onClick={() => void runCheck()}>
+                            <Button
+                                size="small"
+                                onClick={() => {
+                                    // 哪一步失败就重来哪一步：下载失败重新下载，检查失败重新检查
+                                    if (downloadError) {
+                                        setDownloadError(null);
+                                        void handleDownload();
+                                    } else {
+                                        void check();
+                                    }
+                                }}
+                            >
                                 重试
                             </Button>
                         }
@@ -128,35 +192,36 @@ const UpdateModal: React.FC<{open: boolean; onClose: () => void}> = ({open, onCl
                         <Descriptions.Item label="当前版本">{result.currentVersion}</Descriptions.Item>
                         <Descriptions.Item label="最新版本">
                             {result.latestVersion}
-                            {result.hasUpdate && (
+                            {hasUpdate ? (
                                 <Typography.Text style={{marginLeft: 8, color: 'var(--color-warning)'}}>
                                     可更新
                                 </Typography.Text>
-                            )}
-                            {!result.hasUpdate && (
+                            ) : (
                                 <Typography.Text style={{marginLeft: 8, color: 'var(--color-success)'}}>
                                     已是最新
                                 </Typography.Text>
                             )}
                         </Descriptions.Item>
-                        {result.hasUpdate && result.releaseNotes && (
+                        {hasUpdate && result.releaseNotes && (
                             <Descriptions.Item label="更新说明">
-                                <div style={{whiteSpace: 'pre-wrap', maxHeight: 180, overflow: 'auto'}}>
-                                    {result.releaseNotes}
-                                </div>
+                                {/* 说明是仓库里的 Markdown，渲染后必须过 DOMPurify（在 renderMarkdown 里） */}
+                                <div
+                                    className="md-body update-notes"
+                                    dangerouslySetInnerHTML={{__html: renderMarkdown(result.releaseNotes)}}
+                                />
                             </Descriptions.Item>
                         )}
                     </Descriptions>
                 )}
 
-                {result?.hasUpdate && !downloading && !downloaded && result.downloadUrl && (
-                    <Space size={4}>
+                {hasUpdate && !downloading && !downloaded && result?.downloadUrl && (
+                    <Space size={4} wrap>
                         <Typography.Text>
-                            安装包: {result.fileName}
+                            安装包：{result.fileName}
                             {result.size ? `（${formatBytes(result.size)}）` : ''}
                         </Typography.Text>
                         <Button type="primary" onClick={() => void handleDownload()}>
-                            下载并安装
+                            下载安装包
                         </Button>
                     </Space>
                 )}
@@ -164,11 +229,12 @@ const UpdateModal: React.FC<{open: boolean; onClose: () => void}> = ({open, onCl
                 {downloading && (
                     <Space direction="vertical" style={{width: '100%'}} size={4}>
                         <Progress percent={percent} status="active" />
-                        {progress && progress.total <= 0 && (
-                            <Typography.Text type="secondary" style={{fontSize: 'var(--font-size-xs)'}}>
-                                已下载 {formatBytes(progress.received)}（服务端未报告总大小）
-                            </Typography.Text>
-                        )}
+                        <Typography.Text type="secondary" style={{fontSize: 'var(--font-size-xs)'}}>
+                            {retrying ||
+                                (progress && progress.total > 0
+                                    ? `已下载 ${formatBytes(progress.received)} / ${formatBytes(progress.total)}`
+                                    : `已下载 ${formatBytes(progress?.received ?? 0)}（服务端未报告总大小）`)}
+                        </Typography.Text>
                     </Space>
                 )}
 
@@ -176,10 +242,10 @@ const UpdateModal: React.FC<{open: boolean; onClose: () => void}> = ({open, onCl
                     <Alert
                         type="success"
                         showIcon
-                        message="下载完成，安装后将自动重启应用"
+                        message="安装包已下载并通过 SHA256 校验，安装时应用会自动退出，装完自动重启"
                         action={
                             <Button type="primary" size="small" onClick={() => void handleInstall()}>
-                                立即安装并重启
+                                立即安装
                             </Button>
                         }
                     />

@@ -18,6 +18,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
     alertEnabled: false,
     alertCheckSeconds: 60,
     alertRetentionDays: 30,
+    // 更新：空串代理 = 直连；自动检查只标点、不弹窗
+    updateProxy: '',
+    updateAutoCheck: true,
 };
 
 // 字号档位写成 <html data-font-size>，index.css 里三档 --font-size-* 随之切换。

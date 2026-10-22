@@ -1180,3 +1180,94 @@ body.is-doc-resizing {
 .doc-kb-resizer {
     touch-action: none;
 }
+
+/* ===== 更新说明（Markdown） =====
+   发行说明是仓库里的一段正文，经 marked + DOMPurify 后注入。这里只给紧凑排版：
+   它嵌在 Descriptions 的一格里，按正文行高铺开会把弹窗撑得很难看，长说明还会把
+   “下载”按钮顶出可视区，所以外层固定高度 + 滚动。 */
+.update-notes {
+    max-height: 220px;
+    overflow: auto;
+    padding-right: var(--spacing-sm);
+    line-height: 1.6;
+}
+
+.md-body > :first-child {
+    margin-top: 0;
+}
+
+.md-body > :last-child {
+    margin-bottom: 0;
+}
+
+.md-body h1,
+.md-body h2,
+.md-body h3,
+.md-body h4 {
+    margin: var(--spacing-md) 0 var(--spacing-xs);
+    font-size: var(--font-size-md);
+    font-weight: 600;
+    line-height: 1.4;
+}
+
+.md-body p,
+.md-body li {
+    margin: var(--spacing-xs) 0;
+    font-size: var(--font-size-sm);
+}
+
+.md-body ul,
+.md-body ol {
+    padding-left: var(--spacing-xl);
+}
+
+.md-body a {
+    color: var(--color-primary);
+}
+
+.md-body code {
+    padding: 1px 4px;
+    border-radius: var(--radius-sm);
+    background: var(--color-fill-secondary);
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+}
+
+.md-body pre {
+    margin: var(--spacing-sm) 0;
+    padding: var(--spacing-sm) var(--spacing-md);
+    border-radius: var(--radius-sm);
+    background: var(--color-bg-secondary);
+    overflow-x: auto;
+}
+
+.md-body pre code {
+    padding: 0;
+    background: none;
+}
+
+.md-body blockquote {
+    margin: var(--spacing-sm) 0;
+    padding: var(--spacing-xs) var(--spacing-md);
+    border-left: 3px solid var(--color-primary);
+    background: var(--color-bg-secondary);
+    color: var(--color-text-secondary);
+}
+
+.md-body table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--font-size-sm);
+}
+
+.md-body th,
+.md-body td {
+    border: 1px solid var(--color-border);
+    padding: 2px var(--spacing-sm);
+    text-align: left;
+}
+
+.md-body th {
+    background: var(--color-bg-secondary);
+    white-space: nowrap;
+}

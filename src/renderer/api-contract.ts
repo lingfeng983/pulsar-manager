@@ -118,6 +118,39 @@ import type {
     TopologyLimits,
 } from '../shared/types';
 
+/**
+ * 检查更新的结果，字段与 `pm-services::update::UpdateCheck` 一一对应。
+ *
+ * 只有 `hasUpdate` 为真时才带 downloadUrl / fileName / size（后台在"已是最新"分支
+ * 提前返回，不会去解析附件与 SHA256）。
+ */
+export interface UpdateCheckResult {
+    currentVersion: string;
+    latestVersion: string;
+    hasUpdate: boolean;
+    releaseName?: string;
+    releaseNotes?: string;
+    downloadUrl?: string;
+    fileName?: string;
+    size?: number;
+}
+
+/**
+ * 下载进度。
+ *
+ * `retrying` / `attempts` 表示"断了正在重试第 N 次"——界面要能区分"在下载"和"在重连"，
+ * 否则进度条从 40% 掉回 0 时用户只会以为坏了。`cancelled` 是用户主动取消。
+ */
+export interface UpdateProgress {
+    received: number;
+    total: number;
+    done?: boolean;
+    error?: string;
+    cancelled?: boolean;
+    retrying?: number;
+    attempts?: number;
+}
+
 // 通道名在这里写死，并用 shared/types 的字面量类型钉住：那边改名这边就编译失败。
 // Rust 侧的 rpc 分发按同一个字符串匹配，两边不同步不会让 typecheck 报错，只会在运行时
 // 变成「未知方法」，所以把一致性押在类型上而不是押在人工比对上。
@@ -690,12 +723,12 @@ export function createBridge(transport: BridgeTransport) {
             getVersion: () => transport.invoke('update:getVersion'),
             check: () => transport.invoke('update:check'),
             download: (url: string) => transport.invoke('update:download', url),
+
+            // 取消下载：流式读到下一块就停，删掉 .part 后按取消事件通知界面
+            cancel: () => transport.invoke('update:cancel'),
             install: () => transport.invoke('update:install'),
-            onProgress: (
-                callback: (progress: {received: number; total: number; done?: boolean; error?: string}) => void,
-            ) => {
-                const listener = (_event: unknown, progress: unknown) =>
-                    callback(progress as {received: number; total: number; done?: boolean; error?: string});
+            onProgress: (callback: (progress: UpdateProgress) => void) => {
+                const listener = (_event: unknown, progress: unknown) => callback(progress as UpdateProgress);
                 transport.on('update:progress', listener);
                 return () => transport.off('update:progress', listener);
             },
@@ -1134,23 +1167,13 @@ declare global {
             };
             update: {
                 getVersion: () => Promise<APIResponse<string>>;
-                check: () => Promise<
-                    APIResponse<{
-                        currentVersion: string;
-                        latestVersion: string;
-                        hasUpdate: boolean;
-                        releaseName?: string;
-                        releaseNotes?: string;
-                        downloadUrl?: string;
-                        fileName?: string;
-                        size?: number;
-                    }>
-                >;
+                check: () => Promise<APIResponse<UpdateCheckResult>>;
+
                 download: (url: string) => Promise<APIResponse<{file: string}>>;
+
+                cancel: () => Promise<APIResponse<void>>;
                 install: () => Promise<APIResponse<void>>;
-                onProgress: (
-                    callback: (progress: {received: number; total: number; done?: boolean; error?: string}) => void,
-                ) => () => void;
+                onProgress: (callback: (progress: UpdateProgress) => void) => () => void;
             };
         };
     }

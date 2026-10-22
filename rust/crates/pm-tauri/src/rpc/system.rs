@@ -37,6 +37,11 @@ fn default_settings() -> Map<String, Value> {
     // 空串 = 使用默认目录（%APPDATA%\pulsar-manager\logs），不写死绝对路径，
     // 这样导出/导入配置换机器后仍然可用。
     map.insert("logDirectory".into(), json!(""));
+    // 更新走 GitHub 发行版；公司网络里常常只能经代理出去，所以给一个显式代理位。
+    // 空串 = 直连（同时沿用 reqwest 对 HTTP(S)_PROXY 环境变量的默认处理）。
+    map.insert("updateProxy".into(), json!(""));
+    // 启动后静默检查一次更新（发现新版本只在顶栏点一个点，不弹窗打扰）
+    map.insert("updateAutoCheck".into(), json!(true));
     map
 }
 
@@ -82,6 +87,20 @@ fn write_setting(context: &AppContext, key: &str, value: &Value) -> pm_core::App
             .map_err(|_| AppError::config(format!("Admin 并发上限必须是整数，当前为「{text}」")))?;
         let clamped = pm_pulsar::clamp_admin_concurrency(parsed.max(0) as usize);
         return settings::set(&context.store, key, &clamped.to_string());
+    }
+    // 更新代理：写入口就校验，别等到用户点"检查更新"才报一句"代理不可用"。
+    // 只接受 http(s)://（reqwest 的 socks 支持没开，收了也连不上）。
+    if key == "updateProxy" {
+        let trimmed = text.trim();
+        if !trimmed.is_empty()
+            && !trimmed.starts_with("http://")
+            && !trimmed.starts_with("https://")
+        {
+            return Err(AppError::config(format!(
+                "更新代理必须是 http:// 或 https:// 开头的地址，当前为「{trimmed}」"
+            )));
+        }
+        return settings::set(&context.store, key, trimmed);
     }
     settings::set(&context.store, key, &text)
 }
@@ -387,22 +406,19 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
         "update:getVersion" => json!({ "success": true, "data": APP_VERSION }),
 
         // ---------- 检查更新 ----------
+        // 更新地址固定是公开仓库的发行版（pm-services/src/update.rs 的 OWNER/REPO）。
+        // 这里只负责把「用户配的代理」与「缓存目录」递进去，以及把失败分类翻译成人话。
         "update:check" => {
-            let watermark = format!("rust/{APP_VERSION}");
-            match pm_services::update::check(APP_VERSION, &watermark).await {
+            let proxy = settings::get(&context.store, "updateProxy")
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let cache_dir = pm_services::update::updates_dir(&context_dir());
+            match pm_services::update::check(APP_VERSION, &cache_dir, &proxy).await {
                 Ok(result) => crate::bridge::ok(result),
-                Err(error) => {
-                    // 更新源是公开仓：401/403/404 都说明「源本身不可读」，别说成用户少配了什么
-                    let text = error.to_string();
-                    if text.contains("404") || text.contains("403") || text.contains("401") {
-                        json!({
-                            "success": false,
-                            "error": "更新源不可读：公开分发仓库 pulsar-manager-dist 还没有发行版，或它已被改为私有/删除"
-                        })
-                    } else {
-                        crate::bridge::fail(error)
-                    }
-                }
+                // UpdateError 已经把限流/源不可读/网络/数据问题分别写成人话，
+                // 这里不再按 "403"/"404" 做字符串嗅探——那样会把限流误报成"仓库被删了"。
+                Err(error) => crate::bridge::fail(AppError::Other(error.message())),
             }
         }
         "update:download" => {
@@ -411,19 +427,29 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
+            let proxy = settings::get(&context.store, "updateProxy")
+                .ok()
+                .flatten()
+                .unwrap_or_default();
             let dir = pm_services::update::updates_dir(&context_dir());
             let emit: pm_services::messaging::Emit =
                 std::sync::Arc::new(|event: &str, payload: Value| {
                     crate::bridge::emit(event, payload)
                 });
-            match pm_services::update::download(&url, &dir, emit).await {
+            match pm_services::update::download(&url, &dir, &proxy, emit).await {
                 Ok(file) => json!({ "success": true, "data": { "file": file } }),
                 Err(error) => crate::bridge::fail(error),
             }
         }
+        // 取消下载：下载是流式的，置一次标记，下一块数据就会停下并删掉 .part。
+        "update:cancel" => {
+            pm_services::update::cancel_download();
+            json!({ "success": true, "data": null })
+        }
         "update:install" => match pm_services::update::launch_installer() {
             Ok(_) => {
-                // 安装器已经拉起，本进程必须让位：它占着 exe 与 dll，边写边装只会装出半个版本
+                // 安装器已经拉起（并带了一个"装完再拉起应用"的观察者），本进程必须让位：
+                // 它占着 exe 与 dll，边写边装只会装出半个版本
                 crate::bridge::quit(0);
                 json!({ "success": true, "data": null })
             }

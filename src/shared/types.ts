@@ -918,6 +918,11 @@ export interface AppSettings {
     alertCheckSeconds: number;
     // 已恢复事件的保留天数；未恢复的事件不受保留期约束，一直留到人确认或恢复。
     alertRetentionDays: number;
+    // 检查更新走的代理（http:// 或 https:// 开头）。空串表示直连，同时沿用
+    // reqwest 对 HTTP(S)_PROXY 环境变量的默认处理。写入口会校验协议。
+    updateProxy: string;
+    // 启动后是否静默检查一次更新：发现新版本只在顶栏标一个点，不弹窗。
+    updateAutoCheck: boolean;
 }
 
 // ========== 监控时序快照 ==========

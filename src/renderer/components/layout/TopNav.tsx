@@ -1,5 +1,5 @@
 import React, {useState, useCallback, useEffect, useRef} from 'react';
-import {Button, Dropdown, Space, message, Modal, AutoComplete, Tag, Tooltip} from 'antd';
+import {Button, Dropdown, Space, message, Modal, AutoComplete, Tag, Tooltip, Badge} from 'antd';
 import {
     SearchOutlined,
     ThunderboltOutlined,
@@ -22,8 +22,10 @@ import {
     NotificationOutlined,
     DesktopOutlined,
     MoreOutlined,
+    CloudDownloadOutlined,
 } from '@ant-design/icons';
 import {useThemeStore} from '../../store/theme';
+import {useUpdateStore} from '../../store/update';
 import UpdateModal from '../UpdateModal';
 import BenchmarkModal from '../BenchmarkModal';
 import IconButton from '../common/IconButton';
@@ -381,8 +383,13 @@ const TopNav: React.FC = () => {
         }
     };
 
-    // 检查更新：真实流程收敛到 UpdateModal（检查/下载/安装）
+    // 检查更新：真实流程收敛到 UpdateModal（检查/下载/安装）。
+    // 这里只持有"弹窗开没开"；检查结果在 store 里，顶栏提示点与弹窗共用同一份。
     const [updateModalOpen, setUpdateModalOpen] = useState(false);
+    // 「检查更新」是明确动作，必须真的去查；从"发现新版本"进来则允许复用十分钟内的结果
+    const [updateForce, setUpdateForce] = useState(false);
+    const updateAvailable = useUpdateStore(state => state.available);
+    const latestVersion = useUpdateStore(state => state.result?.latestVersion ?? '');
 
     // 设置菜单点击处理
     const handleSettingClick = ({key}: {key: string}) => {
@@ -399,7 +406,12 @@ const TopNav: React.FC = () => {
             case 'about':
                 setAboutModalOpen(true);
                 break;
+            case 'update':
+                setUpdateForce(false);
+                setUpdateModalOpen(true);
+                break;
             case 'checkUpdate':
+                setUpdateForce(true);
                 setUpdateModalOpen(true);
                 break;
         }
@@ -438,8 +450,19 @@ const TopNav: React.FC = () => {
     };
 
     // 设置菜单
+    // 设置菜单：发现新版本时把入口顶到第一条——用户不必先知道有"检查更新"这件事
     const settingMenu = {
         items: [
+            ...(updateAvailable
+                ? [
+                      {
+                          key: 'update',
+                          label: <span>发现新版本 v{latestVersion}</span>,
+                          icon: <CloudDownloadOutlined />,
+                      },
+                      {type: 'divider' as const},
+                  ]
+                : []),
             {
                 key: 'config',
                 label: <span>配置中心</span>,
@@ -650,9 +673,17 @@ const TopNav: React.FC = () => {
                         </Tooltip>
                     </Dropdown>
 
-                    {/* 设置菜单 */}
+                    {/* 设置菜单：有新版本时按钮上点一个点——不弹窗打扰，但让人看得见 */}
                     <Dropdown menu={settingMenu} trigger={['click']} placement="bottomRight">
-                        <Button icon={<SettingOutlined />} size="small">
+                        <Button
+                            size="small"
+                            icon={
+                                <Badge dot={updateAvailable} offset={[2, -2]}>
+                                    <SettingOutlined />
+                                </Badge>
+                            }
+                            aria-label={updateAvailable ? `设置，有新版本 v${latestVersion}` : '设置'}
+                        >
                             设置
                         </Button>
                     </Dropdown>
@@ -692,7 +723,7 @@ const TopNav: React.FC = () => {
             </Modal>
 
             {/* 软件更新弹窗 */}
-            <UpdateModal open={updateModalOpen} onClose={() => setUpdateModalOpen(false)} />
+            <UpdateModal open={updateModalOpen} force={updateForce} onClose={() => setUpdateModalOpen(false)} />
             <BenchmarkModal open={benchmarkOpen} onClose={() => setBenchmarkOpen(false)} />
         </div>
     );
