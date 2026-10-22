@@ -70,7 +70,7 @@ function ResourceDetailPage<T extends object>({
         <>
             <Row gutter={[12, 12]}>
                 {stats.map(stat => (
-                    <Col key={stat.key} span={8}>
+                    <Col key={stat.key} xs={24} sm={12} xl={8}>
                         <Card>
                             <Statistic title={stat.title} value={stat.value} prefix={stat.prefix} />
                         </Card>
@@ -118,7 +118,13 @@ function ResourceDetailPage<T extends object>({
 
     return (
         <PageShell title={title} subtitle={subtitle} actions={actions}>
-            <StateBlock loading={loading} error={error} errorTitle={errorTitle} onRetry={onRetry}>
+            <StateBlock
+                loadingVariant="skeleton"
+                loading={loading}
+                error={error}
+                errorTitle={errorTitle}
+                onRetry={onRetry}
+            >
                 <Tabs
                     items={[
                         {key: 'overview', label: overviewLabel, children: overview},

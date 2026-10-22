@@ -747,7 +747,7 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
             >
                 {/* 集群统计卡片 */}
                 <Row gutter={[12, 12]}>
-                    <Col span={6}>
+                    <Col xs={12} xl={6}>
                         <Card>
                             <Statistic
                                 title={selectedTopic ? '分区数' : '总 Topics'}
@@ -762,7 +762,7 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                             </div>
                         </Card>
                     </Col>
-                    <Col span={6}>
+                    <Col xs={12} xl={6}>
                         <Card>
                             <Statistic
                                 title="消息输入速率"
@@ -782,7 +782,7 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                             />
                         </Card>
                     </Col>
-                    <Col span={6}>
+                    <Col xs={12} xl={6}>
                         <Card>
                             <Statistic
                                 title="消息输出速率"
@@ -802,7 +802,7 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                             />
                         </Card>
                     </Col>
-                    <Col span={6}>
+                    <Col xs={12} xl={6}>
                         <Card>
                             <Statistic
                                 title="积压消息"
@@ -839,7 +839,7 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
 
                 {/* 消息速率趋势 */}
                 <Row gutter={[12, 12]}>
-                    <Col span={12}>
+                    <Col xs={24} xl={12}>
                         <ChartCard
                             title={`消息输入速率趋势${scopeSuffix}`}
                             option={msgRateInChartOption}
@@ -847,7 +847,7 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                             emptyText="暂无监控数据，请等待数据采集"
                         />
                     </Col>
-                    <Col span={12}>
+                    <Col xs={24} xl={12}>
                         <ChartCard
                             title={`消息输出速率趋势${scopeSuffix}`}
                             option={msgRateOutChartOption}
@@ -859,7 +859,7 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
 
                 {/* 吞吐量和资源分布 */}
                 <Row gutter={[12, 12]}>
-                    <Col span={12}>
+                    <Col xs={24} xl={12}>
                         <ChartCard
                             title={`吞吐量对比${scopeSuffix}`}
                             option={throughputChartOption}
@@ -867,7 +867,7 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                             emptyText="暂无监控数据，请等待数据采集"
                         />
                     </Col>
-                    <Col span={12}>
+                    <Col xs={24} xl={12}>
                         <ChartCard
                             title="资源分布"
                             option={resourceChartOption}

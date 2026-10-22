@@ -36,6 +36,7 @@ import {downloadBlob} from '../utils/download';
 import {useCommand, PaneActiveContext} from '../hooks/useKeybindings';
 import {useSettingsStore} from '../store/settings';
 import StateBlock from '../components/common/StateBlock';
+import PageShell from '../components/common/PageShell';
 import ErrorBanner from '../components/common/ErrorBanner';
 import MessageDetailModal from '../components/message/MessageDetailModal';
 import CodePane, {type CodePaneHandle} from '../components/editor/CodePane';
@@ -1178,7 +1179,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
     const isRunning = !!sessionId;
 
     return (
-        <div className="stack">
+        <PageShell>
             {/* 一个整体：模式切换、该模式的参数区、结果区全在同一张卡里。
                 原先是「工具栏卡 + 结果卡」两张，切换发送/消费/读取时两张卡各自长高、
                 各自换内容，界面上就是所有东西分头跳一次。 */}
@@ -1296,7 +1297,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
             </Card>
 
             <MessageDetailModal message={showFullMessage} onClose={() => setShowFullMessage(null)} />
-        </div>
+        </PageShell>
     );
 };
 

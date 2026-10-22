@@ -1091,11 +1091,29 @@ const ResourceTree: React.FC = () => {
                 flexShrink: 0,
             }}
         >
-            {/* 右边缘拖动把手：按住左右移动调整宽度 */}
+            {/* 右边缘拖动把手：按住左右移动调整宽度。也可聚焦后按方向键调——
+                只做拖动的话，不用鼠标的人调不了这一栏。 */}
             {!collapsed && (
                 <div
+                    className="tree-resizer"
+                    role="separator"
+                    aria-orientation="vertical"
+                    aria-label="调整资源树宽度"
+                    aria-valuenow={sidebarWidth}
+                    aria-valuemin={SIDEBAR_MIN_WIDTH}
+                    aria-valuemax={SIDEBAR_MAX_WIDTH}
+                    tabIndex={0}
                     onMouseDown={handleResizeStart}
-                    title="拖动调整宽度"
+                    onKeyDown={event => {
+                        if (event.key === 'ArrowLeft') {
+                            event.preventDefault();
+                            setSidebarWidth(current => clampSidebarWidth(current - 24));
+                        } else if (event.key === 'ArrowRight') {
+                            event.preventDefault();
+                            setSidebarWidth(current => clampSidebarWidth(current + 24));
+                        }
+                    }}
+                    title="拖动或按左右方向键调整宽度"
                     style={{
                         position: 'absolute',
                         top: 0,

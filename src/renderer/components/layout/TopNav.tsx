@@ -1,5 +1,5 @@
 import React, {useState, useCallback, useEffect, useRef} from 'react';
-import {Button, Dropdown, Space, message, Modal, AutoComplete, Tag, Tooltip, Badge} from 'antd';
+import {Button, Dropdown, Space, message, Modal, AutoComplete, Tag, Tooltip} from 'antd';
 import {
     SearchOutlined,
     ThunderboltOutlined,
@@ -20,6 +20,8 @@ import {
     MenuFoldOutlined,
     MenuUnfoldOutlined,
     NotificationOutlined,
+    DesktopOutlined,
+    MoreOutlined,
 } from '@ant-design/icons';
 import {useThemeStore} from '../../store/theme';
 import UpdateModal from '../UpdateModal';
@@ -87,6 +89,7 @@ const TopNav: React.FC = () => {
     const platform = useShortcutStore(state => state.platform);
     const shortcutConfig = useShortcutStore(state => state.config);
     const shortcutBinding = resolveBinding(shortcutConfig, platform, 'openShortcutConfig');
+    const themeShortcut = formatBinding(resolveBinding(shortcutConfig, platform, 'toggleTheme'), platform);
 
     // 聚焦搜索由可绑定的 focusSearch 命令提供，绑定取自用户配置。
     useCommand('focusSearch', () => {
@@ -309,8 +312,8 @@ const TopNav: React.FC = () => {
             case 'namespace':
                 return <FolderOutlined style={{color: 'var(--color-warning)', marginRight: 8}} />;
             case 'topic':
-                // Intentionally using Ant Design purple (#722ed1) - no CSS variable needed
-                return <FileTextOutlined style={{color: '#722ed1', marginRight: 8}} />;
+                // 类型强调色走 --color-accent：原来写死的 #722ed1 在暗色主题里只有 2.58:1
+                return <FileTextOutlined style={{color: 'var(--color-accent)', marginRight: 8}} />;
         }
     };
 
@@ -402,7 +405,8 @@ const TopNav: React.FC = () => {
         }
     };
 
-    // 主题切换菜单
+    // 主题切换菜单：末尾的「跟随系统」是偏好而不是主题，选中后按系统深浅色解析，
+    // 系统换模式时界面跟着换（见 store/theme.ts 的 matchMedia 监听）。
     const themeMenu = {
         items: [
             {
@@ -423,6 +427,13 @@ const TopNav: React.FC = () => {
                 icon: <EyeOutlined />,
                 onClick: () => setTheme('eyeCare'),
             },
+            {type: 'divider' as const},
+            {
+                key: 'system',
+                label: '跟随系统',
+                icon: <DesktopOutlined />,
+                onClick: () => setTheme('system'),
+            },
         ],
     };
 
@@ -437,10 +448,7 @@ const TopNav: React.FC = () => {
                 key: 'shortcuts',
                 label: (
                     <span>
-                        快捷键设置{' '}
-                        <Tag style={{fontSize: 'calc(var(--font-size-xs) - 2px)'}}>
-                            {formatBinding(shortcutBinding, platform)}
-                        </Tag>
+                        快捷键设置 <Tag className="tag-xs">{formatBinding(shortcutBinding, platform)}</Tag>
                     </span>
                 ),
             },
@@ -454,6 +462,57 @@ const TopNav: React.FC = () => {
         ],
         onClick: handleSettingClick,
     };
+
+    // 「更多」：收进来的是"整页打开某个全局页"的导航类入口。它们日常频率低于监控/拓扑/告警，
+    // 常驻顶栏只会稀释主入口的权重——顶栏也是最经不起加第 10 个按钮的地方。
+    const moreMenu = {
+        items: [
+            {
+                key: 'worker',
+                label: '函数与连接器',
+                icon: <FunctionOutlined />,
+                onClick: handleOpenWorker,
+            },
+            {
+                key: 'inspection',
+                label: '集群巡检',
+                icon: <SafetyCertificateOutlined />,
+                onClick: handleOpenInspection,
+            },
+            {
+                key: 'fleet',
+                label: '跨集群巡检汇总',
+                icon: <ClusterOutlined />,
+                onClick: handleOpenFleet,
+            },
+            {type: 'divider' as const},
+            {
+                key: 'docs',
+                label: '内置文档中心',
+                icon: <FileTextOutlined />,
+                onClick: handleOpenDocs,
+            },
+            {
+                key: 'notify',
+                label: '外部通知渠道',
+                icon: <NotificationOutlined />,
+                onClick: handleOpenNotify,
+            },
+        ],
+    };
+
+    // 状态区：顶栏原本只有"能去哪儿"，没有"现在怎么样"。这一格只说一件事——
+    // 有几个集群是连着的。点它进跨集群巡检汇总，异常集群在那里有逐项结论。
+    const connectedCount = clusters.filter(cluster => cluster.status === 'connected').length;
+    const statusText = clusters.length === 0 ? '未添加集群' : `${connectedCount}/${clusters.length} 在线`;
+    const statusColor =
+        clusters.length === 0
+            ? 'var(--color-text-secondary)'
+            : connectedCount === clusters.length
+              ? 'var(--color-success)'
+              : connectedCount === 0
+                ? 'var(--color-danger)'
+                : 'var(--color-warning)';
 
     return (
         <div
@@ -469,9 +528,11 @@ const TopNav: React.FC = () => {
                 zIndex: 1000,
             }}
         >
-            {/* 左侧操作区：原来压在侧边栏顶部的 监控/拓扑/折叠 三个按钮。
-                与右侧工具区同为 flex:1 1 0，两半等宽才能把搜索框顶在正中；
-                折叠态这里只剩一个展开按钮，不再跟着 40px 窄栏走宽度。 */}
+            {/* 左侧操作区：只留最常用的三个入口 + 「更多」。
+                原来是 9 个同级按钮平铺，一是没有主次——每次找功能都要重扫一遍；
+                二是把它们按小按钮宽度累加约 536px，加上搜索与右侧工具区，最小窗口
+                1000px 根本放不下（会顶出按钮边界互相压字）。收进下拉后这一区约 270px。
+                折叠态只留展开按钮，不再跟着 40px 窄栏走宽度。 */}
             <div
                 style={{
                     flex: '1 1 0',
@@ -491,53 +552,19 @@ const TopNav: React.FC = () => {
                         <Button size="small" icon={<ApartmentOutlined />} title="集群拓扑" onClick={handleOpenTopology}>
                             拓扑
                         </Button>
-                        <Button
-                            size="small"
-                            icon={<FunctionOutlined />}
-                            title="函数与连接器"
-                            onClick={handleOpenWorker}
-                        >
-                            函数
-                        </Button>
-                        <Button
-                            size="small"
-                            icon={<SafetyCertificateOutlined />}
-                            title="集群巡检"
-                            onClick={handleOpenInspection}
-                        >
-                            巡检
-                        </Button>
-                        <Button
-                            size="small"
-                            icon={<ClusterOutlined />}
-                            title="跨集群巡检汇总"
-                            onClick={handleOpenFleet}
-                        >
-                            汇总
-                        </Button>
-                        <Button size="small" icon={<FileTextOutlined />} title="内置文档中心" onClick={handleOpenDocs}>
-                            文档
-                        </Button>
-                        <Button
-                            size="small"
-                            icon={<NotificationOutlined />}
-                            title="外部通知渠道（告警与巡检结论发到哪里）"
-                            onClick={handleOpenNotify}
-                        >
-                            通知
-                        </Button>
-                        <Button
-                            size="small"
-                            icon={
-                                <Badge count={openAlertCount} size="small" offset={[2, -2]}>
-                                    <AlertOutlined />
-                                </Badge>
-                            }
-                            title="告警中心"
-                            onClick={handleOpenAlerts}
-                        >
+                        <Button size="small" icon={<AlertOutlined />} title="告警中心" onClick={handleOpenAlerts}>
                             告警
+                            {openAlertCount > 0 ? (
+                                <Tag color="error" className="tag-xs">
+                                    {openAlertCount > 99 ? '99+' : openAlertCount}
+                                </Tag>
+                            ) : null}
                         </Button>
+                        <Dropdown menu={moreMenu} trigger={['click']} placement="bottomLeft">
+                            <Button size="small" icon={<MoreOutlined />} title="更多功能">
+                                更多
+                            </Button>
+                        </Dropdown>
                         <IconButton
                             size="small"
                             icon={<MenuFoldOutlined />}
@@ -558,9 +585,9 @@ const TopNav: React.FC = () => {
                 onSelect={handleSearchSelect}
                 notFoundContent={searchLoading ? '搜索中...' : '未找到匹配结果'}
                 style={{
-                    // 26% 的上限是按最小窗口 1000px 算的：两侧工具区各自约 330px，
-                    // 搜索框再宽就要把右边的按钮挤出去。
-                    width: 'clamp(200px, 26%, 520px)',
+                    // 22% 的上限是按最小窗口 1000px 反推的：两侧工具区合计约 620px，
+                    // 搜索框再宽就要把右边的按钮挤出可视区（1000px 下这里取到 220px）。
+                    width: 'clamp(200px, 22%, 520px)',
                     borderRadius: 'var(--radius-md)',
                 }}
                 options={searchResults.map(result => ({
@@ -577,6 +604,19 @@ const TopNav: React.FC = () => {
             {/* 右侧工具区：与左侧同宽（flex 1 1 0），内容靠右排 */}
             <div style={{flex: '1 1 0', minWidth: 0, display: 'flex', justifyContent: 'flex-end'}}>
                 <Space size={4}>
+                    {/* 状态区：连接概况。只说一件事，点进去看明细 */}
+                    <Tooltip title="点击查看跨集群巡检汇总">
+                        <Button
+                            type="text"
+                            size="small"
+                            className="topbar-status"
+                            onClick={handleOpenFleet}
+                            aria-label={`集群连接状态：${statusText}`}
+                        >
+                            <span className="legend-dot" style={{background: statusColor}} aria-hidden /> {statusText}
+                        </Button>
+                    </Tooltip>
+
                     {/* 快速压测 */}
                     <Tooltip title="向指定 Topic 并发写入，实时看吞吐与发送确认延迟">
                         <Button icon={<ThunderboltOutlined />} size="small" onClick={() => setBenchmarkOpen(true)}>
@@ -589,11 +629,25 @@ const TopNav: React.FC = () => {
                         导出日志
                     </Button>
 
-                    {/* 主题切换 */}
+                    {/* 主题切换：提示里带上当前绑定的快捷键，功能在、但没人知道能被唤出来 */}
                     <Dropdown menu={themeMenu} trigger={['click']} placement="bottomRight">
-                        <Button size="small" icon={theme === 'dark' ? <MoonOutlined /> : <SunOutlined />}>
-                            主题
-                        </Button>
+                        <Tooltip title={`切换主题（${themeShortcut}）`}>
+                            <Button
+                                size="small"
+                                icon={
+                                    theme === 'dark' ? (
+                                        <MoonOutlined />
+                                    ) : theme === 'eyeCare' ? (
+                                        <EyeOutlined />
+                                    ) : (
+                                        <SunOutlined />
+                                    )
+                                }
+                                aria-label="切换主题"
+                            >
+                                主题
+                            </Button>
+                        </Tooltip>
                     </Dropdown>
 
                     {/* 设置菜单 */}
@@ -617,7 +671,15 @@ const TopNav: React.FC = () => {
                 ]}
             >
                 <div style={{textAlign: 'center'}}>
-                    <div style={{fontSize: 32, marginBottom: 'var(--spacing-sm)'}}>⚡</div>
+                    {/* 图标只用矢量：emoji 的字形跟着系统字体走，三端不一，还没法与主题色联动 */}
+                    <ThunderboltOutlined
+                        style={{
+                            fontSize: 'var(--icon-lg)',
+                            color: 'var(--color-primary)',
+                            marginBottom: 'var(--spacing-sm)',
+                        }}
+                        aria-hidden
+                    />
                     <h3 style={{marginBottom: 'var(--spacing-sm)'}}>Pulsar Manager</h3>
                     <p className="hint-text">版本 {appVersion || '读取中'}</p>
                     <div style={{marginTop: 'var(--spacing-xl)', textAlign: 'left'}}>

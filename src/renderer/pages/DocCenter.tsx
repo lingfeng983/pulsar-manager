@@ -19,6 +19,8 @@ function indent(depth: number): number {
 const SIDE_MIN_WIDTH = 180;
 const SIDE_MAX_WIDTH = 460;
 const SIDE_DEFAULT_WIDTH = 280;
+// 键盘调宽度的步进：一次 24px，按十次才走完半个区间，够细也够快
+const SIDE_KEY_STEP = 24;
 
 /**
  * 内置文档中心：把 docs/pulsar/01–08 变成能查的东西。
@@ -66,6 +68,12 @@ const DocCenter: React.FC = () => {
     );
 
     const doc = useMemo(() => KB_DOCS.find(item => item.key === activeKey) || null, [activeKey]);
+
+    // 键盘等价物：可聚焦的 separator 按方向键调宽度。只做拖动的话，
+    // 不用鼠标的人永远打不开/收不窄这一栏。
+    const nudgeSideWidth = useCallback((delta: number) => {
+        setSideWidth(current => Math.min(SIDE_MAX_WIDTH, Math.max(SIDE_MIN_WIDTH, current + delta)));
+    }, []);
 
     const slugs = useMemo(() => (doc ? doc.headings.map(heading => heading.slug) : []), [doc]);
 
@@ -196,25 +204,30 @@ const DocCenter: React.FC = () => {
                             </div>
                             {KB_DOCS.map(item => (
                                 <div key={item.key} className="doc-kb-item">
-                                    <div
+                                    {/* 目录项是按钮而不是带 onClick 的 div：眼睛能点，键盘也得能到 */}
+                                    <button
+                                        type="button"
                                         className={`doc-kb-item-title${item.key === activeKey ? ' is-active' : ''}`}
+                                        aria-current={item.key === activeKey ? 'page' : undefined}
                                         onClick={() => setActiveKey(item.key)}
                                     >
-                                        <FileTextOutlined />
+                                        <FileTextOutlined aria-hidden />
                                         <span>{item.title}</span>
-                                    </div>
+                                    </button>
                                     {item.key === activeKey ? (
                                         <ul className="doc-kb-toc">
                                             {item.headings
                                                 .filter(heading => heading.depth >= 2 && heading.depth <= 3)
                                                 .map(heading => (
-                                                    <li
-                                                        key={heading.slug}
-                                                        style={{paddingLeft: indent(heading.depth)}}
-                                                        onClick={() => jumpTo(heading.slug)}
-                                                        title={heading.text}
-                                                    >
-                                                        {heading.text}
+                                                    <li key={heading.slug} style={{paddingLeft: indent(heading.depth)}}>
+                                                        <button
+                                                            type="button"
+                                                            className="doc-kb-toc-item"
+                                                            onClick={() => jumpTo(heading.slug)}
+                                                            title={heading.text}
+                                                        >
+                                                            {heading.text}
+                                                        </button>
                                                     </li>
                                                 ))}
                                         </ul>
@@ -226,9 +239,23 @@ const DocCenter: React.FC = () => {
                             className="doc-kb-resizer"
                             role="separator"
                             aria-orientation="vertical"
-                            aria-label="拖动调整文档列表宽度，双击恢复默认"
+                            aria-label="调整文档列表宽度"
+                            aria-valuenow={sideWidth}
+                            aria-valuemin={SIDE_MIN_WIDTH}
+                            aria-valuemax={SIDE_MAX_WIDTH}
+                            tabIndex={0}
+                            title="拖动或按左右方向键调整宽度，双击恢复默认"
                             onPointerDown={startResize}
                             onDoubleClick={() => setSideWidth(SIDE_DEFAULT_WIDTH)}
+                            onKeyDown={event => {
+                                if (event.key === 'ArrowLeft') {
+                                    event.preventDefault();
+                                    nudgeSideWidth(-SIDE_KEY_STEP);
+                                } else if (event.key === 'ArrowRight') {
+                                    event.preventDefault();
+                                    nudgeSideWidth(SIDE_KEY_STEP);
+                                }
+                            }}
                         />
                     </>
                 )}
@@ -245,17 +272,20 @@ const DocCenter: React.FC = () => {
                             }
                             dataSource={hits}
                             renderItem={hit => (
-                                <List.Item onClick={() => handleOpenHit(hit)} style={{cursor: 'pointer'}}>
-                                    <Space direction="vertical" size={2} style={{width: '100%'}}>
-                                        <Space size={6} wrap>
-                                            <Tag color="blue">{hit.docTitle}</Tag>
-                                            <Typography.Text strong>{hit.heading}</Typography.Text>
-                                            <Typography.Text type="secondary">相关度 {hit.score}</Typography.Text>
+                                <List.Item>
+                                    {/* 命中行整块可点，焦点落在内部的按钮上：List.Item 不是可聚焦元素 */}
+                                    <button type="button" className="doc-kb-hit" onClick={() => handleOpenHit(hit)}>
+                                        <Space direction="vertical" size={2} style={{width: '100%'}}>
+                                            <Space size={6} wrap>
+                                                <Tag color="blue">{hit.docTitle}</Tag>
+                                                <Typography.Text strong>{hit.heading}</Typography.Text>
+                                                <Typography.Text type="secondary">相关度 {hit.score}</Typography.Text>
+                                            </Space>
+                                            <Typography.Text type="secondary" ellipsis>
+                                                {hit.snippet}
+                                            </Typography.Text>
                                         </Space>
-                                        <Typography.Text type="secondary" ellipsis>
-                                            {hit.snippet}
-                                        </Typography.Text>
-                                    </Space>
+                                    </button>
                                 </List.Item>
                             )}
                         />

@@ -26,7 +26,9 @@ export const FONT_SIZE_OPTIONS: {value: FontSizeLevel; label: string}[] = [
 
 /** 相对默认档（large）的比例：图表按它换算像素字号与气泡直径。 */
 export function fontFactor(level: FontSizeLevel): number {
-    return FONT_BASE_PX[level] / FONT_BASE_PX.large;
+    // 下限 0.92：canvas 里的刻度标签没有 CSS 兜底，10px 的坐标轴数字在图表里等于读不出。
+    // 缩放可以收，收到看不清就没有意义了。
+    return Math.max(0.92, FONT_BASE_PX[level] / FONT_BASE_PX.large);
 }
 
 /**
@@ -34,18 +36,32 @@ export function fontFactor(level: FontSizeLevel): number {
  *
  * compactAlgorithm 把基准字号取成它算出的 fontSizeSM（各档都是 12px），而 ConfigProvider 的
  * fontSize 只是喂给算法的种子、会被这一步覆盖掉，所以档位对表格、按钮、页签一直是无效的。
- * 大档维持多年来的 12px 不变，特大档给到 14px（与正文小字同高），否则界面上看不出加一档的效果。
+ * 大档维持多年来的 12px 不变（默认观感不变）；**下限也压在 12px**——"小"档原来是 10px，
+ * 中文在 10px 已经糊了，那点密度是用读不清换来的。控件尺寸的缩放另见 antdDensityFactor。
  */
 export const ANTD_FONT_BASE_PX: Record<FontSizeLevel, number> = {
+    small: 12,
+    medium: 12,
+    large: 12,
+    xlarge: 14,
+};
+
+/**
+ * antd 组件尺寸（控件高度、内边距）的密度基准，与上面的字号基准解耦。
+ *
+ * 两者以前共用一个比例，于是"把界面调小"会把文字和控件一起压扁。现在小档照样收紧
+ * 行高与内边距（0.83 倍），字号止步于 12px：密度和可读性各走各的。
+ */
+export const ANTD_DENSITY_BASE_PX: Record<FontSizeLevel, number> = {
     small: 10,
     medium: 11,
     large: 12,
     xlarge: 14,
 };
 
-/** antd 组件尺寸（控件高度、内边距）跟着组件文字一起缩放的比例。 */
-export function antdFontFactor(level: FontSizeLevel): number {
-    return ANTD_FONT_BASE_PX[level] / ANTD_FONT_BASE_PX.large;
+/** 控件尺寸跟着字号档位缩放的比例（large = 1）。 */
+export function antdDensityFactor(level: FontSizeLevel): number {
+    return ANTD_DENSITY_BASE_PX[level] / ANTD_DENSITY_BASE_PX.large;
 }
 
 /**

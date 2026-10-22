@@ -415,6 +415,7 @@ const AlertCenter: React.FC = () => {
             ) : null}
 
             <StateBlock
+                loadingVariant="skeleton"
                 loading={loading && rules.length === 0}
                 error={error}
                 onRetry={() => void refresh()}

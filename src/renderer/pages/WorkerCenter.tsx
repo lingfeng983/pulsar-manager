@@ -85,7 +85,7 @@ function instanceColumns(
             // 出错原因常常比状态本身长，让它换行而不是把表格撑出横向滚动
             render: (_, row) =>
                 row.error ? (
-                    <Text type="danger" style={{fontSize: 12}}>
+                    <Text type="danger" style={{fontSize: 'var(--font-size-xs)'}}>
                         {row.error}
                     </Text>
                 ) : (
@@ -482,7 +482,7 @@ const WorkerCenter: React.FC<Props> = ({clusterId: propClusterId, tenant: propTe
                 render: (_, item) => (
                     <Space direction="vertical" size={0}>
                         <Text strong>{item.config.name}</Text>
-                        <Text type="secondary" style={{fontSize: 12}}>
+                        <Text type="secondary" style={{fontSize: 'var(--font-size-xs)'}}>
                             {shortClass(item.config.className)}
                         </Text>
                     </Space>
@@ -506,10 +506,10 @@ const WorkerCenter: React.FC<Props> = ({clusterId: propClusterId, tenant: propTe
                 key: 'flow',
                 render: (_, item) => (
                     <Space direction="vertical" size={0}>
-                        <Text style={{fontSize: 12}}>
+                        <Text style={{fontSize: 'var(--font-size-xs)'}}>
                             {item.config.inputs?.length ? item.config.inputs.join(', ') : '—'}
                         </Text>
-                        <Text type="secondary" style={{fontSize: 12}}>
+                        <Text type="secondary" style={{fontSize: 'var(--font-size-xs)'}}>
                             → {item.config.output || '—'}
                         </Text>
                     </Space>
@@ -536,7 +536,7 @@ const WorkerCenter: React.FC<Props> = ({clusterId: propClusterId, tenant: propTe
                                 `失败 ${item.stats.unsuccessfullyProcessed}，产出 ${item.stats.emitted}`
                             }
                         >
-                            <Text style={{fontSize: 12}}>
+                            <Text style={{fontSize: 'var(--font-size-xs)'}}>
                                 {item.stats.processed.toLocaleString('zh-CN')} / {item.stats.exceptions}
                             </Text>
                         </Tooltip>
@@ -670,6 +670,7 @@ const WorkerCenter: React.FC<Props> = ({clusterId: propClusterId, tenant: propTe
                 />
             ) : (
                 <StateBlock
+                    loadingVariant="skeleton"
                     loading={loading}
                     error={error}
                     onRetry={() => void refresh()}
@@ -723,7 +724,7 @@ const WorkerCenter: React.FC<Props> = ({clusterId: propClusterId, tenant: propTe
                 okText="触发"
                 destroyOnClose
             >
-                <Paragraph type="secondary" style={{fontSize: 12}}>
+                <Paragraph type="secondary" style={{fontSize: 'var(--font-size-xs)'}}>
                     worker 会往这个 topic 投一条消息并等函数返回它的产出。留空载荷表示投一条空消息。
                 </Paragraph>
                 <Form layout="vertical">

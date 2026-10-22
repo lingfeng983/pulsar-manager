@@ -58,7 +58,7 @@ const SchemaPanel: React.FC<SchemaPanelProps> = ({schemaMode, schemaJson, onMode
                 <Input.TextArea
                     rows={8}
                     spellCheck={false}
-                    style={{fontFamily: 'Consolas, Menlo, monospace', fontSize: 12}}
+                    style={{fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-xs)'}}
                     value={schemaJson || ''}
                     onChange={event => onSchemaChange(event.target.value)}
                     placeholder={EXAMPLE_SCHEMA}
@@ -71,11 +71,7 @@ const SchemaPanel: React.FC<SchemaPanelProps> = ({schemaMode, schemaJson, onMode
                     这个模式暂时不可用——发送时会被明确拒绝，不会假装校验过。
                 </div>
             )}
-            {feedback && (
-                <div className="hint-text" style={{color: feedback.ok ? undefined : '#d4380d'}}>
-                    {feedback.text}
-                </div>
-            )}
+            {feedback && <div className={feedback.ok ? 'hint-text' : 'hint-text danger-text'}>{feedback.text}</div>}
         </div>
     );
 };

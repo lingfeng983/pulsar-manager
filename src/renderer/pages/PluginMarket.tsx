@@ -281,6 +281,7 @@ const PluginMarket: React.FC = () => {
             </Card>
 
             <StateBlock
+                loadingVariant="skeleton"
                 loading={!ready && entries.length === 0}
                 onRetry={() => void load()}
                 empty={visible.length === 0}

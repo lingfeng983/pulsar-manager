@@ -3,7 +3,7 @@ import {ConfigProvider, theme as antTheme} from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import {applyTheme, loadPersistedTheme, useThemeStore} from './store/theme';
 import {loadAppSettings, useSettingsStore} from './store/settings';
-import {ANTD_FONT_BASE_PX, antdFontFactor, antdFontTokens} from './utils/fontScale';
+import {ANTD_FONT_BASE_PX, antdDensityFactor, antdFontTokens} from './utils/fontScale';
 import {loadPlugins} from './store/plugins';
 import {startAlertRuntime} from './store/alerts';
 import Layout from './components/layout/Layout';
@@ -22,6 +22,7 @@ startAlertRuntime();
 
 // 紧凑档基准：以 large 字号档的 antd 基准文字（12px）为 1 倍，控件高度与内边距按字号档位同比缩放，
 // 否则切到"小"字号后仍然是原来那套 32px 高的按钮，视觉上只小了字没小了面。
+// 注意这里乘的是**密度**因子而不是字号因子：字号已经有 12px 下限，控件尺寸照旧收。
 const DENSITY = {
     controlHeight: 28,
     controlHeightSM: 22,
@@ -44,7 +45,7 @@ const App: React.FC = () => {
 
     // 根据主题设置 Ant Design 暗色模式
     const isDark = theme === 'dark';
-    const d = (value: number) => Math.round(value * antdFontFactor(fontSizeLevel));
+    const d = (value: number) => Math.round(value * antdDensityFactor(fontSizeLevel));
 
     // compactAlgorithm 在派生阶段把基准字号取成它自己算出的 fontSizeSM（各档都是 12px），
     // 而 ConfigProvider 的 fontSize 只是喂给算法的种子，会被这一步整个覆盖掉，

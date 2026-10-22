@@ -7,6 +7,9 @@
     --color-warning: #ff7d00;
     --color-danger: #f53f3f;
     --color-info: #86909c;
+    /* 危险语义的**文字色**：--color-danger 是给边框/图标/按钮底的，压到 12px 正文上
+       只有 3.71:1。文字用更深一档，5.57:1。 */
+    --color-danger-text: #cf1322;
 
     --color-bg-base: #ffffff;
     --color-bg-secondary: #f2f3f5;
@@ -15,8 +18,15 @@
 
     --color-border: #e5e6eb;
     --color-text-primary: #1d2129;
-    --color-text-secondary: #86909c;
-    --color-text-tertiary: #c9cdd4;
+    /* 次要文字：7.10:1（白底）。原来的 #86909c 只有 3.24:1，而 .hint-text 这类 12px
+       辅助文字在界面上有几十处，整片偏浅读起来吃力。次要 ≠ 淡到看不清。 */
+    --color-text-secondary: #4e5969;
+    /* 三级文字：只给行号、代码注释、占位符这类非正文内容。5.05:1（白底）/ 4.55:1（#f2f3f5），
+       都过 AA。装饰性色值不要低于这条线，否则暗色下看着正常、亮色下直接消失。 */
+    --color-text-tertiary: #64707d;
+    /* Topic / Partition 一类的类型强调色（规范 §3.1.2）。不并进 primary：主色只有一种，
+       语义色要能独立换主题。 */
+    --color-accent: #722ed1;
 
     --shadow-light: 0 1px 4px rgba(0, 0, 0, 0.06);
     --shadow-medium: 0 4px 16px rgba(0, 0, 0, 0.12);
@@ -46,6 +56,10 @@
     --font-size-lg: 15px;
     --font-size-xl: 18px;
 
+    /* 图标尺寸：结构图标不走任意值。md 是工具栏默认，lg 只给品牌标记（关于弹窗）用。 */
+    --icon-md: 16px;
+    --icon-lg: 32px;
+
     /* 顶栏与页签栏的高度跟着字号档位走：切到"小"以后如果还钉死 44/30，
        缩小的只有字，控件周围反而多出留白。 */
     --header-height: calc(var(--font-size-md) * 3 + 2px);
@@ -60,16 +74,21 @@
     --color-warning: #ff9500;
     --color-danger: #ff4d4f;
     --color-info: #86909c;
+    --color-danger-text: #ff7875;
 
     --color-bg-base: #17171a;
     --color-bg-secondary: #232327;
     --color-bg-elevated: #2e2e33;
     --color-fill-secondary: #3a3a40;
 
-    --color-border: #2e2e33;
+    /* 分隔线要比 --color-bg-elevated 高出一档：#2e2e33 与浮层底色同值，
+       意味着弹窗、卡片、右键菜单都没有边框，只能靠阴影撑轮廓。 */
+    --color-border: #3d3d45;
     --color-text-primary: #f5f5f7;
     --color-text-secondary: #c9cdd4;
-    --color-text-tertiary: #86909c;
+    /* 三级文字在浮层底色上是 4.72:1，暗色下比亮色更需要往上提一档。 */
+    --color-text-tertiary: #8f9aa6;
+    --color-accent: #9e5cf7;
 
     --shadow-light: 0 1px 4px rgba(0, 0, 0, 0.2);
     --shadow-medium: 0 4px 16px rgba(0, 0, 0, 0.4);
@@ -82,6 +101,7 @@
     --color-warning: #f6bd16;
     --color-danger: #e86452;
     --color-info: #8a8a8a;
+    --color-danger-text: #b03a2e;
 
     --color-bg-base: #f5f5dc;
     --color-bg-secondary: #e8e8d0;
@@ -91,7 +111,8 @@
     --color-border: #d4d4be;
     --color-text-primary: #2b2b2b;
     --color-text-secondary: #5c5c5c;
-    --color-text-tertiary: #8a8a8a;
+    --color-text-tertiary: #666666;
+    --color-accent: #722ed1;
 
     --shadow-light: 0 1px 4px rgba(0, 0, 0, 0.04);
     --shadow-medium: 0 4px 16px rgba(0, 0, 0, 0.08);
@@ -99,7 +120,8 @@
 
 /* 全局字号档位（配置中心 → 界面 → 字号），由 store/settings.ts 写到 <html data-font-size>。
    large 就是上面 :root 的取值，因此不写 data-font-size 时（首帧）与默认档完全一致。
-   降档时梯度整体收窄，最小一档不再低于 10px，避免中文笔画糊成一团。
+   下限压在 11px：中文笔画在 10px 就糊成一团，"想一屏多放几行"不该用可读性去换——
+   密度靠的是行高与内边距（见 App.tsx 的 DENSITY），不是字号。
    升档只到正文 15px：再往上首页表格五列就要横向滚动了。 */
 [data-font-size='xlarge'] {
     --font-size-xs: 13px;
@@ -110,19 +132,19 @@
 }
 
 [data-font-size='medium'] {
+    --font-size-xs: 12px;
+    --font-size-sm: 12px;
+    --font-size-md: 13px;
+    --font-size-lg: 15px;
+    --font-size-xl: 17px;
+}
+
+[data-font-size='small'] {
     --font-size-xs: 11px;
     --font-size-sm: 12px;
     --font-size-md: 13px;
     --font-size-lg: 14px;
     --font-size-xl: 16px;
-}
-
-[data-font-size='small'] {
-    --font-size-xs: 10px;
-    --font-size-sm: 11px;
-    --font-size-md: 12px;
-    --font-size-lg: 13px;
-    --font-size-xl: 15px;
 }
 
 /* 全局重置和基础样式 */
@@ -425,6 +447,14 @@ pre,
     margin-block: 0;
 }
 
+/* 骨架屏形态：占位条要铺满卡片宽度，不能像转圈那样居中缩成一团。
+   行数固定 5 行，与常见表格首屏高度接近，加载完不会整块跳一下。 */
+.state-block-skeleton {
+    display: block;
+    padding: var(--spacing-sm) 0;
+    text-align: left;
+}
+
 /* 详情页信息区块的字段标签（租户/命名空间/Topic 概览共用） */
 .field-label {
     font-weight: 500;
@@ -683,7 +713,7 @@ pre,
 }
 
 .danger-text {
-    color: var(--color-danger);
+    color: var(--color-danger-text);
 }
 
 /* 参数表单两列：连接参数与报文参数各占一列。用 auto-fit 会在宽窗口下排出第三列
@@ -903,10 +933,15 @@ body.is-doc-resizing {
     display: flex;
     align-items: center;
     gap: var(--spacing-sm);
+    width: 100%;
     padding: var(--spacing-sm) var(--spacing-md);
+    border: none;
     border-radius: var(--radius-sm);
-    cursor: pointer;
+    background: none;
     color: var(--color-text-primary);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
 }
 
 .doc-kb-item-title:hover {
@@ -925,17 +960,42 @@ body.is-doc-resizing {
 }
 
 .doc-kb-toc li {
-    padding: 2px var(--spacing-md);
-    font-size: var(--font-size-sm);
+    padding: 0 var(--spacing-md);
+}
+
+/* 目录项做成按钮而不是带 onClick 的 li：眼睛能点、键盘也得能到。
+   左内边距由外层 li 给（按标题层级缩进），按钮自己只吃 2px 的纵向余量。 */
+.doc-kb-toc-item {
+    display: block;
+    width: 100%;
+    padding: 2px 0;
+    border: none;
+    background: none;
     color: var(--color-text-secondary);
+    font: inherit;
+    font-size: var(--font-size-sm);
+    text-align: left;
     cursor: pointer;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 
-.doc-kb-toc li:hover {
+.doc-kb-toc-item:hover {
     color: var(--color-primary);
+}
+
+/* 检索命中行整块可点：交给内部按钮承担焦点与回车，List.Item 只当容器 */
+.doc-kb-hit {
+    display: block;
+    width: 100%;
+    padding: 0;
+    border: none;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
 }
 
 .doc-kb-main {
@@ -1057,4 +1117,66 @@ body.is-doc-resizing {
     100% {
         background: transparent;
     }
+}
+
+/* ===== 顶栏状态格 =====
+   一条"几个集群在线"的概况。窗口收窄时它是第一个该让位的：允许收缩、
+   但文字不换行，宁可截断也不把工具栏压成两行。 */
+.topbar-status {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--spacing-xs);
+    min-width: 0;
+    font-size: var(--font-size-xs);
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+}
+
+/* 窄窗口先让位：状态格是顶栏里唯一"信息性、可替代"的格子（同样的数字在巡检汇总页有），
+   1120px 以下收起它，把宽度让给工具区，避免按钮互相压字。 */
+@media (max-width: 1120px) {
+    .topbar-status {
+        display: none;
+    }
+}
+
+/* 行内小标签：告警计数、快捷键提示共用。比默认 Tag 小一号，跟在文字后面不抢行高 */
+.tag-xs {
+    margin-inline: var(--spacing-xs) 0;
+    font-size: var(--font-size-xs);
+    line-height: 1.5;
+}
+
+/* ===== 减少动态 =====
+   系统开了"减少动态效果"就把过渡与动画压到不可感知：这套界面里页签切换、
+   浮层展开、跳转落点闪烁都是靠动效表达的，长期盯屏的运维人员不需要它们。 */
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
+}
+
+/* ===== 键盘焦点 =====
+   antd 组件自带 focus-visible 环，这里补的是自绘的可交互元素（右键菜单、
+   文档目录、拖动把手）。用 outline 而不是 box-shadow：不受圆角与背景影响，
+   也不改变布局盒。 */
+.context-menu-item:focus-visible,
+.doc-kb-item-title:focus-visible,
+.doc-kb-toc-item:focus-visible,
+.doc-kb-hit:focus-visible,
+.tree-resizer:focus-visible,
+.doc-kb-resizer:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: -2px;
+}
+
+/* 拖动把手的键盘等价物：方向键调宽度时需要看得见的焦点圈 */
+.tree-resizer,
+.doc-kb-resizer {
+    touch-action: none;
 }

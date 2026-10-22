@@ -288,6 +288,7 @@ const FleetInspection: React.FC<Props> = () => {
             }
         >
             <StateBlock
+                loadingVariant="skeleton"
                 loading={loading}
                 error={error}
                 empty={!summary && !loading}

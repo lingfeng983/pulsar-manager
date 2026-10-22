@@ -581,6 +581,7 @@ const ClusterInspection: React.FC<Props> = ({clusterId: propClusterId}) => {
             }
         >
             <StateBlock
+                loadingVariant="skeleton"
                 loading={loading}
                 error={error}
                 empty={!report && !loading && !history.length}
