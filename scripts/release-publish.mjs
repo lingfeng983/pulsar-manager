@@ -634,9 +634,15 @@ async function verifyRelease(repo, tag, expected = {}) {
     if (expected.sha256) {
         ok('下载回来的附件与本地安装包逐字节一致');
     }
-    const page = await fetch(`https://github.com/${repo}/releases/tag/${tag}`);
-    if (!page.ok) {
-        warn(`发行页返回 ${page.status}，请手工打开确认页面正常`);
+    // 发行页只是给人看的门面，附件上面已经逐字节校验过。这里原本只打算 warn，
+    // 但 fetch 连不上时会直接抛异常，让一次成功的发版以退出码 1 收场。
+    try {
+        const page = await fetch(`https://github.com/${repo}/releases/tag/${tag}`);
+        if (!page.ok) {
+            warn(`发行页返回 ${page.status}，请手工打开确认页面正常`);
+        }
+    } catch (error) {
+        warn(`发行页打不开（${error.message}），请手工打开确认页面正常`);
     }
     return {release, asset};
 }
