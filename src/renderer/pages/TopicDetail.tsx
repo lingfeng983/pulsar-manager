@@ -818,7 +818,14 @@ const TopicDetail: React.FC<TopicDetailProps> = ({clusterId, tenant, namespace, 
                                                 <Table
                                                     dataSource={stats.consumers}
                                                     columns={consumerColumns}
-                                                    rowKey={record => `${record.subscription}-${record.consumerName}`}
+                                                    rowKey={record =>
+                                                        [
+                                                            record.subscription,
+                                                            record.consumerName,
+                                                            record.address ?? '',
+                                                            record.connectedSince ?? '',
+                                                        ].join('-')
+                                                    }
                                                     pagination={false}
                                                     size="small"
                                                     scroll={{x: 'max-content'}}

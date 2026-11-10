@@ -17,7 +17,6 @@ import {
     DatePicker,
 } from 'antd';
 import {
-    UpOutlined,
     DownOutlined,
     ZoomInOutlined,
     PauseCircleOutlined,
@@ -27,26 +26,20 @@ import {
     ReloadOutlined,
     AlignLeftOutlined,
     ProfileOutlined,
+    FilterOutlined,
 } from '@ant-design/icons';
 import type {TableColumnsType} from 'antd';
 import type {Message, MessageBatch, ProducerMessageOptions, SessionEndEvent} from '../types';
 import {formatBytes} from '../utils/format';
 import dayjs from 'dayjs';
-import {downloadBlob} from '../utils/download';
+import {saveTextFile} from '../utils/saveFile';
 import {useCommand, PaneActiveContext} from '../hooks/useKeybindings';
-import {useSettingsStore} from '../store/settings';
 import StateBlock from '../components/common/StateBlock';
 import PageShell from '../components/common/PageShell';
 import ErrorBanner from '../components/common/ErrorBanner';
 import MessageDetailModal from '../components/message/MessageDetailModal';
 import CodePane, {type CodePaneHandle} from '../components/editor/CodePane';
-import {
-    decodeMessageBatch,
-    truncateText,
-    trimMessageList,
-    STREAM_MAX_BYTES,
-    type PayloadKind,
-} from '../components/message/messageFormat';
+import {decodePayload, trimMessageList, STREAM_MAX_BYTES, type PayloadKind} from '../components/message/messageFormat';
 import {buildMessagesExport, messagesExportFilename} from '../components/message/exportMessages';
 import {useResizableColumns} from '../hooks/useResizableColumns';
 import {useVirtualTable} from '../hooks/useVirtualTable';
@@ -127,6 +120,9 @@ interface ActiveSession {
 }
 
 const MAX_DISPLAY_COUNT = 500;
+// Properties 列里最多铺几对键值，超出的只报个数：属性常常几十个，全铺开会把
+// 行高撑到几百像素，虚拟滚动下更是整屏都在滚属性。
+const PROPERTIES_PREVIEW_LIMIT = 3;
 
 const MessageBrowser: React.FC<MessageBrowserProps> = ({
     clusterId,
@@ -136,8 +132,6 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
     persistent = true,
     active = true,
 }) => {
-    // 正文截断长度是配置中心里的应用设置，改完立刻对所有消息浏览器生效
-    const truncateLength = useSettingsStore(state => state.settings.truncateLength);
     // active 只说明内嵌页签是不是「消息」，TabWorkspace 把非当前主标签页
     // display:none 保留挂载，因此还要看外层页签是否活跃。两者都为真才算用户
     // 真的看得见这个列表——否则 autoAck 会在无人可见时把消息永久确认掉。
@@ -185,10 +179,16 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
 
     const [backlog, setBacklog] = useState<{messageCount: number; sizeInBytes: number} | null>(null);
     const [backlogLoading, setBacklogLoading] = useState(false);
-    const [expandedMessages, setExpandedMessages] = useState<string[]>([]);
     const [showFullMessage, setShowFullMessage] = useState<Message | null>(null);
     const [exportLoading, setExportLoading] = useState(false);
     const [peeking, setPeeking] = useState(false);
+
+    // 过滤只在渲染层对已收到的这批消息做，不影响 broker 侧的会话：
+    // 关掉过滤或清空条件，被滤掉的消息立刻回来，不用重新消费一遍。
+    const [filterOpen, setFilterOpen] = useState(false);
+    const [filterProducer, setFilterProducer] = useState('');
+    const [filterProperty, setFilterProperty] = useState('');
+    const [filterRange, setFilterRange] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null);
 
     // 会话 id 同时放 ref：推送回调与卸载清理都要读最新值，
     // 放 state 会让 effect 依赖来回变化，反而漏停或重复停。
@@ -675,24 +675,56 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
         }
     });
 
-    const toggleExpand = useCallback((messageId: string) => {
-        setExpandedMessages(prev =>
-            prev.includes(messageId) ? prev.filter(id => id !== messageId) : [...prev, messageId],
-        );
-    }, []);
+    // 三个条件都是「包含」匹配且不分大小写：Producer 名字往往带一长串后缀，
+    // Properties 则常常只想按某个 traceId / env 找，按子串比要求写全更顺手。
+    const filterActive = Boolean(filterProducer.trim() || filterProperty.trim() || filterRange);
 
-    // 列表里每条消息都要展示格式化后的正文（还要判类型），解 base64 + JSON.parse 是逐条开销；
-    // 之前放在列渲染里做，任何一次重渲染（例如展开一条消息）都会对全部 500 条重跑。
-    // 按原始 data 缓存（同一条消息重复出现也只需算一次）。
-    const decodedData = useMemo(() => decodeMessageBatch(messages.map(msg => msg.data)), [messages]);
+    const visibleMessages = useMemo(() => {
+        const producer = filterProducer.trim().toLowerCase();
+        const property = filterProperty.trim().toLowerCase();
+        const from = filterRange?.[0]?.valueOf();
+        const to = filterRange?.[1]?.valueOf();
+        if (!producer && !property && from === undefined && to === undefined) {
+            return messages;
+        }
+        return messages.filter(item => {
+            if (producer && !(item.producerName || '').toLowerCase().includes(producer)) {
+                return false;
+            }
+            if (property) {
+                const hit = Object.entries(item.properties || {}).some(
+                    ([key, value]) =>
+                        key.toLowerCase().includes(property) || String(value).toLowerCase().includes(property),
+                );
+                if (!hit) {
+                    return false;
+                }
+            }
+            // 时间按 publishTime 的闭区间过滤；结束时刻取 RangePicker 选中的那一刻
+            if (from !== undefined && item.publishTime < from) {
+                return false;
+            }
+            if (to !== undefined && item.publishTime > to) {
+                return false;
+            }
+            return true;
+        });
+    }, [messages, filterProducer, filterProperty, filterRange]);
+
+    const resetFilter = () => {
+        setFilterProducer('');
+        setFilterProperty('');
+        setFilterRange(null);
+    };
 
     // 重投 = 把这条消息的正文与属性原样装回「发送测试」面板，由用户自己点发送：
     // 不代点是因为发出去的就是"另一条新消息"，topic 是否还该收它、属性要不要改，
-    // 都是只有用户能拍板的事；面板里改完 Ctrl+Z 也还能撤。
+    // 都是只有用户能拍板的事；面板里改完 Ctrl+Z 也还能撤。只解这一条——
+    // 原先为整张表缓存解码结果，是给已经取消的 Data 列用的。
     const loadIntoSendPanel = (record: Message) => {
-        const payload = decodedData.get(record.data);
-        setSendText(payload?.formatted ?? '');
-        setSendKind(payload?.kind ?? 'text');
+        const payload = decodePayload(record.data);
+        setSendText(payload.formatted);
+        setSendKind(payload.kind);
         const keys = Object.keys(record.properties || {});
         if (keys.length > 0) {
             setSendPropertiesKind('json');
@@ -703,16 +735,21 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
     };
 
     const handleExportMessages = async (format: 'json' | 'csv') => {
-        if (messages.length === 0) {
+        // 所见即所得：开着过滤就只导出筛出来的那批，提示里报的条数也对得上
+        if (visibleMessages.length === 0) {
             message.warning('暂无消息可导出');
             return;
         }
 
         setExportLoading(true);
         try {
-            const payload = buildMessagesExport(messages, format);
-            downloadBlob(payload.content, messagesExportFilename(topic, format), payload.mimeType);
-            message.success(`成功导出 ${messages.length} 条消息 (${payload.extension.toUpperCase()})`);
+            const payload = buildMessagesExport(visibleMessages, format);
+            const result = await saveTextFile(payload.content, messagesExportFilename(topic, format), '导出消息');
+            if (result.error) {
+                message.error(result.error);
+            } else if (!result.cancelled) {
+                message.success(`成功导出 ${visibleMessages.length} 条消息到 ${result.path}`);
+            }
         } catch (exportError) {
             console.error('Failed to export messages:', exportError);
             message.error('导出失败');
@@ -720,8 +757,6 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
             setExportLoading(false);
         }
     };
-
-    const KIND_LABEL = {json: 'JSON', xml: 'XML', text: '文本'} as const;
 
     const columns: TableColumnsType<Message> = [
         {
@@ -751,15 +786,38 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
             title: 'Properties',
             dataIndex: 'properties',
             key: 'properties',
-            width: 110,
+            width: 240,
             render: (props: Record<string, string>) => {
-                const keys = Object.keys(props || {});
-                if (keys.length === 0) {
+                const entries = Object.entries(props || {});
+                if (entries.length === 0) {
                     return '-';
                 }
+                const shown = entries.slice(0, PROPERTIES_PREVIEW_LIMIT);
+                const hidden = entries.length - shown.length;
                 return (
-                    <Tooltip title={keys.map(k => `${k}: ${props[k]}`).join('\n')}>
-                        <Tag color="blue">{keys.length} 个属性</Tag>
+                    <Tooltip
+                        title={
+                            <div style={{whiteSpace: 'pre-wrap', fontFamily: 'var(--font-mono)'}}>
+                                {entries.map(([key, value]) => `${key}: ${value}`).join('\n')}
+                            </div>
+                        }
+                    >
+                        <div style={{fontFamily: 'var(--font-mono)', fontSize: 'var(--font-size-xs)', lineHeight: 1.6}}>
+                            {shown.map(([key, value]) => (
+                                <div
+                                    key={key}
+                                    style={{whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'}}
+                                >
+                                    <span style={{color: 'var(--color-primary)'}}>{key}</span>
+                                    <span>: {value}</span>
+                                </div>
+                            ))}
+                            {hidden > 0 && (
+                                <Tag color="blue" style={{marginTop: 2}}>
+                                    共 {entries.length} 项 · 还有 {hidden} 项
+                                </Tag>
+                            )}
+                        </div>
                     </Tooltip>
                 );
             },
@@ -772,63 +830,31 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
             render: (count?: number) => (count ? <Tag color="orange">{count}</Tag> : '-'),
         },
         {
-            title: 'Data',
-            dataIndex: 'data',
-            key: 'data',
-            width: 320,
-            render: (data: string, record: Message) => {
-                const payload = decodedData.get(data);
-                const formatted = payload?.formatted ?? '';
-                const isExpanded = expandedMessages.includes(record.messageId);
-                const displayContent = isExpanded ? formatted : truncateText(formatted, truncateLength);
-
-                return (
-                    <div>
-                        <Tag>{payload ? KIND_LABEL[payload.kind] : '文本'}</Tag>
-                        <div
-                            style={{
-                                maxHeight: isExpanded ? 200 : 'auto',
-                                overflow: 'auto',
-                                fontFamily: 'var(--font-mono)',
-                                fontSize: 'var(--font-size-xs)',
-                                wordBreak: 'break-all',
-                                color: 'var(--color-text-secondary)',
-                            }}
-                        >
-                            {displayContent}
-                        </div>
-                        {formatted.length > truncateLength && (
-                            <Button
-                                type="text"
-                                size="small"
-                                icon={isExpanded ? <UpOutlined /> : <DownOutlined />}
-                                onClick={() => toggleExpand(record.messageId)}
-                                style={{marginTop: 4}}
-                            >
-                                {isExpanded ? '收起' : `展开全文 (${formatted.length} 字符)`}
-                            </Button>
-                        )}
-                        <Button
-                            type="text"
-                            size="small"
-                            icon={<ZoomInOutlined />}
-                            onClick={() => setShowFullMessage(record)}
-                            style={{marginTop: 4, marginLeft: 8}}
-                        >
-                            全屏查看
-                        </Button>
-                        <Button
-                            type="text"
-                            size="small"
-                            icon={<SendOutlined />}
-                            onClick={() => loadIntoSendPanel(record)}
-                            style={{marginTop: 4, marginLeft: 8}}
-                        >
-                            重投（装回发送）
-                        </Button>
-                    </div>
-                );
-            },
+            title: '操作',
+            key: 'actions',
+            width: 140,
+            render: (_: unknown, record: Message) => (
+                <Space size={4}>
+                    <Button
+                        type="link"
+                        size="small"
+                        icon={<ZoomInOutlined />}
+                        onDoubleClick={event => event.stopPropagation()}
+                        onClick={() => setShowFullMessage(record)}
+                    >
+                        查看
+                    </Button>
+                    <Button
+                        type="link"
+                        size="small"
+                        icon={<SendOutlined />}
+                        onDoubleClick={event => event.stopPropagation()}
+                        onClick={() => loadIntoSendPanel(record)}
+                    >
+                        重投
+                    </Button>
+                </Space>
+            ),
         },
     ];
 
@@ -838,7 +864,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
 
     // 界面保留条数可以开到几千：几千行 × 每行一堆 Tag/Tooltip 是这台客户端最主要
     // 的卡顿来源。超过阈值才切成虚拟滚动，几百条以内与原来逐像素一致。
-    const box = useVirtualTable(messages.length);
+    const box = useVirtualTable(visibleMessages.length);
 
     const fieldLabel = {marginRight: 'var(--spacing-sm)', fontWeight: 500} as const;
 
@@ -1234,16 +1260,16 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                             <Dropdown.Button
                                 size="small"
                                 icon={<DownOutlined />}
-                                onClick={() => handleExportMessages('json')}
+                                onClick={() => void handleExportMessages('json')}
                                 menu={{
                                     items: [
                                         {key: 'json', label: '导出 JSON'},
                                         {key: 'csv', label: '导出 CSV'},
                                     ],
-                                    onClick: ({key}) => handleExportMessages(key as 'json' | 'csv'),
+                                    onClick: ({key}) => void handleExportMessages(key as 'json' | 'csv'),
                                 }}
                                 loading={exportLoading}
-                                disabled={messages.length === 0}
+                                disabled={visibleMessages.length === 0}
                             >
                                 <DownloadOutlined /> 导出
                             </Dropdown.Button>
@@ -1272,15 +1298,77 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                             <span>
                                 消息列表 <strong>{messages.length}</strong> 条{isRunning && '（实时推送中）'}
                             </span>
+                            <Tooltip title="按 Producer、Properties 与发布时间筛选当前已收到的消息；双击任意一行可全屏查看正文">
+                                <Button
+                                    size="small"
+                                    aria-label="显示消息过滤"
+                                    type={filterOpen || filterActive ? 'primary' : 'text'}
+                                    icon={<FilterOutlined />}
+                                    onClick={() => setFilterOpen(open => !open)}
+                                />
+                            </Tooltip>
+                            {filterActive && (
+                                <Tag color="blue">
+                                    筛出 {visibleMessages.length} / {messages.length} 条
+                                </Tag>
+                            )}
                         </div>
+
+                        {filterOpen && (
+                            <div style={{marginBottom: 'var(--spacing-sm)'}}>
+                                <Space wrap size="small">
+                                    <Input
+                                        allowClear
+                                        size="small"
+                                        aria-label="按 Producer 过滤"
+                                        placeholder="Producer 包含…"
+                                        value={filterProducer}
+                                        onChange={event => setFilterProducer(event.target.value)}
+                                        style={{width: 170}}
+                                    />
+                                    <Input
+                                        allowClear
+                                        size="small"
+                                        aria-label="按 Properties 过滤"
+                                        placeholder="Properties 键或值包含…"
+                                        value={filterProperty}
+                                        onChange={event => setFilterProperty(event.target.value)}
+                                        style={{width: 210}}
+                                    />
+                                    <DatePicker.RangePicker
+                                        allowClear
+                                        size="small"
+                                        showTime
+                                        value={filterRange}
+                                        onChange={dates => setFilterRange(dates as [dayjs.Dayjs, dayjs.Dayjs] | null)}
+                                        format="YYYY-MM-DD HH:mm:ss"
+                                        placeholder={['发布时间起', '发布时间止']}
+                                        style={{width: 330}}
+                                    />
+                                    <Button size="small" disabled={!filterActive} onClick={resetFilter}>
+                                        清空
+                                    </Button>
+                                    <span className="hint-text">
+                                        只筛选当前列表，不影响会话接收；导出同样按筛选结果
+                                    </span>
+                                </Space>
+                            </div>
+                        )}
+
                         <StateBlock
-                            empty={messages.length === 0}
-                            emptyText={isRunning ? '等待消息...' : '点击「开始」接收消息'}
+                            empty={visibleMessages.length === 0}
+                            emptyText={
+                                messages.length === 0
+                                    ? isRunning
+                                        ? '等待消息...'
+                                        : '点击「开始」接收消息'
+                                    : '没有符合过滤条件的消息'
+                            }
                             height={160}
                         >
                             <div ref={box.ref}>
                                 <Table
-                                    dataSource={messages}
+                                    dataSource={visibleMessages}
                                     columns={resizableColumns}
                                     components={components}
                                     // 稳定 key：见 appendBatch 的去重说明
@@ -1289,6 +1377,10 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                                     size="small"
                                     scroll={box.scroll}
                                     virtual={box.virtual}
+                                    onRow={record => ({
+                                        onDoubleClick: () => setShowFullMessage(record),
+                                        style: {cursor: 'pointer'},
+                                    })}
                                 />
                             </div>
                         </StateBlock>

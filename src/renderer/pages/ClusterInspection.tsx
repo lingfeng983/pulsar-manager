@@ -10,7 +10,7 @@ import {
 } from '@ant-design/icons';
 import PageShell from '../components/common/PageShell';
 import StateBlock from '../components/common/StateBlock';
-import {downloadBlob} from '../utils/download';
+import {saveTextFile} from '../utils/saveFile';
 import {useClusterStore} from '../store/cluster';
 import {themedModal} from '../components/common/dangerConfirm';
 import {
@@ -413,11 +413,16 @@ const ClusterInspection: React.FC<Props> = ({clusterId: propClusterId}) => {
         }
     }, [clusterId, scheduleDraft]);
 
-    const handleExport = useCallback(() => {
+    const handleExport = useCallback(async () => {
         if (!report || !markdown) {
             return;
         }
-        downloadBlob(markdown, reportFileName(report), 'text/markdown;charset=utf-8');
+        const result = await saveTextFile(markdown, reportFileName(report), '导出巡检报告');
+        if (result.error) {
+            message.error(result.error);
+        } else if (!result.cancelled) {
+            message.success(`报告已导出到 ${result.path}`);
+        }
     }, [report, markdown]);
 
     // 从历史里点开某一份：报告、导出文本与那份报告自己的环比一起换掉，
@@ -570,7 +575,7 @@ const ClusterInspection: React.FC<Props> = ({clusterId: propClusterId}) => {
                     <Button type="primary" icon={<SafetyCertificateOutlined />} loading={loading} onClick={handleRun}>
                         开始巡检
                     </Button>
-                    <Button icon={<DownloadOutlined />} disabled={!markdown} onClick={handleExport}>
+                    <Button icon={<DownloadOutlined />} disabled={!markdown} onClick={() => void handleExport()}>
                         导出 Markdown
                     </Button>
                     <Button icon={<DeleteOutlined />} disabled={!history.length} onClick={handleClearHistory}>

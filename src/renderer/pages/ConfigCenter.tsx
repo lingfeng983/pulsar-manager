@@ -22,7 +22,7 @@ import {useSettingsStore} from '../store/settings';
 import {useThemeStore} from '../store/theme';
 import {useClusterStore} from '../store/cluster';
 import {useShortcutStore} from '../store/shortcuts';
-import {downloadBlob} from '../utils/download';
+import {saveTextFile} from '../utils/saveFile';
 import {FONT_SIZE_OPTIONS} from '../utils/fontScale';
 import PageShell from '../components/common/PageShell';
 import StateBlock from '../components/common/StateBlock';
@@ -182,11 +182,18 @@ const ConfigCenter: React.FC = () => {
                 message.error(response.error || '导出失败');
                 return;
             }
-            downloadBlob(
+            const result = await saveTextFile(
                 JSON.stringify(response.data, null, 2),
                 `pulsar-manager-配置-${new Date().toISOString().slice(0, 10)}.json`,
+                '导出配置',
             );
-            message.success(`已导出 ${response.data.clusters.length} 个集群与全部应用设置（不含凭据）`);
+            if (result.error) {
+                message.error(result.error);
+            } else if (!result.cancelled) {
+                message.success(
+                    `已导出 ${response.data.clusters.length} 个集群与全部应用设置（不含凭据）到 ${result.path}`,
+                );
+            }
         } catch (error) {
             message.error(`导出失败：${(error as Error).message}`);
         } finally {

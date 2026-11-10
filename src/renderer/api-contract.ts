@@ -704,6 +704,9 @@ export function createBridge(transport: BridgeTransport) {
         // 本地文件选择（函数 / 连接器的包）：只回路径与元信息，内容不进渲染进程
         file: {
             pickArchive: () => transport.invoke('file:pickArchive'),
+            // 全部导出的唯一出口：后台弹「另存为」，用户取消时 data 为 null
+            saveText: (payload: {content: string; filename: string; title?: string}) =>
+                transport.invoke('file:saveText', payload),
         },
 
         // 插件市场：本地声明式插件，只贡献压测预设与 Topic 模板
@@ -1156,6 +1159,11 @@ declare global {
             file: {
                 // 用户取消时 data 为 null，这不是失败
                 pickArchive: () => Promise<APIResponse<PickedArchiveFile | null>>;
+                saveText: (payload: {
+                    content: string;
+                    filename: string;
+                    title?: string;
+                }) => Promise<APIResponse<{path: string; bytes: number} | null>>;
             };
             plugin: {
                 list: () => Promise<APIResponse<PluginListResult>>;

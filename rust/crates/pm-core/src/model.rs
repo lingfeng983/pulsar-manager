@@ -223,6 +223,10 @@ pub struct ConsumerStats {
     pub client_version: Option<String>,
     #[serde(default)]
     pub subscription: String,
+    /// 订阅类型：broker 在消费者级不一定给，由所属订阅的 type 兜底。
+    /// 概览页消费者表格的「类型」列读的就是它。
+    #[serde(default)]
+    pub subscription_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -285,6 +289,12 @@ pub struct TopicStats {
     pub producers: Vec<ProducerStats>,
     #[serde(default)]
     pub subscriptions: BTreeMap<String, SubscriptionStats>,
+    /// 派生字段：所有订阅下的消费者摊平后的列表，供概览页「消费者」表格直接渲染。
+    /// Admin API 的 `/stats` 顶层没有 consumers，消费者只挂在
+    /// `subscriptions[sub].consumers`（分区 topic 还可能在各分区的统计里）。
+    /// 由 `parse_stats` 填充，不来自 broker。
+    #[serde(default)]
+    pub consumers: Vec<ConsumerStats>,
     #[serde(default)]
     pub deduplication_status: Option<String>,
     #[serde(default)]
@@ -316,6 +326,34 @@ impl TopicStats {
                 if item.subscription.is_empty() {
                     item.subscription = name.clone();
                 }
+                if item.subscription_type.is_none() {
+                    item.subscription_type = Some(sub.r#type.clone());
+                }
+                out.push(item);
+            }
+        }
+        out
+    }
+
+    /// 分区 topic 的 `/partitioned-stats` 顶层一般给出聚合订阅，但部分 broker
+    /// 只把消费者挂在 partitions 的各分区里。两处都收，按订阅 + 消费者名 +
+    /// 连接信息去重，免得同一条连接在顶层和分区里各算一次。
+    pub fn flattened_consumers(&self) -> Vec<ConsumerStats> {
+        let mut out: Vec<ConsumerStats> = Vec::new();
+        let mut seen: std::collections::HashSet<(String, String, Option<String>, Option<String>)> =
+            std::collections::HashSet::new();
+        let candidates = self
+            .all_consumers()
+            .into_iter()
+            .chain(self.partitions.values().flat_map(TopicStats::all_consumers));
+        for item in candidates {
+            let key = (
+                item.subscription.clone(),
+                item.consumer_name.clone(),
+                item.address.clone(),
+                item.connected_since.clone(),
+            );
+            if seen.insert(key) {
                 out.push(item);
             }
         }

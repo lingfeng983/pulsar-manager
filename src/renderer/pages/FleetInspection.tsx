@@ -3,7 +3,7 @@ import {Alert, Button, InputNumber, Progress, Space, Table, Tag, Typography, mes
 import {DownloadOutlined, ReloadOutlined, SafetyCertificateOutlined} from '@ant-design/icons';
 import PageShell from '../components/common/PageShell';
 import StateBlock from '../components/common/StateBlock';
-import {downloadBlob} from '../utils/download';
+import {saveTextFile} from '../utils/saveFile';
 import {useTabStore} from '../store/tabs';
 import {inspectionTab} from '../utils/tabIds';
 import {
@@ -144,11 +144,20 @@ const FleetInspection: React.FC<Props> = () => {
         }
     }, [limit]);
 
-    const handleExport = useCallback(() => {
+    const handleExport = useCallback(async () => {
         if (!summary) {
             return;
         }
-        downloadBlob(renderFleetMarkdown(summary), summaryFileName(summary.totals), 'text/markdown;charset=utf-8');
+        const result = await saveTextFile(
+            renderFleetMarkdown(summary),
+            summaryFileName(summary.totals),
+            '导出巡检报告',
+        );
+        if (result.error) {
+            message.error(result.error);
+        } else if (!result.cancelled) {
+            message.success(`报告已导出到 ${result.path}`);
+        }
     }, [summary]);
 
     const totals = summary?.totals;
@@ -273,7 +282,7 @@ const FleetInspection: React.FC<Props> = () => {
                     <Button icon={<ReloadOutlined />} onClick={() => void load()} disabled={running}>
                         刷新
                     </Button>
-                    <Button icon={<DownloadOutlined />} disabled={!summary} onClick={handleExport}>
+                    <Button icon={<DownloadOutlined />} disabled={!summary} onClick={() => void handleExport()}>
                         导出 Markdown
                     </Button>
                     <Button

@@ -40,7 +40,7 @@ import MessageListView from '../components/message/MessageListView';
 import MessageDetailModal from '../components/message/MessageDetailModal';
 import {buildMessagesExport, messagesExportFilename} from '../components/message/exportMessages';
 import {DEFAULT_STREAM_LIMIT, useMessageStream} from '../components/message/useMessageStream';
-import {downloadBlob} from '../utils/download';
+import {saveTextFile} from '../utils/saveFile';
 import {formatBytes} from '../utils/format';
 import {useSettingsStore} from '../store/settings';
 
@@ -651,13 +651,18 @@ const ConsumerWorkspace: React.FC<ConsumerWorkspaceProps> = ({
         }
     };
 
-    const doExport = (format: 'json' | 'csv') => {
+    const doExport = async (format: 'json' | 'csv') => {
         if (messages.length === 0) {
             message.warning('当前会话还没有收到消息');
             return;
         }
         const payload = buildMessagesExport(messages, format);
-        downloadBlob(payload.content, messagesExportFilename(topic, format), payload.mimeType);
+        const result = await saveTextFile(payload.content, messagesExportFilename(topic, format), '导出消息');
+        if (result.error) {
+            message.error(result.error);
+        } else if (!result.cancelled) {
+            message.success(`已导出 ${messages.length} 条消息到 ${result.path}`);
+        }
     };
 
     return (
@@ -894,10 +899,10 @@ const ConsumerWorkspace: React.FC<ConsumerWorkspaceProps> = ({
                                 </Button>
                             </Popconfirm>
                         )}
-                        <Button size="small" icon={<DownloadOutlined />} onClick={() => doExport('json')}>
+                        <Button size="small" icon={<DownloadOutlined />} onClick={() => void doExport('json')}>
                             导出 JSON
                         </Button>
-                        <Button size="small" icon={<DownloadOutlined />} onClick={() => doExport('csv')}>
+                        <Button size="small" icon={<DownloadOutlined />} onClick={() => void doExport('csv')}>
                             导出 CSV
                         </Button>
                         <Button

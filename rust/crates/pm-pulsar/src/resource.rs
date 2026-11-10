@@ -979,6 +979,9 @@ fn parse_stats(
     }
     stats.owner_brokers = owners;
     stats.partition_list = partition_uris;
+    // 概览页的「消费者」表格读的是顶层 consumers，而 broker 只把消费者挂在
+    // 订阅（以及分区统计的订阅）下面。这里摊平一次，渲染层不必再拼装。
+    stats.consumers = stats.flattened_consumers();
     Ok(stats)
 }
 
@@ -1089,5 +1092,54 @@ mod tests {
         assert!(!PulsarVersion::parse("4.0.0")
             .unwrap()
             .needs_delete_schema_param());
+    }
+
+    // 概览页消费者表格读的是顶层 consumers：订阅里的要摊平，分区统计里
+    // 只出现一次的连接也要补进来，且不能因为顶层与分区都有而重复计数。
+    #[test]
+    fn parse_stats_flattens_consumers_from_subscriptions_and_partitions() {
+        let raw = serde_json::json!({
+            "subscriptions": {
+                "sub-a": {
+                    "type": "Shared",
+                    "consumers": [{"consumerName": "c1", "address": "10.0.0.1:1"}]
+                }
+            },
+            "partitions": {
+                "persistent://public/default/orders-partition-0": {
+                    "subscriptions": {
+                        "sub-a": {
+                            "type": "Shared",
+                            "consumers": [
+                                {"consumerName": "c1", "address": "10.0.0.1:1"},
+                                {"consumerName": "c2", "address": "10.0.0.2:1"}
+                            ]
+                        }
+                    }
+                }
+            }
+        });
+        let stats = parse_stats(
+            raw,
+            "public/default/orders".into(),
+            true,
+            vec!["persistent://public/default/orders-partition-0".into()],
+        )
+        .unwrap();
+        assert_eq!(stats.consumers.len(), 2);
+        let names: Vec<&str> = stats
+            .consumers
+            .iter()
+            .map(|consumer| consumer.consumer_name.as_str())
+            .collect();
+        assert!(names.contains(&"c1") && names.contains(&"c2"));
+        assert!(stats
+            .consumers
+            .iter()
+            .all(|consumer| consumer.subscription == "sub-a"));
+        assert!(stats
+            .consumers
+            .iter()
+            .all(|consumer| consumer.subscription_type.as_deref() == Some("Shared")));
     }
 }

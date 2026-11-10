@@ -670,8 +670,78 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
             }
         }
 
+        // ---------- 通用导出 ----------
+        // 渲染层每一处「导出」都走这条通道：位置由系统「另存为」决定，
+        // 不再让 WebView2 静默写进默认下载目录。内容由页面生成（JSON / CSV /
+        // Markdown），后台只负责弹对话框与写文件，不必认识格式。
+        "file:saveText" => save_text(&args).await,
+
         _ => return None,
     })
+}
+
+/// 保存一份文本到用户挑的位置。用户在对话框里取消时返回 `data: null`，
+/// 这不是失败——前端不该弹错误提示。
+async fn save_text(args: &[Value]) -> Value {
+    let payload = args.first().cloned().unwrap_or_else(|| json!({}));
+    let content = payload
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let filename = payload
+        .get("filename")
+        .and_then(Value::as_str)
+        .unwrap_or("export.txt")
+        .to_string();
+    let title = payload
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("导出文件")
+        .to_string();
+    let extension = std::path::Path::new(&filename)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let filter_label = if extension.is_empty() {
+        "所有文件".to_string()
+    } else {
+        format!("{} 文件", extension.to_uppercase())
+    };
+
+    let picked = tokio::task::spawn_blocking(move || {
+        let mut dialog = rfd::FileDialog::new()
+            .set_title(&title)
+            .set_file_name(&filename);
+        if !extension.is_empty() {
+            let extensions = [extension.as_str()];
+            dialog = dialog.add_filter(&filter_label, &extensions);
+        }
+        dialog.save_file()
+    })
+    .await;
+    let path = match picked {
+        Ok(None) => return json!({ "success": true, "data": null }),
+        Ok(Some(path)) => path,
+        Err(error) => {
+            return crate::bridge::fail(AppError::Other(format!("对话框失败：{error}")));
+        }
+    };
+
+    match std::fs::write(&path, content.as_bytes()) {
+        Ok(()) => json!({
+            "success": true,
+            "data": {
+                "path": path.display().to_string(),
+                "bytes": content.len(),
+            }
+        }),
+        Err(error) => crate::bridge::fail(AppError::Other(format!(
+            "写文件失败 {}：{error}",
+            path.display()
+        ))),
+    }
 }
 
 /// 导出一份日志包（操作日志 + 运行时日志文本）到用户选的位置。

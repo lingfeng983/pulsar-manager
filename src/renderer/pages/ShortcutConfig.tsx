@@ -4,7 +4,7 @@ import {DownloadOutlined, ReloadOutlined, UploadOutlined} from '@ant-design/icon
 import {GROUP_ORDER, COMMAND_BY_ID, COMMAND_CATALOG, type CommandId, type CommandMeta} from '../store/commands';
 import {useShortcutStore, resolveBinding, isDefaultBinding, findConflicts} from '../store/shortcuts';
 import {bindingFromEvent, formatBinding} from '../utils/keybinding';
-import {downloadBlob} from '../utils/download';
+import {saveTextFile} from '../utils/saveFile';
 import {PaneActiveContext} from '../hooks/useKeybindings';
 import PageShell from '../components/common/PageShell';
 import StateBlock from '../components/common/StateBlock';
@@ -101,9 +101,17 @@ const ShortcutConfig: React.FC = () => {
         return () => window.removeEventListener('keydown', handleKeyDown, true);
     }, [capturing, paneActive, platform, config, setBinding]);
 
-    const handleExport = () => {
-        downloadBlob(exportConfig(), `pulsar-manager-shortcuts_${platform}.json`);
-        message.success('配置已导出');
+    const handleExport = async () => {
+        const result = await saveTextFile(
+            exportConfig(),
+            `pulsar-manager-shortcuts_${platform}.json`,
+            '导出快捷键配置',
+        );
+        if (result.error) {
+            message.error(result.error);
+        } else if (!result.cancelled) {
+            message.success(`配置已导出到 ${result.path}`);
+        }
     };
 
     const handleImportFile = async (file: File) => {
@@ -229,7 +237,7 @@ const ShortcutConfig: React.FC = () => {
                     <Button icon={<UploadOutlined />} onClick={() => fileInputRef.current?.click()}>
                         导入配置
                     </Button>
-                    <Button icon={<DownloadOutlined />} onClick={handleExport}>
+                    <Button icon={<DownloadOutlined />} onClick={() => void handleExport()}>
                         导出配置
                     </Button>
                     <Button icon={<ReloadOutlined />} onClick={handleResetAll}>
