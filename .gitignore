@@ -34,3 +34,4 @@ rust/target/
 
 # 第三方桌面助手的工作目录（本机截图与记忆），与项目无关
 .workbuddy/
+.workbuddy-ai/
