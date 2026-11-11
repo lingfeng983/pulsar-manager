@@ -105,7 +105,11 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
             if method.ends_with("plan") {
                 settle(client.plan_namespace_sync(&source, &targets, &fields).await)
             } else {
-                settle(client.apply_namespace_sync(&source, &targets, &fields).await)
+                settle(
+                    client
+                        .apply_namespace_sync(&source, &targets, &fields)
+                        .await,
+                )
             }
         }
 
@@ -267,7 +271,9 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
             )
         }
         "worker:builtin:list" => settle(client.worker_builtins(&text(&params, "kind")).await),
-        "worker:builtin:reload" => settle(client.worker_reload_builtins(&text(&params, "kind")).await),
+        "worker:builtin:reload" => {
+            settle(client.worker_reload_builtins(&text(&params, "kind")).await)
+        }
 
         other => json!({
             "success": false,
@@ -330,7 +336,11 @@ fn build_runtime_config(params: &Value) -> Value {
     // 连接器没有单一输出字段：sink 的目的地在 configs 里，只有 source 叫 topicName
     let output = text(params, "output");
     if !output.is_empty() && kind != "sink" {
-        let key = if kind == "function" { "output" } else { "topicName" };
+        let key = if kind == "function" {
+            "output"
+        } else {
+            "topicName"
+        };
         map.insert(key.into(), json!(output));
     }
 
@@ -339,7 +349,10 @@ fn build_runtime_config(params: &Value) -> Value {
         map.insert("logTopic".into(), json!(log_topic));
     }
 
-    let parallelism = params.get("parallelism").and_then(Value::as_i64).unwrap_or(0);
+    let parallelism = params
+        .get("parallelism")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
     if parallelism > 1 {
         map.insert("parallelism".into(), json!(parallelism));
     }
@@ -366,7 +379,11 @@ fn build_runtime_config(params: &Value) -> Value {
 
     if let Some(config) = params.get("userConfig").and_then(Value::as_object) {
         if !config.is_empty() {
-            let key = if kind == "function" { "userConfig" } else { "configs" };
+            let key = if kind == "function" {
+                "userConfig"
+            } else {
+                "configs"
+            };
             map.insert(key.into(), Value::Object(config.clone()));
         }
     }

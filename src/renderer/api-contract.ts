@@ -1,4 +1,4 @@
-// 前后端契约的唯一真源：150 个方法的名称、参数顺序与返回类型都写在这里。
+// 前后端契约的唯一真源：157 个 invoke 通道的名称、参数顺序与返回类型都写在这里。
 //
 // 前身是 Electron 的 src/preload.ts 加一份代码生成器（把 ipcRenderer.invoke 换成
 // transport.invoke）。Electron 侧删除后，生成的那份就是实际在跑的那份，于是把它
@@ -151,6 +151,14 @@ export interface UpdateProgress {
     attempts?: number;
 }
 
+/**
+ * 启动期非致命告警。密钥文件损坏被迫轮换时，已存集群的认证参数与通知渠道密钥会
+ * 解不开，后台不能让应用起不来，但也不能一声不吭——界面在启动后读它并提示用户。
+ */
+export interface RuntimeWarnings {
+    warning: string | null;
+}
+
 // 通道名在这里写死，并用 shared/types 的字面量类型钉住：那边改名这边就编译失败。
 // Rust 侧的 rpc 分发按同一个字符串匹配，两边不同步不会让 typecheck 报错，只会在运行时
 // 变成「未知方法」，所以把一致性押在类型上而不是押在人工比对上。
@@ -164,6 +172,10 @@ const ALERT_EVENT_CHANNEL: typeof import('../shared/types').ALERT_EVENT_CHANNEL 
 const INSPECTION_SCHEDULE_CHANNEL: typeof import('../shared/types').INSPECTION_SCHEDULE_CHANNEL =
     'inspection:scheduled';
 const INSPECTION_FLEET_CHANNEL: typeof import('../shared/types').INSPECTION_FLEET_CHANNEL = 'inspection:fleet-progress';
+// update:progress 是唯一走手写 on/off 配对的事件（其余都走 subscribe）：它要兼容
+// 老版 (event, payload) 双参回调，所以没有对应的 shared 常量，在这里单独写死一次，
+// 别让它散落在字符串字面量里。
+const UPDATE_PROGRESS_CHANNEL = 'update:progress';
 
 // 后台 → 页面的下行订阅。返回反订阅闭包：组件卸载时必须能摘掉监听，
 // 否则切了标签页还在往旧组件推数据。载荷只允许纯 JSON。
@@ -172,8 +184,8 @@ export interface BridgeTransport {
     /** 一次请求-响应：通道名（`域:方法`）+ 位置参数，返回已解包的 payload。 */
     invoke: (channel: string, ...args: unknown[]) => Promise<unknown>;
     /** 少数订阅是手写的 on/off 配对，签名保留 (event, payload) 两参形式以复用页面代码。 */
-    on: (channel: string, listener: (...args: any[]) => void) => void;
-    off: (channel: string, listener: (...args: any[]) => void) => void;
+    on: (channel: string, listener: (...args: unknown[]) => void) => void;
+    off: (channel: string, listener: (...args: unknown[]) => void) => void;
     /** 后台 → 页面的事件推送，返回反订阅闭包。 */
     subscribe: <T>(channel: string, callback: (payload: T) => void) => () => void;
 }
@@ -669,6 +681,12 @@ export function createBridge(transport: BridgeTransport) {
             disconnect: (forwardId: string) => transport.invoke('k8s:disconnect', forwardId),
         },
 
+        // 启动期诊断：后台把非致命问题（凭据密钥被迫轮换等）攒在 AppContext 里，
+        // 界面启动后读一次并提示；失败时不影响应用继续跑。
+        system: {
+            runtimeWarnings: () => transport.invoke('system:runtimeWarnings'),
+        },
+
         // 主题
         theme: {
             set: (theme: string) => transport.invoke('theme:set', theme),
@@ -732,8 +750,8 @@ export function createBridge(transport: BridgeTransport) {
             install: () => transport.invoke('update:install'),
             onProgress: (callback: (progress: UpdateProgress) => void) => {
                 const listener = (_event: unknown, progress: unknown) => callback(progress as UpdateProgress);
-                transport.on('update:progress', listener);
-                return () => transport.off('update:progress', listener);
+                transport.on(UPDATE_PROGRESS_CHANNEL, listener);
+                return () => transport.off(UPDATE_PROGRESS_CHANNEL, listener);
             },
         },
     };
@@ -1132,6 +1150,9 @@ declare global {
                     config: K8sForwardConfig,
                 ) => Promise<APIResponse<{forwardId: string; localAdminPort: number; localBrokerPort: number}>>;
                 disconnect: (forwardId: string) => Promise<APIResponse<void>>;
+            };
+            system: {
+                runtimeWarnings: () => Promise<APIResponse<RuntimeWarnings>>;
             };
             theme: {
                 set: (theme: string) => Promise<APIResponse<void>>;

@@ -1,5 +1,17 @@
 import {create} from 'zustand';
+import {message} from 'antd';
 import type {AppSettings, FontSizeLevel} from '../types';
+
+// 启动期 load 可能被多处触发（首屏 + 各页签挂载），同一个读取故障只弹一次，
+// 避免刷出一排相同的 toast；这是模块级状态，整个应用生命周期内去重。
+let loadFailureNotified = false;
+function notifyLoadFailure(): void {
+    if (loadFailureNotified) {
+        return;
+    }
+    loadFailureNotified = true;
+    message.error('读取应用设置失败，已按默认设置显示');
+}
 
 // 默认值与主进程 app-config 里的 APP_CONFIG_DEFAULTS 必须一致：
 // 这里只是 IPC 失败时的兜底显示，真正生效的取值始终由主进程读库给出。
@@ -53,6 +65,8 @@ export const useSettingsStore = create<SettingsState>(set => ({
         } catch {
             // 落到下面的 ready:true，界面按默认值显示
         }
+        // success:false 或 transport 异常都按失败处理：提示用户，再按默认值显示。
+        notifyLoadFailure();
         set({ready: true});
     },
 

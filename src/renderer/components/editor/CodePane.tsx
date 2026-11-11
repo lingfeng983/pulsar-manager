@@ -5,6 +5,7 @@ import {
     useImperativeHandle,
     useRef,
     useState,
+    type KeyboardEvent as ReactKeyboardEvent,
     type MouseEvent as ReactMouseEvent,
 } from 'react';
 import {Compartment, EditorState} from '@codemirror/state';
@@ -46,6 +47,8 @@ interface CodePaneProps {
     resizable?: boolean;
     /** 给了就把高度存进 localStorage，重开页签不回到默认值。 */
     storageKey?: string;
+    /** 高度跟随父容器而非固定像素，给可整体缩放的弹框里的正文用。与 resizable 互斥。 */
+    fluid?: boolean;
     onChange?: (value: string) => void;
 }
 
@@ -64,6 +67,18 @@ function readStoredHeight(key: string | undefined, fallback: number): number {
     }
 }
 
+// 鼠标拖完与方向键调完写同一份持久化，避免两套写盘逻辑漂开。
+function persistHeight(key: string | undefined, value: number): void {
+    if (!key) {
+        return;
+    }
+    try {
+        localStorage.setItem(key, String(value));
+    } catch {
+        // 存不下就只丢持久化，本次调整的高度照常生效
+    }
+}
+
 function languageExtension(kind: PayloadKind) {
     if (kind === 'json') {
         return [json(), jsonHighlight];
@@ -78,12 +93,13 @@ function languageExtension(kind: PayloadKind) {
 // 高度钉在 '&' 上并让 scroller 自己滚：不给的话编辑器按内容长高，
 // 在 flex 容器里就是每敲一行整页跳一次。走 Compartment 是为了拖动改高度时
 // 只换这一条主题，不重建编辑器（重建会丢撤销历史与光标）。
-function heightTheme(px: number) {
-    return EditorView.theme({'&': {height: `${px}px`}, '.cm-scroller': {overflow: 'auto'}});
+// fluid 时父容器（弹框正文区）已经给出确定高度，编辑器跟着 100% 即可随弹框一起缩放。
+function heightTheme(px: number, fluid: boolean) {
+    return EditorView.theme({'&': {height: fluid ? '100%' : `${px}px`}, '.cm-scroller': {overflow: 'auto'}});
 }
 
 const CodePane = forwardRef<CodePaneHandle, CodePaneProps>(function CodePane(
-    {value, kind, ariaLabel, height = 320, editable = false, resizable = false, storageKey, onChange},
+    {value, kind, ariaLabel, height = 320, editable = false, resizable = false, storageKey, fluid = false, onChange},
     ref,
 ) {
     const hostRef = useRef<HTMLDivElement | null>(null);
@@ -125,7 +141,7 @@ const CodePane = forwardRef<CodePaneHandle, CodePaneProps>(function CodePane(
                     EditorView.lineWrapping,
                     EditorView.editable.of(editable),
                     EditorState.readOnly.of(!editable),
-                    heightCompartment.current.of(heightTheme(paneHeightRef.current)),
+                    heightCompartment.current.of(heightTheme(paneHeightRef.current, fluid)),
                     languageCompartment.current.of(languageExtension(initialKind.current)),
                     EditorView.updateListener.of(update => {
                         if (update.docChanged) {
@@ -173,8 +189,8 @@ const CodePane = forwardRef<CodePaneHandle, CodePaneProps>(function CodePane(
     }, [kind]);
 
     useEffect(() => {
-        viewRef.current?.dispatch({effects: [heightCompartment.current.reconfigure(heightTheme(paneHeight))]});
-    }, [paneHeight]);
+        viewRef.current?.dispatch({effects: [heightCompartment.current.reconfigure(heightTheme(paneHeight, fluid))]});
+    }, [paneHeight, fluid]);
 
     // 卸载时若还拖着，收回全局样式与监听（和侧边栏拖宽同一套做法）
     useEffect(() => () => dragCleanupRef.current?.(), []);
@@ -197,13 +213,7 @@ const CodePane = forwardRef<CodePaneHandle, CodePaneProps>(function CodePane(
                 window.removeEventListener('blur', cleanup);
                 document.body.style.userSelect = '';
                 document.body.style.cursor = '';
-                if (storageKey) {
-                    try {
-                        localStorage.setItem(storageKey, String(paneHeightRef.current));
-                    } catch {
-                        // 存不下就只丢持久化，本次拖动的高度照常生效
-                    }
-                }
+                persistHeight(storageKey, paneHeightRef.current);
             };
             dragCleanupRef.current = cleanup;
             document.body.style.userSelect = 'none';
@@ -215,6 +225,22 @@ const CodePane = forwardRef<CodePaneHandle, CodePaneProps>(function CodePane(
         },
         [storageKey],
     );
+
+    // 方向键等价物：底边把手只用鼠标拖的话，键盘用户改不了高度。
+    // 只上下调 paneHeight（ns-resize 是单维），步长 20px，与鼠标同样夹在
+    // RESIZE_MIN/MAX 内并写回 storageKey。
+    const handleResizeKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+        const step = 20;
+        const delta = event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0;
+        if (!delta) {
+            return;
+        }
+        event.preventDefault();
+        const next = Math.min(RESIZE_MAX, Math.max(RESIZE_MIN, paneHeightRef.current + delta));
+        paneHeightRef.current = next; // 连按时 render 未必跟上，先把 ref 同步掉
+        setPaneHeight(next);
+        persistHeight(storageKey, next);
+    };
 
     useImperativeHandle(
         ref,
@@ -245,6 +271,11 @@ const CodePane = forwardRef<CodePaneHandle, CodePaneProps>(function CodePane(
         [],
     );
 
+    // fluid 的宿主高度交给外层 flex 决定，底边拖动条在这种模式下没有意义（拖的是像素高度），
+    // 所以两者互斥时直接渲染纯宿主。
+    if (fluid) {
+        return <div className="json-editor" ref={hostRef} style={{height: '100%'}} />;
+    }
     if (!resizable) {
         return <div className="json-editor" ref={hostRef} style={{height: paneHeight}} />;
     }
@@ -256,7 +287,13 @@ const CodePane = forwardRef<CodePaneHandle, CodePaneProps>(function CodePane(
                 title="按住上下拖动调整高度"
                 aria-label={`${ariaLabel} 高度调节`}
                 role="separator"
+                tabIndex={0}
+                aria-orientation="horizontal"
+                aria-valuemin={RESIZE_MIN}
+                aria-valuemax={RESIZE_MAX}
+                aria-valuenow={paneHeight}
                 onMouseDown={handleResizeStart}
+                onKeyDown={handleResizeKeyDown}
             />
         </div>
     );

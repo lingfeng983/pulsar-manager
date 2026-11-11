@@ -42,7 +42,9 @@ fn hits() -> &'static std::sync::Mutex<HashMap<String, i64>> {
 
 /// 规则改了阈值/口径/连续次数，或规则被删掉时调用。
 pub fn reset_hits(rule_id: Option<&str>) {
-    let mut map = hits().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut map = hits()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     match rule_id {
         Some(id) => {
             map.remove(id);
@@ -195,7 +197,9 @@ fn apply_sample(context: &Shared, rule: &AlertRule, value: f64) {
 }
 
 fn bump_hit(rule_id: &str) -> i64 {
-    let mut map = hits().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut map = hits()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let counter = map.entry(rule_id.to_string()).or_insert(0);
     *counter += 1;
     *counter
@@ -218,7 +222,11 @@ fn scope_label(rule: &AlertRule) -> String {
     match rule.scope.as_str() {
         "topic" => format!(
             "{}://{}/{}/{}",
-            if rule.persistent { "persistent" } else { "non-persistent" },
+            if rule.persistent {
+                "persistent"
+            } else {
+                "non-persistent"
+            },
             rule.tenant,
             rule.namespace,
             rule.topic
@@ -260,7 +268,11 @@ fn notify_alert(context: &Shared, rule: &AlertRule, event: &pm_core::AlertEvent,
         )
     };
     let input = pm_services::notify_center::NotifyInput::new(
-        if kind == "fired" { "alertFired" } else { "alertRecovered" },
+        if kind == "fired" {
+            "alertFired"
+        } else {
+            "alertRecovered"
+        },
         level,
         title,
         text,
@@ -314,7 +326,11 @@ async fn inspection_tick(context: &Shared, state: &mut State) {
     let schedules = pm_store::inspections::enabled_schedules(&context.store).unwrap_or_default();
     for schedule in schedules {
         let now = pm_core::now_ms();
-        if !is_due(schedule.last_run_at.as_deref(), schedule.interval_minutes, now) {
+        if !is_due(
+            schedule.last_run_at.as_deref(),
+            schedule.interval_minutes,
+            now,
+        ) {
             continue;
         }
         run_scheduled(context, &schedule).await;
@@ -343,20 +359,37 @@ async fn run_scheduled(context: &Shared, schedule: &pm_core::InspectionSchedule)
 
     let result = crate::rpc::inspect::execute_scheduled(context, &schedule.cluster_id).await;
     let report: InspectionReport = match result {
-        Ok(value) => match serde_json::from_value(
-            value.get("report").cloned().unwrap_or(Value::Null),
-        ) {
-            Ok(report) => report,
-            Err(error) => {
-                mark_failed(context, schedule, &ran_at, &format!("报告解析失败：{error}"));
-                emit_failed(context, &cluster.name, &schedule.cluster_id, "报告解析失败", &ran_at);
-                return;
+        Ok(value) => {
+            match serde_json::from_value(value.get("report").cloned().unwrap_or(Value::Null)) {
+                Ok(report) => report,
+                Err(error) => {
+                    mark_failed(
+                        context,
+                        schedule,
+                        &ran_at,
+                        &format!("报告解析失败：{error}"),
+                    );
+                    emit_failed(
+                        context,
+                        &cluster.name,
+                        &schedule.cluster_id,
+                        "报告解析失败",
+                        &ran_at,
+                    );
+                    return;
+                }
             }
-        },
+        }
         Err(error) => {
             let reason = error.to_string();
             mark_failed(context, schedule, &ran_at, &reason);
-            emit_failed(context, &cluster.name, &schedule.cluster_id, &reason, &ran_at);
+            emit_failed(
+                context,
+                &cluster.name,
+                &schedule.cluster_id,
+                &reason,
+                &ran_at,
+            );
             // 同一句失败原因只发一次：一台关着的集群每轮都往群里发，第三天就没人看了
             if schedule.last_error.as_deref() != Some(reason.as_str()) {
                 dispatch_inspection_failure(context, &cluster.name, &schedule.cluster_id, &reason);
@@ -368,7 +401,13 @@ async fn run_scheduled(context: &Shared, schedule: &pm_core::InspectionSchedule)
     let crit = report.totals.crit;
     let kind = notice_kind(crit, schedule.last_notified_crit);
     let message = match kind {
-        Some(kind) => notice_text(kind, &cluster.name, crit, schedule.last_notified_crit, report.totals.warn),
+        Some(kind) => notice_text(
+            kind,
+            &cluster.name,
+            crit,
+            schedule.last_notified_crit,
+            report.totals.warn,
+        ),
         None => format!(
             "{}：定时巡检完成，严重 {} 项、关注 {} 项",
             cluster.name, crit, report.totals.warn
@@ -428,7 +467,12 @@ async fn run_scheduled(context: &Shared, schedule: &pm_core::InspectionSchedule)
     }
 }
 
-fn mark_failed(context: &Shared, schedule: &pm_core::InspectionSchedule, ran_at: &str, error: &str) {
+fn mark_failed(
+    context: &Shared,
+    schedule: &pm_core::InspectionSchedule,
+    ran_at: &str,
+    error: &str,
+) {
     // 连不上也要把 last_run_at 写下去：不写的话下一轮又会试一次，
     // 一台关着的集群会被应用每分钟敲一次门
     if let Err(failure) = pm_store::inspections::mark_run(
@@ -457,7 +501,12 @@ fn emit_failed(context: &Shared, cluster_name: &str, cluster_id: &str, reason: &
     );
 }
 
-fn dispatch_inspection_failure(context: &Shared, cluster_name: &str, cluster_id: &str, reason: &str) {
+fn dispatch_inspection_failure(
+    context: &Shared,
+    cluster_name: &str,
+    cluster_id: &str,
+    reason: &str,
+) {
     let context = context.clone();
     let cluster_name = cluster_name.to_string();
     let cluster_id = cluster_id.to_string();
@@ -504,9 +553,9 @@ pub fn notice_text(
 ) -> String {
     match kind {
         "fired" => format!("{cluster_name}：巡检判出 {crit} 项严重（关注 {warn} 项）"),
-        "worsened" => format!(
-            "{cluster_name}：严重项从 {last_notified} 增加到 {crit}（关注 {warn} 项）"
-        ),
+        "worsened" => {
+            format!("{cluster_name}：严重项从 {last_notified} 增加到 {crit}（关注 {warn} 项）")
+        }
         "improved" => format!("{cluster_name}：严重项从 {last_notified} 降到 {crit}，还没归零"),
         _ => format!("{cluster_name}：巡检严重项已归零（关注 {warn} 项）"),
     }

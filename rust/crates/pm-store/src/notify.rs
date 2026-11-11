@@ -26,7 +26,8 @@ fn map_channel(row: &rusqlite::Row<'_>) -> rusqlite::Result<NotifyChannel> {
     })
 }
 
-const CHANNEL_COLUMNS: &str = "id, name, kind, url_enc, secret_enc, mail_profile_id, recipients, enabled, \
+const CHANNEL_COLUMNS: &str =
+    "id, name, kind, url_enc, secret_enc, mail_profile_id, recipients, enabled, \
      min_level, events_json, timeout_ms, rate_per_minute, last_sent_at, last_error, fail_count, \
      created_at, updated_at";
 

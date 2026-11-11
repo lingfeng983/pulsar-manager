@@ -246,7 +246,10 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
             // 会被丢掉（保存时就表现为 name/serviceUrl 缺失）。所以校验用 validateFields，
             // 取值用整个 store。
             await form.validateFields();
-            allValues = form.getFieldsValue(true) as unknown as ClusterConfig;
+            // getFieldsValue(true) 在 rc-field-form 里返回 any：分步校验通过后，各步骤
+            // 字段合起来就是一份完整的 ClusterConfig。用单重断言收窄到真实类型，
+            // 不再走 as unknown as 的双重逃逸（any 到具体类型本就直接兼容）。
+            allValues = form.getFieldsValue(true) as ClusterConfig;
         } catch (error) {
             // 校验失败时字段下方已有红字提示，不要再叠一条全局 message
             if (error && typeof error === 'object' && 'errorFields' in error) {
@@ -303,12 +306,32 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
         // 「测试 SSH 隧道」建立的转发是真实占着本地端口的活动连接，弹窗关掉不等于
         // 断开；只有编辑已有集群且隧道就是它自己那条时才留着（保存后还要用）。
         const testTunnelId = form.getFieldValue('sshConfigId');
+        // disconnect 走 fire-and-forget（关弹窗不等待），但 rpc 失败只体现在
+        // success:false，空 catch 会把「端口没释放」静默吞掉，这里补成 warn。
         if (typeof testTunnelId === 'string' && testTunnelId && testTunnelId !== editingCluster?.sshConfigId) {
-            void window.electronAPI.ssh.disconnect(testTunnelId).catch(() => {});
+            void window.electronAPI.ssh
+                .disconnect(testTunnelId)
+                .then(response => {
+                    if (!response.success) {
+                        console.warn(`[ssh] 断开测试隧道失败：${response.error || '未知错误'}`);
+                    }
+                })
+                .catch((error: unknown) => {
+                    console.warn('[ssh] 断开测试隧道异常', error);
+                });
         }
         const testForwardId = form.getFieldValue('k8sConfigId');
         if (typeof testForwardId === 'string' && testForwardId && testForwardId !== editingCluster?.k8sConfigId) {
-            void window.electronAPI.k8s.disconnect(testForwardId).catch(() => {});
+            void window.electronAPI.k8s
+                .disconnect(testForwardId)
+                .then(response => {
+                    if (!response.success) {
+                        console.warn(`[k8s] 断开测试转发失败：${response.error || '未知错误'}`);
+                    }
+                })
+                .catch((error: unknown) => {
+                    console.warn('[k8s] 断开测试转发异常', error);
+                });
         }
         form.resetFields();
         setTestResult(null);

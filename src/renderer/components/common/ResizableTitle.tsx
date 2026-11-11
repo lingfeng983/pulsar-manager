@@ -22,7 +22,9 @@ const ResizableTitle: React.FC<ResizableTitleProps> = ({onResize, width, classNa
             width={width}
             height={0}
             axis="x"
-            minConstraints={[60, 0]}
+            // 最小列宽必须不高于最窄的初始列宽（MessageListView 里有 48/56px 的列），
+            // 否则第一次拖拽就会被 clamp 到 60，列宽凭空从 48 跳到 60。
+            minConstraints={[40, 0]}
             maxConstraints={[900, 0]}
             onResize={onResize}
             // Resizable 是 cloneElement 把 className 写回子元素，而且是覆盖不是合并，

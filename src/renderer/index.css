@@ -10,6 +10,10 @@
     /* 危险语义的**文字色**：--color-danger 是给边框/图标/按钮底的，压到 12px 正文上
        只有 3.71:1。文字用更深一档，5.57:1。 */
     --color-danger-text: #cf1322;
+    /* 成功/警告语义色是给状态点、边框、按钮底用的：#00b42a 白底仅 2.28:1、
+       #ff7d00 仅 2.55:1，压到 12~14px 正文上读不清。文字各取更深一档，白底均过 4.5:1。 */
+    --color-success-text: #087f2c;
+    --color-warning-text: #a64d00;
 
     --color-bg-base: #ffffff;
     --color-bg-secondary: #f2f3f5;
@@ -75,6 +79,9 @@
     --color-danger: #ff4d4f;
     --color-info: #86909c;
     --color-danger-text: #ff7875;
+    /* 暗色底上反过来取更亮的一档，文字才不与 #17171a 背景糊在一起 */
+    --color-success-text: #5ce08a;
+    --color-warning-text: #ffc266;
 
     --color-bg-base: #17171a;
     --color-bg-secondary: #232327;
@@ -102,6 +109,9 @@
     --color-danger: #e86452;
     --color-info: #8a8a8a;
     --color-danger-text: #b03a2e;
+    /* 护眼底是浅米色，语义色 #5ad8a6 / #f6bd16 在这块底色上几乎看不见，文字同样压深 */
+    --color-success-text: #076528;
+    --color-warning-text: #8a4b00;
 
     --color-bg-base: #f5f5dc;
     --color-bg-secondary: #e8e8d0;
@@ -273,6 +283,41 @@ pre,
 /* 顶部指标行：排布同提示行，但数值是正文级读数，跟着提示文字一起缩小就读不出了 */
 .metric-line strong {
     font-size: var(--font-size-md);
+}
+
+/* 消息浏览器的第一行：左边是「起始位置 / 限量」等会话参数，右边是条数统计、
+   筛选按钮与筛选标签。原来这两组各占一行，数字与入口离得远还多吃了 20 多像素。
+   严格保持一行（窄窗口尤其订阅消费模式控件多时统计组也不许折到第二行）：
+   会话参数那组可收缩、由它内部的 antd Space 自己 wrap，统计组钉住不缩。 */
+.stream-toolbar {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: var(--spacing-xs) var(--spacing-md);
+    margin-bottom: var(--spacing-sm);
+}
+
+/* 会话参数的 Space：min-width:0 才允许被压到比内容窄，flex:1 1 auto 吃掉剩余宽度，
+   放不下的控件在它内部换行，整条工具栏仍是单行。 */
+.stream-controls {
+    min-width: 0;
+    flex: 1 1 auto;
+}
+
+.stream-toolbar-summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--spacing-xs) var(--spacing-sm);
+    flex: 0 0 auto;
+    margin-left: auto;
+    font-size: var(--font-size-xs);
+    color: var(--color-text-secondary);
+}
+
+.stream-toolbar-summary strong {
+    font-weight: 600;
+    color: var(--color-text-primary);
 }
 
 /* 图例并入提示行右侧：色点与拓扑节点同形，比矩形 Tag 省一截高度 */
@@ -538,7 +583,8 @@ pre,
 }
 
 .context-menu-item-danger {
-    color: var(--color-danger);
+    /* 菜单项是 14px 正文：--color-danger 白底只有 3.7:1，用文字专用色才过 AA */
+    color: var(--color-danger-text);
 }
 
 .context-menu-item[aria-disabled='true'] {
@@ -548,8 +594,10 @@ pre,
 }
 
 /* Tag 没有可用的紧凑尺寸 token（组件 token 表里不暴露横向内边距），直接收 CSS。
-   状态标签在表格/详情里成排出现，8px 的左右留白乘以行数就是白丢的宽度。 */
-.ant-tag {
+   状态标签在表格/详情里成排出现，8px 的左右留白乘以行数就是白丢的宽度。
+   选择器特意叠成 .ant-tag.ant-tag(0,2,0)：单类与 antd cssinjs 的 :where(hash).ant-tag
+   同为 (0,1,0)，而 antd 样式是运行时注入、排在我们后面，同特异性下会被它盖掉。 */
+.ant-tag.ant-tag {
     padding-inline: var(--spacing-xs);
 }
 
@@ -629,6 +677,83 @@ pre,
 .code-pane-resize:hover::after,
 .code-pane-resize:active::after {
     background-color: var(--color-primary);
+}
+
+/* ===== 消息详情弹框：整体可缩放 =====
+   rc-dialog 的 height 落在 .ant-modal 根节点上，content 吃满它；正文区按 flex
+   吃掉剩余高度，CodePane 用 fluid 跟着一起长，放大才真的能多看到几行。 */
+.message-detail-modal.ant-modal {
+    top: 24px;
+    padding-bottom: 0;
+}
+
+.message-detail-modal .ant-modal-content {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+}
+
+.message-detail-modal .ant-modal-header {
+    flex: 0 0 auto;
+}
+
+.message-detail-modal .ant-modal-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    display: flex;
+    flex-direction: column;
+}
+
+.message-detail-title {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+}
+
+.message-detail-stack {
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+.message-detail-data {
+    flex: 1 1 auto;
+    min-height: 200px;
+    display: flex;
+    flex-direction: column;
+}
+
+.message-detail-code {
+    flex: 1 1 auto;
+    min-height: 120px;
+}
+
+/* 右下角的拖动把手挂在标题节点里而不是可滚动的 body 内：
+   ant-modal-content 是定位祖先，绝对定位不会落到 body 的滚动区里被裁掉。 */
+.message-detail-resize {
+    position: absolute;
+    right: 2px;
+    bottom: 2px;
+    width: 18px;
+    height: 18px;
+    cursor: nwse-resize;
+    z-index: 2;
+}
+
+.message-detail-resize::after {
+    content: '';
+    position: absolute;
+    right: 4px;
+    bottom: 4px;
+    width: 8px;
+    height: 8px;
+    border-right: 2px solid var(--color-text-tertiary);
+    border-bottom: 2px solid var(--color-text-tertiary);
+}
+
+.message-detail-resize:hover::after,
+.message-detail-resize:active::after {
+    border-color: var(--color-primary);
 }
 
 /* 占位符底色。用 color-mix 而不是写死的半透明 hex：主题改的是 --color-primary
@@ -926,7 +1051,8 @@ body.is-doc-resizing {
     writing-mode: vertical-rl;
     letter-spacing: 1px;
     color: var(--color-text-secondary);
-    font-size: 11px;
+    /* 走字号档位最小档，切到"小/特大"时这一列竖排标签也跟着变，不钉死 11px */
+    font-size: var(--font-size-xs);
 }
 
 .doc-kb-item-title {
@@ -1029,12 +1155,13 @@ body.is-doc-resizing {
 /* markdown 正文：标题、表格、代码块。这些元素由 marked 直接产出，不带 antd 的类名，
    所以样式只能在这里给足 —— 参数表一屏几十行，没有边框与行距就读不出来了。 */
 .doc-kb-body h1 {
-    font-size: 20px;
+    /* 标题跟着字号档位走：写死 20/17px 时切档位正文变了、标题纹丝不动 */
+    font-size: var(--font-size-xl);
     margin: var(--spacing-xxl) 0 var(--spacing-lg);
 }
 
 .doc-kb-body h2 {
-    font-size: 17px;
+    font-size: var(--font-size-lg);
     margin: var(--spacing-xxl) 0 var(--spacing-md);
     padding-bottom: var(--spacing-xs);
     border-bottom: 1px solid var(--color-border);
@@ -1170,7 +1297,9 @@ body.is-doc-resizing {
 .doc-kb-toc-item:focus-visible,
 .doc-kb-hit:focus-visible,
 .tree-resizer:focus-visible,
-.doc-kb-resizer:focus-visible {
+.doc-kb-resizer:focus-visible,
+.message-detail-resize:focus-visible,
+.code-pane-resize:focus-visible {
     outline: 2px solid var(--color-primary);
     outline-offset: -2px;
 }

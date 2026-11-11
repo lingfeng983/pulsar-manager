@@ -5,7 +5,7 @@ import type {EChartsOption} from 'echarts';
 import dayjs from 'dayjs';
 import {useClusterStore} from '../store/cluster';
 import {useSettingsStore} from '../store/settings';
-import {formatThroughput, toKilobytesPerSecond} from '../utils/format';
+import {formatThroughput, toKibibytesPerSecond} from '../utils/format';
 import {filterByLabel} from '../utils/textFilter';
 import {useTopologyPalette, type TopologyPalette} from '../utils/topologyColors';
 import {useFontFactor} from '../utils/fontScale';
@@ -206,7 +206,7 @@ const createThroughputBarOption = (
     xAxis: {type: 'category', data: data.map(d => d.time), ...seriesAxes(palette, scale)},
     yAxis: {
         type: 'value',
-        name: 'KB/s',
+        name: 'KiB/s',
         nameTextStyle: {color: palette.label, fontSize: Math.round(12 * scale)},
         ...seriesAxes(palette, scale),
     },
@@ -377,6 +377,8 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                 return;
             }
             // 落库不阻塞曲线：写失败（库被占、集群行已删）只是这一轮少个点，
+            // 但 rpc 失败只体现在 success:false（永不 reject），空 catch 等于静默吞掉。
+            // 用 console.warn 而不是 toast：这是每轮采样都跑的后台写入，不该刷屏。
             void window.electronAPI.metrics
                 .recordSnapshot({
                     clusterId: selectedCluster,
@@ -389,7 +391,14 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                     producers: sample.totalProducers,
                     consumers: sample.totalConsumers,
                 })
-                .catch(() => undefined);
+                .then(response => {
+                    if (!response.success) {
+                        console.warn(`[metrics] 写入快照失败：${response.error || '未知错误'}`);
+                    }
+                })
+                .catch((error: unknown) => {
+                    console.warn('[metrics] 写入快照异常', error);
+                });
         },
         [metricsSnapshotEnabled, selectedCluster],
     );
@@ -556,13 +565,24 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
                 limit: HISTORY_WINDOW,
             })
             .then(response => {
-                if (cancelled || !response.success || !response.data?.length) {
+                if (cancelled) {
+                    return;
+                }
+                // 读取失败也要出声：success:false 是 rpc 失败（永不 reject），
+                // 空数组只是「这段时间没有快照」，属正常情况，不算失败。
+                if (!response.success) {
+                    console.warn(`[metrics] 读取历史快照失败：${response.error || '未知错误'}`);
+                    return;
+                }
+                if (!response.data?.length) {
                     return;
                 }
                 const seeded = toHistory(response.data);
                 setMetricsHistory(prev => mergeHistory(seeded, prev));
             })
-            .catch(() => undefined);
+            .catch((error: unknown) => {
+                console.warn('[metrics] 读取历史快照异常', error);
+            });
         return () => {
             cancelled = true;
         };
@@ -624,9 +644,9 @@ const MetricsDashboard: React.FC<{clusterId?: string}> = ({clusterId}) => {
 
         return filteredIn.map(d => ({
             time: dayjs(d.timestamp).format(labelFormat),
-            // 源数据单位是字节/秒，图表轴标注的是 KB/s，这里必须换算
-            in: toKilobytesPerSecond(d.value),
-            out: toKilobytesPerSecond(outByTimestamp.get(d.timestamp) ?? 0),
+            // 源数据单位是字节/秒，图表轴标注的是 KiB/s，这里必须换算
+            in: toKibibytesPerSecond(d.value),
+            out: toKibibytesPerSecond(outByTimestamp.get(d.timestamp) ?? 0),
         }));
     }, [metricsHistory.throughputIn, metricsHistory.throughputOut, dateRange, filterMetricsByDateRange]);
 

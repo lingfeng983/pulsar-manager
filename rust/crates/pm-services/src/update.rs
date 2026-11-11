@@ -317,7 +317,9 @@ pub async fn check(
     let cached = read_cache(&cache_path);
 
     let mut request = client
-        .get(format!("{API_BASE}/repos/{OWNER}/{REPO}/releases?per_page={RELEASES_PER_PAGE}"))
+        .get(format!(
+            "{API_BASE}/repos/{OWNER}/{REPO}/releases?per_page={RELEASES_PER_PAGE}"
+        ))
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28");
     if !cached.etag.is_empty() {
@@ -359,7 +361,8 @@ pub async fn check(
             );
         }
         text
-    } else if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+    } else if status == reqwest::StatusCode::FORBIDDEN
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
     {
         // 403 有两种：限流，或者仓库真的读不到。用剩余额度区分，别把限流说成“仓库没了”。
         let remaining = header_u64(&headers, "x-ratelimit-remaining").unwrap_or(0);
@@ -382,13 +385,19 @@ pub async fn check(
     let items: Vec<serde_json::Value> = serde_json::from_str::<Vec<serde_json::Value>>(&body)
         .map_err(|error| UpdateError::Invalid(format!("解析发行版列表失败: {error}")))?;
     if items.is_empty() {
-        return Err(UpdateError::SourceUnavailable("仓库里还没有任何发行版".into()));
+        return Err(UpdateError::SourceUnavailable(
+            "仓库里还没有任何发行版".into(),
+        ));
     }
 
     // 只认稳定版：草稿与预发布直接跳过，tag 带 -rc/-beta 后缀的一并跳过。
     let mut best: Option<(String, &serde_json::Value)> = None;
     for item in &items {
-        if item.get("draft").and_then(serde_json::Value::as_bool).unwrap_or(false) {
+        if item
+            .get("draft")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
             continue;
         }
         if item
@@ -448,7 +457,10 @@ pub async fn check(
         .unwrap_or_default()
         .into_iter()
         .filter_map(|item| {
-            let name = item.get("name").and_then(serde_json::Value::as_str)?.to_string();
+            let name = item
+                .get("name")
+                .and_then(serde_json::Value::as_str)?
+                .to_string();
             if !name.to_lowercase().ends_with(".exe") {
                 return None;
             }
@@ -456,14 +468,19 @@ pub async fn check(
                 .get("browser_download_url")
                 .and_then(serde_json::Value::as_str)?
                 .to_string();
-            let size = item.get("size").and_then(serde_json::Value::as_i64).unwrap_or(0);
+            let size = item
+                .get("size")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0);
             Some((name.clone(), size, url, name.contains("安装包")))
         })
         .collect();
     // 同版本可能有多个 exe：优先名字含「安装包」的，再退化为最大的那个
     candidates.sort_by(|a, b| b.3.cmp(&a.3).then(b.1.cmp(&a.1)));
     let (file_name, size, url, _) = candidates.into_iter().next().ok_or_else(|| {
-        UpdateError::Invalid(format!("最新版本 {latest_version} 没有可下载的 exe 安装包附件"))
+        UpdateError::Invalid(format!(
+            "最新版本 {latest_version} 没有可下载的 exe 安装包附件"
+        ))
     })?;
     if !allowed_asset(&url) {
         return Err(UpdateError::Invalid(
@@ -472,11 +489,14 @@ pub async fn check(
     }
     let sha256 = sha256_from_notes(&notes).ok_or_else(|| {
         UpdateError::Invalid(
-            "该发行版的说明里没有 SHA256，无法校验安装包，请让发布方补上 SHA256 行后重新发布".into(),
+            "该发行版的说明里没有 SHA256，无法校验安装包，请让发布方补上 SHA256 行后重新发布"
+                .into(),
         )
     })?;
 
-    *pending().lock().unwrap() = Some(Pending {
+    *pending()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Pending {
         url: url.clone(),
         file_name: file_name.clone(),
         sha256,
@@ -568,7 +588,9 @@ async fn fetch_once(
             ));
         }
     } else {
-        return Err(DownloadFailure::Retryable(format!("安装包下载返回 HTTP {status}")));
+        return Err(DownloadFailure::Retryable(format!(
+            "安装包下载返回 HTTP {status}"
+        )));
     };
 
     if total > MAX_DOWNLOAD_BYTES {
@@ -582,11 +604,13 @@ async fn fetch_once(
             .append(true)
             .open(part_path)
             .await
-            .map_err(|error| DownloadFailure::Fatal(AppError::Other(format!("无法写入安装包：{error}"))))?
+            .map_err(|error| {
+                DownloadFailure::Fatal(AppError::Other(format!("无法写入安装包：{error}")))
+            })?
     } else {
-        tokio::fs::File::create(part_path)
-            .await
-            .map_err(|error| DownloadFailure::Fatal(AppError::Other(format!("无法写入安装包：{error}"))))?
+        tokio::fs::File::create(part_path).await.map_err(|error| {
+            DownloadFailure::Fatal(AppError::Other(format!("无法写入安装包：{error}")))
+        })?
     };
 
     let mut last_emit = std::time::Instant::now();
@@ -644,19 +668,27 @@ async fn fetch_once(
 pub async fn download(url: &str, dir: &Path, proxy: &str, emit: Emit) -> AppResult<String> {
     let target_info = pending()
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone()
         .ok_or_else(|| AppError::Other("请先检查更新，再下载安装包".into()))?;
     // 渲染层只提供它看到的 URL，真正的地址以检查结果为准
     if !url.trim().is_empty() && url != target_info.url {
-        return Err(AppError::Other("下载地址与最近一次检查结果不一致，请重新检查更新".into()));
+        return Err(AppError::Other(
+            "下载地址与最近一次检查结果不一致，请重新检查更新".into(),
+        ));
     }
 
     std::fs::create_dir_all(dir).map_err(AppError::from)?;
     let safe_name: String = target_info
         .file_name
         .chars()
-        .map(|ch| if ch.is_alphanumeric() || ch == '.' || ch == '-' || ch == '_' { ch } else { '_' })
+        .map(|ch| {
+            if ch.is_alphanumeric() || ch == '.' || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
         .collect();
     let final_path = dir.join(&safe_name);
     let part_path = dir.join(format!("{safe_name}.part"));
@@ -667,7 +699,15 @@ pub async fn download(url: &str, dir: &Path, proxy: &str, emit: Emit) -> AppResu
     let mut attempt = 0;
     loop {
         attempt += 1;
-        match fetch_once(&client, &target_info.url, &part_path, target_info.size, &emit).await {
+        match fetch_once(
+            &client,
+            &target_info.url,
+            &part_path,
+            target_info.size,
+            &emit,
+        )
+        .await
+        {
             Ok(_) => break,
             Err(DownloadFailure::Cancelled) => {
                 emit(
@@ -722,7 +762,9 @@ pub async fn download(url: &str, dir: &Path, proxy: &str, emit: Emit) -> AppResu
     tokio::fs::rename(&part_path, &final_path)
         .await
         .map_err(|e| AppError::Other(format!("安装包落盘失败：{e}")))?;
-    *last_file().lock().unwrap() = Some(final_path.clone());
+    *last_file()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(final_path.clone());
     emit(
         "update:progress",
         serde_json::json!({"received": target_info.size, "total": target_info.size, "done": true}),
@@ -737,7 +779,7 @@ pub async fn download(url: &str, dir: &Path, proxy: &str, emit: Emit) -> AppResu
 pub fn launch_installer() -> AppResult<String> {
     let file = last_file()
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone()
         .ok_or_else(|| AppError::Other("尚未下载完成，请先下载安装包".into()))?;
     if !file.exists() {
@@ -778,7 +820,14 @@ fn spawn_installer(installer: &Path, app: &Path) -> std::io::Result<()> {
     // 先试带重启的包装；PowerShell 不可用（被策略禁用、被裁掉）时退回直接启动安装器，
     // 用户需要自己再打开应用——但安装本身不能因此失败。
     let wrapped = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script])
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            &script,
+        ])
         .creation_flags(CREATE_NO_WINDOW)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -870,7 +919,11 @@ mod tests {
         let url = first.download_url.clone().expect("应当给出下载地址");
         assert!(allowed_asset(&url), "下载地址必须通过域名与协议校验: {url}");
         assert!(
-            first.file_name.as_deref().unwrap_or_default().ends_with(".exe"),
+            first
+                .file_name
+                .as_deref()
+                .unwrap_or_default()
+                .ends_with(".exe"),
             "附件必须是 exe"
         );
         assert!(first.size.unwrap_or(0) > 1024 * 1024, "安装包大小不合理");

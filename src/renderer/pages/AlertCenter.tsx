@@ -218,14 +218,22 @@ const AlertCenter: React.FC = () => {
         }
     };
 
-    const deleteSelected = async () => {
-        if (selected.length === 0) {
+    const deleteSelected = () => {
+        const ids = selected;
+        if (ids.length === 0) {
             return;
         }
-        if (await removeEvents(selected)) {
-            message.success(`已删除 ${selected.length} 条`);
-            setSelected([]);
-        }
+        // 与删规则一致：批量删事件也是不可逆动作，先过一次危险确认。
+        confirmDanger({
+            title: `删除选中的 ${ids.length} 条告警事件`,
+            description: '删除后不可恢复，无法找回。',
+            onOk: async () => {
+                if (await removeEvents(ids)) {
+                    message.success(`已删除 ${ids.length} 条`);
+                    setSelected([]);
+                }
+            },
+        });
     };
 
     const ruleColumns: ColumnsType<AlertRule> = [

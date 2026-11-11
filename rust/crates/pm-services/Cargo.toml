@@ -19,7 +19,6 @@ hex.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 lettre.workspace = true
-pulsar.workspace = true
 sha2.workspace = true
 url.workspace = true
 ed25519-dalek.workspace = true

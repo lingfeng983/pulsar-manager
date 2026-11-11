@@ -23,18 +23,53 @@ pub struct ConsumerSessionConfig {
     pub updated_at: String,
 }
 
-fn map(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConsumerSessionConfig> {
-    let config_json: String = row.get(5)?;
-    Ok(ConsumerSessionConfig {
+/// 只取原始列：query_map 的回调必须返回 `rusqlite::Result`，而 config_json 的
+/// JSON 解析要报成 `AppError`，所以拆成「取行」与「解析」两步。
+struct RawRow {
+    id: String,
+    cluster_id: String,
+    topic_uri: String,
+    subscription: String,
+    name: String,
+    config_json: String,
+    created_at: String,
+    updated_at: String,
+}
+
+fn map(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRow> {
+    Ok(RawRow {
         id: row.get(0)?,
         cluster_id: row.get(1)?,
         topic_uri: row.get(2)?,
         subscription: row.get(3)?,
         name: row.get(4)?,
-        config: serde_json::from_str(&config_json).unwrap_or(Value::Null),
+        config_json: row.get(5)?,
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
     })
+}
+
+impl RawRow {
+    fn into_config(self) -> AppResult<ConsumerSessionConfig> {
+        // config_json 是本地库里的草稿。解析失败说明这一行被写坏了，不能悄悄当成
+        // 空配置返回——那会让用户以为上次调好的订阅/批量参数凭空丢了。
+        let config: Value = serde_json::from_str(&self.config_json).map_err(|error| {
+            AppError::Storage(format!(
+                "消费配置「{}」的 config_json 损坏：{error}",
+                self.name
+            ))
+        })?;
+        Ok(ConsumerSessionConfig {
+            id: self.id,
+            cluster_id: self.cluster_id,
+            topic_uri: self.topic_uri,
+            subscription: self.subscription,
+            name: self.name,
+            config,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        })
+    }
 }
 
 const COLUMNS: &str =
@@ -42,7 +77,11 @@ const COLUMNS: &str =
 
 /// `topic_uri` 为空表示「该集群全部」；传了 topic 则取「这个 topic 能用的」，
 /// 即该 topic 自己的加上通用条目（topic_uri = ''）。
-pub fn list(store: &Store, cluster_id: &str, topic_uri: Option<&str>) -> AppResult<Vec<ConsumerSessionConfig>> {
+pub fn list(
+    store: &Store,
+    cluster_id: &str,
+    topic_uri: Option<&str>,
+) -> AppResult<Vec<ConsumerSessionConfig>> {
     store.with(|conn| {
         let base = format!("SELECT {COLUMNS} FROM consumer_session_configs");
         match topic_uri {
@@ -52,14 +91,16 @@ pub fn list(store: &Store, cluster_id: &str, topic_uri: Option<&str>) -> AppResu
                      ORDER BY name COLLATE NOCASE"
                 ))?;
                 let rows = stmt.query_map(params![cluster_id, topic], map)?;
-                Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+                let raws = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+                raws.into_iter().map(RawRow::into_config).collect()
             }
             None => {
                 let mut stmt = conn.prepare(&format!(
                     "{base} WHERE cluster_id = ?1 ORDER BY topic_uri, name COLLATE NOCASE"
                 ))?;
                 let rows = stmt.query_map([cluster_id], map)?;
-                Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+                let raws = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+                raws.into_iter().map(RawRow::into_config).collect()
             }
         }
     })
@@ -67,13 +108,14 @@ pub fn list(store: &Store, cluster_id: &str, topic_uri: Option<&str>) -> AppResu
 
 pub fn get(store: &Store, id: &str) -> AppResult<Option<ConsumerSessionConfig>> {
     store.with(|conn| {
-        Ok(conn
+        let raw: Option<RawRow> = conn
             .query_row(
                 &format!("SELECT {COLUMNS} FROM consumer_session_configs WHERE id = ?1"),
                 [id],
                 map,
             )
-            .optional()?)
+            .optional()?;
+        raw.map(RawRow::into_config).transpose()
     })
 }
 
@@ -154,7 +196,9 @@ pub fn duplicate(
     let mut copy = ConsumerSessionConfig {
         id: String::new(),
         cluster_id: source.cluster_id.clone(),
-        topic_uri: topic_uri.map(str::to_string).unwrap_or(source.topic_uri.clone()),
+        topic_uri: topic_uri
+            .map(str::to_string)
+            .unwrap_or(source.topic_uri.clone()),
         subscription: subscription
             .map(str::to_string)
             .unwrap_or(source.subscription.clone()),
@@ -170,7 +214,13 @@ pub fn duplicate(
             let base = format!("{} 副本", source.name);
             let mut candidate = base.clone();
             let mut index = 2;
-            while exists_name(store, &copy.cluster_id, &copy.topic_uri, &copy.subscription, &candidate)? {
+            while exists_name(
+                store,
+                &copy.cluster_id,
+                &copy.topic_uri,
+                &copy.subscription,
+                &candidate,
+            )? {
                 candidate = format!("{base} {index}");
                 index += 1;
             }
@@ -239,6 +289,24 @@ mod tests {
         save(&store, &draft("a")).unwrap();
         let error = save(&store, &draft("a")).unwrap_err();
         assert!(error.to_string().contains("同名"));
+    }
+
+    #[test]
+    fn corrupted_config_json_is_reported_instead_of_dropped() {
+        let store = store();
+        let id = save(&store, &draft("a")).unwrap();
+        // 模拟库里这一行被写坏：不能再悄悄当成空配置返回
+        store
+            .with(|conn| {
+                conn.execute(
+                    "UPDATE consumer_session_configs SET config_json = ?1 WHERE id = ?2",
+                    params!["{not-json", &id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let error = require(&store, &id).unwrap_err();
+        assert!(error.to_string().contains("损坏"), "{error}");
     }
 
     #[test]

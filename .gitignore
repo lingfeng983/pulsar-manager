@@ -17,6 +17,16 @@ release-backup-*/
 # SSH 隧道自检的临时主机密钥/证书，只在本机生成，严禁入库
 scripts/tunnel-selftest/certs/
 
+# 任何私钥、证书、凭据文件都不该入库。按扩展名兜一层，避免以后有人把 pem/key 放进
+# 新目录时忘了补规则；需要入库的示例配置请用 .env.example 这种显式例外。
+*.key
+*.pem
+*.pfx
+*.p12
+.env
+.env.*
+!.env.example
+
 # IDE 索引器（Qoder、MiniMax Code 等）会长期锁住输出目录里 win-unpacked/resources/app.asar，
 # electron-builder 清空目录时删不掉就直接失败。本机发版改用 OUT_DIR=<空目录> 绕开，
 # 这里统一忽略所有 electron-builder 输出目录（release/、release-alt/、release-next/ …）。

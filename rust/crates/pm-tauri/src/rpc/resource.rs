@@ -66,12 +66,16 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
         "resources:getNamespaces" => settle(client.namespaces(&tenant).await),
         "resources:getTenantInfo" => settle(client.tenant_info(&tenant).await),
         "resources:getTopics" => settle(client.topics(&tenant, &namespace).await),
-        "resources:getTopicStats" => {
-            settle(client.topic_stats(&tenant, &namespace, &topic, persistent).await)
-        }
-        "resources:getSubscriptions" => {
-            settle(client.subscriptions(&tenant, &namespace, &topic, persistent).await)
-        }
+        "resources:getTopicStats" => settle(
+            client
+                .topic_stats(&tenant, &namespace, &topic, persistent)
+                .await,
+        ),
+        "resources:getSubscriptions" => settle(
+            client
+                .subscriptions(&tenant, &namespace, &topic, persistent)
+                .await,
+        ),
 
         "resources:createSubscription" => {
             let name = text(&args, 4);
@@ -133,7 +137,14 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
             let persistent = boolean(&args, 6, true);
             settle(
                 client
-                    .skip_messages(&tenant, &namespace, &topic, &subscription, count, persistent)
+                    .skip_messages(
+                        &tenant,
+                        &namespace,
+                        &topic,
+                        &subscription,
+                        count,
+                        persistent,
+                    )
                     .await,
             )
         }
@@ -150,7 +161,10 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
             let name = text(&args, 3);
             let persistent = boolean(&args, 4, true);
             // 0 与 null 都表示"不分片"，交给服务端按默认处理
-            let partitions = args.get(5).and_then(Value::as_i64).filter(|count| *count > 0);
+            let partitions = args
+                .get(5)
+                .and_then(Value::as_i64)
+                .filter(|count| *count > 0);
             settle(
                 client
                     .create_topic(&tenant, &namespace, &name, persistent, partitions)
@@ -158,12 +172,16 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
             )
         }
 
-        "resources:getSchema" => {
-            settle(client.schema_info(&tenant, &namespace, &topic, persistent).await)
-        }
-        "resources:deleteSchema" => {
-            settle(client.delete_schema(&tenant, &namespace, &topic, persistent).await)
-        }
+        "resources:getSchema" => settle(
+            client
+                .schema_info(&tenant, &namespace, &topic, persistent)
+                .await,
+        ),
+        "resources:deleteSchema" => settle(
+            client
+                .delete_schema(&tenant, &namespace, &topic, persistent)
+                .await,
+        ),
         "resources:setSchemaStrategy" => {
             let strategy = text(&args, 4);
             let persistent = boolean(&args, 5, true);
@@ -184,7 +202,14 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
             let persistent = boolean(&args, 6, true);
             settle(
                 client
-                    .create_schema(&tenant, &namespace, &topic, &schema_type, &definition, persistent)
+                    .create_schema(
+                        &tenant,
+                        &namespace,
+                        &topic,
+                        &schema_type,
+                        &definition,
+                        persistent,
+                    )
                     .await,
             )
         }
@@ -209,16 +234,20 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
                     .await,
             )
         }
-        "resources:getTopicPermissions" => {
-            settle(client.topic_permissions(&tenant, &namespace, &topic, persistent).await)
-        }
+        "resources:getTopicPermissions" => settle(
+            client
+                .topic_permissions(&tenant, &namespace, &topic, persistent)
+                .await,
+        ),
         "resources:grantTopicPermission" => {
             let role = text(&args, 4);
             let actions = strings(&args, 5);
             let persistent = boolean(&args, 6, true);
             settle(
                 client
-                    .grant_topic_permission(&tenant, &namespace, &topic, &role, &actions, persistent)
+                    .grant_topic_permission(
+                        &tenant, &namespace, &topic, &role, &actions, persistent,
+                    )
                     .await,
             )
         }
@@ -232,9 +261,11 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
             )
         }
 
-        "resources:getTopicConfig" => {
-            settle(client.topic_config(&tenant, &namespace, &topic, persistent).await)
-        }
+        "resources:getTopicConfig" => settle(
+            client
+                .topic_config(&tenant, &namespace, &topic, persistent)
+                .await,
+        ),
         "resources:updateTopicConfig" => {
             let config = args.get(4).cloned().unwrap_or_else(|| json!({}));
             let persistent = boolean(&args, 5, true);

@@ -956,7 +956,9 @@ export interface MetricsSnapshotQuery {
 // ========== 告警 ==========
 
 export type AlertScope = 'cluster' | 'namespace' | 'topic';
-export type AlertComparator = 'gt' | 'lt';
+// 四个比较符与 Rust 侧 pm-services/src/alerts.rs 的 compare() 白名单逐字对应：
+// 后台接受 gt/gte/lt/lte，界面就必须都能选，否则存进去的规则没法在界面上编辑回来。
+export type AlertComparator = 'gt' | 'gte' | 'lt' | 'lte';
 export type AlertEventState = 'firing' | 'resolved';
 
 // 采样口径取自归一化后的 TopicStats / AggregatedStats，见 shared/alert-metrics.ts

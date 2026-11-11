@@ -155,20 +155,25 @@ pub struct MetricMeta {
 }
 
 pub fn metric_meta(key: &str) -> MetricMeta {
-    let build = |label: &str, unit: &'static str, scale: f64, integer: bool, cluster_supported: bool| MetricMeta {
-        label: label.to_string(),
-        unit,
-        scale,
-        integer,
-        cluster_supported,
-    };
+    let build =
+        |label: &str, unit: &'static str, scale: f64, integer: bool, cluster_supported: bool| {
+            MetricMeta {
+                label: label.to_string(),
+                unit,
+                scale,
+                integer,
+                cluster_supported,
+            }
+        };
     match key {
         "backlog" => build("积压消息数", "条", 1.0, true, true),
         "msgRateIn" => build("入向速率", "条/秒", 1.0, false, true),
         "msgRateOut" => build("出向速率", "条/秒", 1.0, false, true),
-        "throughputIn" => build("入向吞吐", "KB/秒", 1024.0, false, true),
-        "throughputOut" => build("出向吞吐", "KB/秒", 1024.0, false, true),
-        "storageSize" => build("存储大小", "MB", 1024.0 * 1024.0, false, false),
+        // 换算按 1024，单位就写 IEC 的 KiB/MiB，与 shared/alert-metrics.ts 逐字一致：
+        // 这两份是同一张表的双写，单位文案漂了就会出现「后台通知说 KB、界面说 KiB」。
+        "throughputIn" => build("入向吞吐", "KiB/秒", 1024.0, false, true),
+        "throughputOut" => build("出向吞吐", "KiB/秒", 1024.0, false, true),
+        "storageSize" => build("存储大小", "MiB", 1024.0 * 1024.0, false, false),
         "producers" => build("生产者数", "个", 1.0, true, true),
         "consumers" => build("消费者数", "个", 1.0, true, true),
         // 认不出的键（手工改过的库）不能把整张表带崩，退回键名本身
@@ -179,7 +184,11 @@ pub fn metric_meta(key: &str) -> MetricMeta {
 /// 千分位 + 最多两位小数，与界面上的 `toLocaleString('zh-CN')` 同一读法。
 pub fn format_alert_value(key: &str, value: f64) -> String {
     let meta = metric_meta(key);
-    let display = if meta.scale == 0.0 { value } else { value / meta.scale };
+    let display = if meta.scale == 0.0 {
+        value
+    } else {
+        value / meta.scale
+    };
     if !display.is_finite() {
         return "-".to_string();
     }
@@ -253,7 +262,11 @@ pub async fn probe(client: &AdminClient, rule: &AlertRule) -> AppResult<AlertPro
             label,
             metric_meta(&rule.metric).label,
             format_alert_value(&rule.metric, value),
-            if rule.comparator.starts_with('l') { "<" } else { ">" },
+            if rule.comparator.starts_with('l') {
+                "<"
+            } else {
+                ">"
+            },
             format_alert_value(&rule.metric, rule.threshold)
         ),
         value_text: format_alert_value(&rule.metric, value),
@@ -322,6 +335,12 @@ mod tests {
     fn comparators_are_strict_where_asked() {
         assert!(compare(101.0, "gt", 100.0));
         assert!(!compare(100.0, "gt", 100.0));
+        // 白名单接受 gte/lte，求值也必须真的是「大于等于 / 小于等于」，不能退化成 gt/lt
         assert!(compare(100.0, "gte", 100.0));
+        assert!(!compare(99.0, "gte", 100.0));
+        assert!(compare(99.0, "lt", 100.0));
+        assert!(!compare(100.0, "lt", 100.0));
+        assert!(compare(100.0, "lte", 100.0));
+        assert!(!compare(101.0, "lte", 100.0));
     }
 }

@@ -122,10 +122,15 @@ pub fn start_ssh(spec: &SshSpec) -> AppResult<TunnelEndpoint> {
         .arg("-p")
         .arg(spec.port.to_string());
 
-    if let Some(key) = spec.private_key.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(key) = spec
+        .private_key
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
         // 私钥落在用户临时目录里，权限收窄到本人可读；隧道停掉就删
         let path = std::env::temp_dir().join(format!("pm-tunnel-{tunnel_id}.key"));
-        std::fs::write(&path, key).map_err(|e| AppError::Other(format!("写入临时私钥失败：{e}")))?;
+        std::fs::write(&path, key)
+            .map_err(|e| AppError::Other(format!("写入临时私钥失败：{e}")))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -154,7 +159,7 @@ pub fn start_ssh(spec: &SshSpec) -> AppResult<TunnelEndpoint> {
 
     tunnels()
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .insert(tunnel_id.clone(), Handle { child, key_file });
     Ok(TunnelEndpoint {
         tunnel_id,
@@ -185,7 +190,12 @@ pub fn start_k8s(spec: &K8sSpec) -> AppResult<TunnelEndpoint> {
         .arg(format!("{local_broker}:{}", spec.remote_broker_port))
         .arg("-n")
         .arg(&spec.namespace);
-    if let Some(context) = spec.context.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+    if let Some(context) = spec
+        .context
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
         command.arg("--context").arg(context);
     }
     if let Some(path) = spec
@@ -201,9 +211,11 @@ pub fn start_k8s(spec: &K8sSpec) -> AppResult<TunnelEndpoint> {
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
 
-    let mut child = command
-        .spawn()
-        .map_err(|e| AppError::Other(format!("拉起 kubectl 失败（路径没配或不在 PATH 里？）：{e}")))?;
+    let mut child = command.spawn().map_err(|e| {
+        AppError::Other(format!(
+            "拉起 kubectl 失败（路径没配或不在 PATH 里？）：{e}"
+        ))
+    })?;
     if let Err(error) = wait_ready(&mut child, local_admin, "Kubernetes 端口转发") {
         let _ = child.kill();
         return Err(error);
@@ -211,8 +223,14 @@ pub fn start_k8s(spec: &K8sSpec) -> AppResult<TunnelEndpoint> {
 
     tunnels()
         .lock()
-        .unwrap()
-        .insert(tunnel_id.clone(), Handle { child, key_file: None });
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(
+            tunnel_id.clone(),
+            Handle {
+                child,
+                key_file: None,
+            },
+        );
     Ok(TunnelEndpoint {
         tunnel_id,
         local_admin_port: local_admin,
@@ -222,7 +240,10 @@ pub fn start_k8s(spec: &K8sSpec) -> AppResult<TunnelEndpoint> {
 
 /// 断开：先礼后兵——kill 完再 wait，避免留下僵尸进程。
 pub fn stop(tunnel_id: &str) -> bool {
-    let handle = tunnels().lock().unwrap().remove(tunnel_id);
+    let handle = tunnels()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(tunnel_id);
     match handle {
         Some(mut handle) => {
             let _ = handle.child.kill();
@@ -238,7 +259,12 @@ pub fn stop(tunnel_id: &str) -> bool {
 
 /// 进程退出前统一收尾：隧道进程不能比应用活得久。
 pub fn stop_all() {
-    let ids: Vec<String> = tunnels().lock().unwrap().keys().cloned().collect();
+    let ids: Vec<String> = tunnels()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .keys()
+        .cloned()
+        .collect();
     for id in ids {
         stop(&id);
     }

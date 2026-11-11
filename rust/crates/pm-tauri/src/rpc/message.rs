@@ -14,6 +14,10 @@ use serde_json::{json, Value};
 
 use crate::bridge::{fail, ok, Shared};
 
+/// 单次发送条数上限：与前端 `InputNumber max` 对齐。count 会直接拿去做
+/// `Vec::with_capacity` 和循环次数，只 `.max(1)` 不封顶的话，一个巨大值就能把进程撑爆。
+const MAX_SEND_COUNT: i64 = 1000;
+
 static SESSIONS: OnceLock<Arc<SessionRegistry>> = OnceLock::new();
 static PRODUCERS: OnceLock<Arc<ProducerRegistry>> = OnceLock::new();
 /// 正在跑的压测：runId → 取消标记。stop 只翻标记，任务自己收尾并推终态帧。
@@ -325,7 +329,7 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
                 .get("count")
                 .and_then(Value::as_i64)
                 .unwrap_or(1)
-                .max(1);
+                .clamp(1, MAX_SEND_COUNT);
             match build_items(&template, count, params.get("options")) {
                 Ok(items) => match producers().send(&id, items).await {
                     Ok(ids) => ok(json!({"messageIds": ids, "failures": []})),
@@ -345,7 +349,7 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
                 .get("count")
                 .and_then(Value::as_i64)
                 .unwrap_or(1)
-                .max(1);
+                .clamp(1, MAX_SEND_COUNT);
             let items = match build_items(&template, count, params.get("options")) {
                 Ok(items) => items,
                 Err(error) => return Some(fail(error)),
@@ -521,8 +525,10 @@ fn build_items(
     let variables = variables_of(template);
     let properties = map_of(template, "properties");
     let (partition_key, event_time, deliver_at) = message_options(options);
-    let mut items = Vec::with_capacity(count.max(1) as usize);
-    for _ in 0..count.max(1) {
+    // 入口已 clamp；这里再夹一次兜底，保证 with_capacity 与循环次数都受限。
+    let count = count.clamp(1, MAX_SEND_COUNT);
+    let mut items = Vec::with_capacity(count as usize);
+    for _ in 0..count {
         let rendered = pm_services::template::render(&body, &variables)?;
         items.push(SendItem {
             payload: rendered.body.into_bytes(),

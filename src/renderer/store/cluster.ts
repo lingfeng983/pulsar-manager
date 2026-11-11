@@ -75,8 +75,10 @@ export const useClusterStore = create<ClusterState>((set, get) => ({
         set({loading: true, error: null});
         try {
             const response = await window.electronAPI.cluster.list();
+            // cluster.list 的契约就是 APIResponse<ClusterConfig[]>：判过 success/data 之后
+            // response.data 已经是 ClusterConfig[]，不必再 as 一层（那只是多余的类型逃逸）。
             if (response.success && response.data) {
-                set({clusters: response.data as ClusterConfig[], loading: false});
+                set({clusters: response.data, loading: false});
             } else {
                 set({error: response.error || 'Failed to fetch clusters', loading: false});
             }
@@ -102,7 +104,9 @@ export const useClusterStore = create<ClusterState>((set, get) => ({
                 const response = await window.electronAPI.cluster.checkStatus();
                 if (response.success && response.data) {
                     set({
-                        clusters: response.data as ClusterConfig[],
+                        // ClusterStatusResponse = APIResponse<ClusterConfig[]> & {statusErrors}，
+                        // data 同样已是 ClusterConfig[]，去掉多余的 as。
+                        clusters: response.data,
                         // 逐集群的失败原因一并收下：调用方（Home 的刷新按钮、列表行）
                         // 就是靠它把「连不上」说清楚，不再只弹一句笼统的失败。
                         statusErrors: response.statusErrors ?? {},

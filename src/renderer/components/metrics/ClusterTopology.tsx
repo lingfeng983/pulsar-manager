@@ -158,6 +158,36 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId}) => {
 
     const chartRef = useRef<ReactECharts>(null);
     const getChart = useCallback(() => chartRef.current?.getEchartsInstance(), []);
+    // 三处延迟 resize（全屏切换、图表初始化、重拉数据）共用一个 timer：短时间内连续
+    // 触发只保留最后一次，也能在卸载时统一清掉。mountedRef 是卸载标记，组件卸载后
+    // 晚到的回调直接作废，避免对已经 dispose 的 echarts 实例调用 resize。
+    const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const mountedRef = useRef(true);
+    useEffect(() => {
+        mountedRef.current = true;
+        return () => {
+            mountedRef.current = false;
+            if (resizeTimerRef.current !== null) {
+                clearTimeout(resizeTimerRef.current);
+                resizeTimerRef.current = null;
+            }
+        };
+    }, []);
+
+    const scheduleResize = useCallback(() => {
+        if (resizeTimerRef.current !== null) {
+            clearTimeout(resizeTimerRef.current);
+        }
+        resizeTimerRef.current = setTimeout(() => {
+            resizeTimerRef.current = null;
+            if (!mountedRef.current) {
+                return;
+            }
+            // 从 ref 现读而不是闭包捕获旧实例：卸载后 chartRef.current 已被 React 置空，
+            // 拿不到实例就说明图表已经 dispose，不能再 resize。
+            getChart()?.resize();
+        }, 100);
+    }, [getChart]);
     // 拓扑请求代次：重新加载后旧请求的晚到响应必须作废
     const topologyRequestRef = useRef(0);
     const palette = useTopologyPalette();
@@ -166,10 +196,11 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId}) => {
     // zrender 会把量到的高度写成行内像素并钉住容器，所以尺寸由外层容器量出来反喂给图表。
     const {ref: chartAreaRef, width: chartWidth, height: chartHeight} = useElementSize<HTMLDivElement>();
 
-    // 进出全屏后容器尺寸变化，需要等浏览器完成布局再 resize
+    // 进出全屏后容器尺寸变化，需要等浏览器完成布局再 resize；走统一的延迟调度，
+    // 卸载时由上面的 cleanup 清掉还没触发的 timer。
     const handleFullscreenChange = useCallback(() => {
-        setTimeout(() => getChart()?.resize(), 100);
-    }, [getChart]);
+        scheduleResize();
+    }, [scheduleResize]);
 
     const {
         ref: chartContainerRef,
@@ -194,12 +225,11 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId}) => {
     // 门控方式同 MetricsDashboard 用 paneActive 停轮询。
     const paneActive = useContext(PaneActiveContext);
 
-    // 图表实例初始化后的处理
-    const onChartInit = useCallback((chart: any) => {
-        if (chart) {
-            setTimeout(() => chart.resize(), 100);
-        }
-    }, []);
+    // 图表实例初始化后等布局稳定再 resize。不再闭包捕获传入的实例（那样卸载后
+    // 拿着的还是旧引用），统一由 scheduleResize 从 ref 现读，顺便去掉这里的 any。
+    const onChartInit = useCallback(() => {
+        scheduleResize();
+    }, [scheduleResize]);
 
     /**
      * 单集群转换。broker→topic 的连线完全按 payload 走：主进程已用 stats 里的
@@ -362,10 +392,8 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId}) => {
                     partitions: nodes.filter(n => n.type === 'partition').length,
                 });
 
-                // 图表加载后重新调整大小
-                setTimeout(() => {
-                    chartRef.current?.getEchartsInstance()?.resize();
-                }, 100);
+                // 图表加载后重新调整大小：同样走统一调度，卸载时 timer 会被清掉。
+                scheduleResize();
             } else {
                 message.warning(response.error || '获取拓扑数据失败');
                 setRawNodes([]);
@@ -384,7 +412,7 @@ const ClusterTopology: React.FC<ClusterTopologyProps> = ({clusterId}) => {
                 setLoading(false);
             }
         }
-    }, [isGlobal, clusterId, showPartitions, transformTopologyData]);
+    }, [isGlobal, clusterId, showPartitions, transformTopologyData, scheduleResize]);
 
     // 页签激活时才首拉：非活动页签不重发拓扑 IPC，也不在隐藏容器上跑加载与动画。
     useEffect(() => {

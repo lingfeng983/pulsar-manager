@@ -92,7 +92,9 @@ async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Value {
     // 有消息正文或凭据；需要时用 PM_RPC_LOG=1 打开完整载荷。
     pm_core::pm_log!("[rpc] {method}");
     if std::env::var("PM_RPC_LOG").is_ok() {
-        pm_core::pm_log!("[rpc] {method} args={args:?}");
+        // 排障开关打开时打印载荷，但凭据字段必须先脱敏：整条 args 落日志等于把
+        // token / authParams / 私钥抄到磁盘，排障一次留一份明文凭据。
+        pm_core::pm_log!("[rpc] {method} args={:?}", redact_args(&args));
     }
     // 参数按方法逐个解构，未迁移的分支暂时用不到，等 S2 铺开后再由编译器兜底检查。
     let _ = &args;
@@ -163,6 +165,56 @@ pub(crate) fn ok<T: Serialize>(value: T) -> Value {
         Ok(value) => json!({ "success": true, "data": camelize(value) }),
         Err(error) => json!({ "success": false, "error": format!("序列化失败：{error}") }),
     }
+}
+
+/// `PM_RPC_LOG=1` 打印参数前按字段名脱敏：只遮常见凭据键，正文与其它结构保留，
+/// 排障时仍看得到方法收到的业务数据。
+fn redact_args(args: &[Value]) -> Vec<Value> {
+    args.iter().map(redact_value).collect()
+}
+
+fn redact_value(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, value)| {
+                    let value = if is_secret_key(key) {
+                        json!("<redacted>")
+                    } else {
+                        redact_value(value)
+                    };
+                    (key.clone(), value)
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(redact_value).collect()),
+        other => other.clone(),
+    }
+}
+
+/// 前端实际会传的凭据参数名（大小写不敏感）：集群草稿、通知渠道、SSH/转发配置、
+/// 消息属性都可能带。URL 类字段可能内嵌 userinfo，一并遮掉。
+fn is_secret_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "authparams"
+            | "token"
+            | "tokenvalue"
+            | "password"
+            | "passwd"
+            | "secret"
+            | "secretkey"
+            | "accesskey"
+            | "apikey"
+            | "privatekey"
+            | "webserviceurl"
+            | "serviceurl"
+            | "authorization"
+            | "credentials"
+            | "smtppassword"
+            | "trustcerts"
+            | "tlstrustcerts"
+    )
 }
 
 pub(crate) fn fail(error: AppError) -> Value {
@@ -260,6 +312,25 @@ mod tests {
         assert_eq!(snake_to_camel("service_url"), "serviceUrl");
         assert_eq!(snake_to_camel("has_auth_params"), "hasAuthParams");
         assert_eq!(snake_to_camel("name"), "name");
+    }
+
+    #[test]
+    fn redacts_credential_fields_in_rpc_args() {
+        let args = vec![json!({
+            "clusterId": "c1",
+            "authParams": "Bearer secret-token",
+            "nested": { "token": "abc", "keep": 1 },
+            "webServiceUrl": "http://user:pass@host:8080",
+            "items": [{ "password": "p", "body": "hello" }],
+        })];
+        let redacted = redact_args(&args);
+        assert_eq!(redacted[0]["clusterId"], "c1");
+        assert_eq!(redacted[0]["authParams"], "<redacted>");
+        assert_eq!(redacted[0]["nested"]["token"], "<redacted>");
+        assert_eq!(redacted[0]["nested"]["keep"], 1);
+        assert_eq!(redacted[0]["webServiceUrl"], "<redacted>");
+        assert_eq!(redacted[0]["items"][0]["password"], "<redacted>");
+        assert_eq!(redacted[0]["items"][0]["body"], "hello");
     }
 
     #[test]

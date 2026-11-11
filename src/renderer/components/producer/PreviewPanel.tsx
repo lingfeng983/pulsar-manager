@@ -47,7 +47,8 @@ const PreviewPanel: React.FC<PreviewPanelProps> = ({body, variables, seed, onSee
                         <span className="hint-text">第 1 条，随机值每次预览都变；多条目之间互不相同</span>
                     </>
                 ) : (
-                    <span style={{color: 'var(--color-danger)'}}>{result.error}</span>
+                    /* 错误文案是 12px 正文：--color-danger 白底仅 3.7:1，用文字专用色才过 AA */
+                    <span style={{color: 'var(--color-danger-text)'}}>{result.error}</span>
                 )}
                 <span style={{marginLeft: 'auto'}}>
                     {seed === undefined ? (

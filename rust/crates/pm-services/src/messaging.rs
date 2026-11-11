@@ -198,6 +198,21 @@ impl SessionRegistry {
     }
 }
 
+/// 会话收尾守卫：任务无论正常结束还是 panic 展开，都把注册表条目摘掉，
+/// 免得留下一个永远「在线」的幽灵会话（与 producer.rs 的 SessionGuard 同理）。
+/// 正常收尾仍由任务显式 remove（保证先摘条目再推 SESSION_END 的顺序），
+/// 这里的 Drop 只兜住 panic 时走不到那一步的情况。
+struct SessionGuard {
+    registry: Arc<SessionRegistry>,
+    session_id: String,
+}
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        self.registry.remove(&self.session_id);
+    }
+}
+
 // ========== 消费会话 ==========
 
 /// 起一条消费会话：连 broker、订阅、把批次按窗口推给界面。
@@ -250,6 +265,11 @@ pub async fn start_consume(
     let max_messages = options.max_messages;
 
     tokio::spawn(async move {
+        // panic 展开时也要摘掉会话，避免注册表里留下幽灵条目
+        let _guard = SessionGuard {
+            registry: task_registry.clone(),
+            session_id: task_id.clone(),
+        };
         let mut buffer: Vec<Message> = Vec::new();
         let mut buffer_bytes = 0i64;
         let mut last_flush = Instant::now();
@@ -486,6 +506,11 @@ pub async fn start_read(
     let task_id = session_id.clone();
 
     tokio::spawn(async move {
+        // panic 展开时也要摘掉会话，避免注册表里留下幽灵条目
+        let _guard = SessionGuard {
+            registry: task_registry.clone(),
+            session_id: task_id.clone(),
+        };
         let mut buffer: Vec<Message> = Vec::new();
         let mut last_flush = Instant::now();
         let mut ticker = tokio::time::interval(Duration::from_millis(250));

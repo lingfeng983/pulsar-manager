@@ -16,10 +16,13 @@ export function useFullscreen<T extends HTMLElement = HTMLDivElement>(onChange?:
         // 必须比较是不是"自己"在独占全屏：页面上别的元素（例如图表卡片自带的按钮）
         // 进入全屏后，document.fullscreenElement 非空，这里若不比对就会去 exit 掉别人的全屏。
         // requestFullscreen 可能拒绝（浏览器策略/权限），返回的 Promise 必须收掉，
-        // 否则每次失败都会冒一个 unhandled rejection。
+        // 否则每次失败都会冒一个 unhandled rejection；但不再空吞，把拒绝原因记下来，
+        // 这类浏览器 API 没有 success 字段，失败只能体现在 Promise 的 rejection 上。
         const settle = (result: unknown) => {
             if (result instanceof Promise) {
-                result.catch(() => {});
+                result.catch((error: unknown) => {
+                    console.warn('[fullscreen] 切换全屏被拒绝', error);
+                });
             }
         };
         if (document.fullscreenElement !== el) {

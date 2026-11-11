@@ -293,7 +293,20 @@ const ConsumerWorkspace: React.FC<ConsumerWorkspaceProps> = ({
     useEffect(
         () => () => {
             for (const session of sessionsRef.current) {
-                void window.electronAPI.consumer.stop(session.sessionId);
+                // 清理不能 await（会拖住卸载），但 rpc 失败只体现在 success:false，
+                // 不判就等于把「停不掉、订阅仍在后台吞消息」静默吞掉，留个 warn 便于排查。
+                void window.electronAPI.consumer
+                    .stop(session.sessionId)
+                    .then(response => {
+                        if (!response.success) {
+                            console.warn(
+                                `[consumer] 停止会话 ${session.sessionId} 失败：${response.error || '未知错误'}`,
+                            );
+                        }
+                    })
+                    .catch((error: unknown) => {
+                        console.warn(`[consumer] 停止会话 ${session.sessionId} 异常`, error);
+                    });
             }
         },
         [],

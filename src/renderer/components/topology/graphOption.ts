@@ -73,8 +73,6 @@ function clamp(min: number, max: number, value: number): number {
     return Math.max(min, Math.min(max, value));
 }
 
-const LABEL_DARK = '#1d2129';
-const LABEL_LIGHT = '#ffffff';
 /** 圆内标签的字号区间：太小读不出，太大放不下名字。 */
 const LABEL_FONT_MIN = 9;
 const LABEL_FONT_MAX = 13;
@@ -102,19 +100,26 @@ function relativeLuminance([r, g, b]: [number, number, number]): number {
     return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
 }
 
+const contrastRatio = (a: number, b: number) => (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+
 /**
  * 标签挪到圆内后只能压在节点的填充色上，主题文字色在这里完全不适用
- * （暗色主题的浅文字压在亮绿气泡上等于隐形），所以在白/近黑里挑对比度高的那个。
+ * （暗色主题的浅文字压在亮绿气泡上等于隐形），所以挑与气泡底色对比度更高的那个。
+ * 两个候选取自 palette —— 它运行时从 CSS 变量读出（--color-text-primary /
+ * --color-bg-elevated），亮色主题下正好是原先写死的近黑 / 白，暗色与护眼主题下
+ * 也跟着主题走，不再把 #1d2129 / #ffffff 钉死在代码里。
  */
-function labelColorOn(fill: string): string {
+function labelColorOn(fill: string, palette: TopologyPalette): string {
     const rgb = parseHexColor(fill);
-    if (!rgb) {
-        return LABEL_DARK;
+    const textRgb = parseHexColor(palette.text);
+    const surfaceRgb = parseHexColor(palette.surface);
+    if (!rgb || !textRgb || !surfaceRgb) {
+        return palette.text;
     }
     const l = relativeLuminance(rgb);
-    const againstWhite = 1.05 / (l + 0.05);
-    const againstDark = (l + 0.05) / (relativeLuminance(parseHexColor(LABEL_DARK)!) + 0.05);
-    return againstWhite >= againstDark ? LABEL_LIGHT : LABEL_DARK;
+    return contrastRatio(l, relativeLuminance(surfaceRgb)) >= contrastRatio(l, relativeLuminance(textRgb))
+        ? palette.surface
+        : palette.text;
 }
 
 // 中日韩全角字按一个字号宽算，拉丁字符约 0.62。
@@ -236,7 +241,7 @@ export function buildTopologyOption(params: {
                 position: 'inside' as const,
                 formatter: () => labelText,
                 fontSize,
-                color: labelColorOn(color),
+                color: labelColorOn(color, palette),
                 fontWeight: 500 as const,
             },
             emphasis: {
@@ -274,8 +279,14 @@ export function buildTopologyOption(params: {
                 if (!node) {
                     return '';
                 }
+                // tooltip 是页面内 DOM，可以直接用 CSS 变量取色；首行字号也跟着 fontScale 走，
+                // 与 textStyle / legend 的 13*fontScale 同一套换算，切字号档位时不再一枝独秀。
+                const titleStyle =
+                    'font-weight:600;' +
+                    `font-size:${Math.round(14 * fontScale)}px;` +
+                    'color:var(--color-text-primary);margin-bottom:6px';
                 const rows: string[] = [
-                    `<div style="font-weight:600;font-size:14px;margin-bottom:6px">${escapeHtml(node.name)}</div>`,
+                    `<div style="${titleStyle}">${escapeHtml(node.name)}</div>`,
                     `<div>类型: ${NODE_TYPE_LABELS[node.type]}</div>`,
                 ];
                 if (node.clusterName) {
@@ -358,13 +369,13 @@ export function buildTopologyOption(params: {
                 roam: true,
                 draggable: true,
                 // 兜底：每个节点都会带自己的 inside 标签（文字色按气泡底色挑过对比度），
-                // 这里只保证万一有节点漏了设置，文字也不会压在同类色上看不见。
+                // 漏设时才退回主题主文字色（同样来自 CSS 变量），不写死近黑。
                 label: {
                     show: true,
                     position: 'inside',
                     formatter: '{b}',
                     fontSize: Math.round(LABEL_FONT_MIN * fontScale),
-                    color: LABEL_DARK,
+                    color: palette.text,
                     fontWeight: 500,
                 },
                 edgeSymbol: ['circle', 'arrow'],

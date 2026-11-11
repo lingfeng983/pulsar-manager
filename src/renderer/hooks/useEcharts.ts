@@ -2,6 +2,10 @@ import {useEffect, useRef} from 'react';
 import type {RefObject} from 'react';
 
 // 只依赖实际用到的方法，兼容直接持有 ECharts 实例和通过 ReactECharts 取实例两种写法。
+// setOption/getOption 的参数与返回值刻意保留 any：EchartsLike 是对 echarts 实例的
+// 最小鸭子类型，而 option 是开放的可扩展结构（带索引签名），本文件只取 series、
+// 只写 series。硬收成 echarts 官方类型会与两种实例的声明打架、又无法连带调整
+// 本文件不拥有的调用方，属于成本过高；保留宽松类型但把它限制在本文件内部使用。
 type EchartsLike =
     | {
           resize: () => void;

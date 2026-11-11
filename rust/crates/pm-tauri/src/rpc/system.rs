@@ -107,6 +107,13 @@ fn write_setting(context: &AppContext, key: &str, value: &Value) -> pm_core::App
 
 pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option<Value> {
     Some(match method {
+        // ---------- 启动期告警 ----------
+        // 凭据密钥被迫轮换等启动期非致命问题存在 AppContext.warning 里，界面通过
+        // 这条通道读取；data 形状固定为 { warning: string | null }。
+        "system:runtimeWarnings" => {
+            crate::bridge::ok(json!({ "warning": context.warning.clone() }))
+        }
+
         // ---------- 主题 ----------
         "theme:get" => {
             let context = context.clone();
@@ -462,26 +469,9 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
         // kubeconfig 上下文与证书插件。代价是密码登录无法自动化（ssh 从终端读密码）。
         "ssh:connect" => {
             let config = args.first().cloned().unwrap_or_else(|| json!({}));
-            let remote_host = {
-                let remote = string_arg(&config, "remoteHost");
-                if remote.is_empty() {
-                    string_arg(&config, "host")
-                } else {
-                    remote
-                }
-            };
-            let spec = pm_services::tunnel::SshSpec {
-                host: string_arg(&config, "host"),
-                port: number_arg(&config, "port", 22),
-                username: string_arg(&config, "username"),
-                private_key: config
-                    .get("privateKey")
-                    .and_then(Value::as_str)
-                    .filter(|value| !value.trim().is_empty())
-                    .map(str::to_string),
-                remote_host,
-                remote_admin_port: number_arg(&config, "remoteAdminPort", 8080),
-                remote_broker_port: number_arg(&config, "remoteBrokerPort", 6650),
+            let spec = match ssh_spec(&config) {
+                Ok(spec) => spec,
+                Err(error) => return Some(crate::bridge::fail(error)),
             };
             if spec.private_key.is_none() {
                 crate::bridge::fail(AppError::Unsupported(
@@ -507,26 +497,9 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
         }
         "k8s:connect" => {
             let config = args.first().cloned().unwrap_or_else(|| json!({}));
-            let spec = pm_services::tunnel::K8sSpec {
-                namespace: string_arg(&config, "namespace"),
-                resource: string_arg(&config, "resource"),
-                context: config
-                    .get("context")
-                    .and_then(Value::as_str)
-                    .filter(|value| !value.trim().is_empty())
-                    .map(str::to_string),
-                kubeconfig_path: config
-                    .get("kubeconfigPath")
-                    .and_then(Value::as_str)
-                    .filter(|value| !value.trim().is_empty())
-                    .map(str::to_string),
-                kubectl_path: config
-                    .get("kubectlPath")
-                    .and_then(Value::as_str)
-                    .filter(|value| !value.trim().is_empty())
-                    .map(str::to_string),
-                remote_admin_port: number_arg(&config, "remoteAdminPort", 8080),
-                remote_broker_port: number_arg(&config, "remoteBrokerPort", 6650),
+            let spec = match k8s_spec(&config) {
+                Ok(spec) => spec,
+                Err(error) => return Some(crate::bridge::fail(error)),
             };
             match pm_services::tunnel::start_k8s(&spec) {
                 Ok(endpoint) => json!({
@@ -835,13 +808,64 @@ fn string_arg(payload: &Value, key: &str) -> String {
         .to_string()
 }
 
-fn number_arg(payload: &Value, key: &str, fallback: u16) -> u16 {
-    payload
-        .get(key)
-        .and_then(Value::as_u64)
-        .map(|value| value as u16)
-        .filter(|value| *value > 0)
-        .unwrap_or(fallback)
+/// 端口解析：`u64 as u16` 会静默截断（70000 → 4464），填错的端口会被当成一个
+/// 看似合法的值连上去。用 try_from 拒绝越界并给出明确错误；0 与缺失/非整数
+/// 沿用原来的兜底行为（退回缺省端口）。
+fn number_arg(payload: &Value, key: &str, fallback: u16) -> pm_core::AppResult<u16> {
+    let Some(value) = payload.get(key).and_then(Value::as_u64) else {
+        return Ok(fallback);
+    };
+    let port = u16::try_from(value)
+        .map_err(|_| AppError::config(format!("{key} 端口 {value} 超出范围（1～65535）")))?;
+    Ok(if port == 0 { fallback } else { port })
+}
+
+fn ssh_spec(config: &Value) -> pm_core::AppResult<pm_services::tunnel::SshSpec> {
+    let remote_host = {
+        let remote = string_arg(config, "remoteHost");
+        if remote.is_empty() {
+            string_arg(config, "host")
+        } else {
+            remote
+        }
+    };
+    Ok(pm_services::tunnel::SshSpec {
+        host: string_arg(config, "host"),
+        port: number_arg(config, "port", 22)?,
+        username: string_arg(config, "username"),
+        private_key: config
+            .get("privateKey")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string),
+        remote_host,
+        remote_admin_port: number_arg(config, "remoteAdminPort", 8080)?,
+        remote_broker_port: number_arg(config, "remoteBrokerPort", 6650)?,
+    })
+}
+
+fn k8s_spec(config: &Value) -> pm_core::AppResult<pm_services::tunnel::K8sSpec> {
+    Ok(pm_services::tunnel::K8sSpec {
+        namespace: string_arg(config, "namespace"),
+        resource: string_arg(config, "resource"),
+        context: config
+            .get("context")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string),
+        kubeconfig_path: config
+            .get("kubeconfigPath")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string),
+        kubectl_path: config
+            .get("kubectlPath")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string),
+        remote_admin_port: number_arg(config, "remoteAdminPort", 8080)?,
+        remote_broker_port: number_arg(config, "remoteBrokerPort", 6650)?,
+    })
 }
 
 fn text_arg(args: &[Value], index: usize) -> String {

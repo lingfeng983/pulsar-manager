@@ -36,7 +36,9 @@ const ROUTE_WORDS: [&str; 8] = [
     "send", "receive", "push", "post", "update", "create", "delete", "notify",
 ];
 
-const CREDENTIAL_ANCHORS: [&str; 7] = ["hook", "token", "tokens", "key", "keys", "secret", "webhook"];
+const CREDENTIAL_ANCHORS: [&str; 7] = [
+    "hook", "token", "tokens", "key", "keys", "secret", "webhook",
+];
 
 fn level_label(level: &str) -> &'static str {
     match level {
@@ -130,7 +132,11 @@ pub fn channel_view(record: &NotifyChannel, secrets: &SecretBox) -> ChannelView 
         } else {
             mask_notify_url(&plain)
         },
-        has_secret: record.secret_enc.as_deref().map(|value| !value.is_empty()).unwrap_or(false),
+        has_secret: record
+            .secret_enc
+            .as_deref()
+            .map(|value| !value.is_empty())
+            .unwrap_or(false),
         mail_profile_id: record.mail_profile_id.clone(),
         recipients: parse_recipients(&record.recipients).0,
         enabled: record.enabled,
@@ -154,7 +160,11 @@ pub fn mail_view(record: &MailProfile) -> MailView {
         port: record.port,
         security: record.security.clone(),
         username: mask_mail_user(&record.username),
-        has_password: record.password_enc.as_deref().map(|value| !value.is_empty()).unwrap_or(false),
+        has_password: record
+            .password_enc
+            .as_deref()
+            .map(|value| !value.is_empty())
+            .unwrap_or(false),
         from_address: record.from_address.clone(),
         from_name: record.from_name.clone(),
         allow_self_signed: record.allow_self_signed,
@@ -163,7 +173,10 @@ pub fn mail_view(record: &MailProfile) -> MailView {
     }
 }
 
-pub fn list_channels_view(store_handle: &Store, secrets: &SecretBox) -> AppResult<Vec<ChannelView>> {
+pub fn list_channels_view(
+    store_handle: &Store,
+    secrets: &SecretBox,
+) -> AppResult<Vec<ChannelView>> {
     Ok(store::list_channels(store_handle)?
         .iter()
         .map(|record| channel_view(record, secrets))
@@ -290,7 +303,10 @@ pub fn validate_notify_url(raw: &str) -> Option<String> {
     if !lower.starts_with("https://") && !lower.starts_with("http://") {
         return Some("通知地址必须是 http:// 或 https:// 开头".into());
     }
-    let without_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or_default();
+    let without_scheme = url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or_default();
     let authority = without_scheme.split(['/', '?', '#']).next().unwrap_or("");
     if authority.contains('@') {
         return Some("通知地址里不要写用户名密码，凭据请放进「签名密钥」或路径里".into());
@@ -338,7 +354,11 @@ pub fn validate_mail_address(raw: &str) -> Option<String> {
     if name.is_empty() {
         return Some("邮件地址缺少用户名".into());
     }
-    if domain.is_empty() || !domain.contains('.') || domain.starts_with('.') || domain.ends_with('.') {
+    if domain.is_empty()
+        || !domain.contains('.')
+        || domain.starts_with('.')
+        || domain.ends_with('.')
+    {
         return Some("邮件地址的域名看着不完整".into());
     }
     None
@@ -375,7 +395,10 @@ fn recipients_problem(raw: &str) -> Option<String> {
         } else {
             String::new()
         };
-        return Some(format!("这些收件人不像邮件地址：{}{extra}", head.join("、")));
+        return Some(format!(
+            "这些收件人不像邮件地址：{}{extra}",
+            head.join("、")
+        ));
     }
     if valid.is_empty() {
         return Some("邮件渠道至少要填一个收件人".into());
@@ -385,8 +408,17 @@ fn recipients_problem(raw: &str) -> Option<String> {
 
 // ========== 渠道写操作 ==========
 
-pub fn save_channel(store_handle: &Store, secrets: &SecretBox, draft: &Value) -> AppResult<ChannelView> {
-    let id = draft.get("id").and_then(Value::as_str).unwrap_or("").trim().to_string();
+pub fn save_channel(
+    store_handle: &Store,
+    secrets: &SecretBox,
+    draft: &Value,
+) -> AppResult<ChannelView> {
+    let id = draft
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
     let existing = if id.is_empty() {
         None
     } else {
@@ -396,17 +428,31 @@ pub fn save_channel(store_handle: &Store, secrets: &SecretBox, draft: &Value) ->
         return Err(AppError::Other("这条渠道已经不在了，请刷新列表".into()));
     }
 
-    let name = draft.get("name").and_then(Value::as_str).unwrap_or("").trim().to_string();
+    let name = draft
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
     if name.is_empty() {
         return Err(AppError::Other("渠道名字不能是空的".into()));
     }
-    let kind = draft.get("kind").and_then(Value::as_str).unwrap_or("").to_string();
+    let kind = draft
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     if !CHANNEL_KINDS.contains(&kind.as_str()) {
         return Err(AppError::Other(format!("未知的通知渠道类型 {kind}")));
     }
     let is_email = kind == "email";
 
-    let url = draft.get("url").and_then(Value::as_str).unwrap_or("").trim().to_string();
+    let url = draft
+        .get("url")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
     if !url.is_empty() {
         if let Some(problem) = validate_notify_url(&url) {
             return Err(AppError::Other(problem));
@@ -424,13 +470,19 @@ pub fn save_channel(store_handle: &Store, secrets: &SecretBox, draft: &Value) ->
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
-        let profile_id = from_draft.or_else(|| existing.as_ref().and_then(|item| item.mail_profile_id.clone()));
+        let profile_id = from_draft.or_else(|| {
+            existing
+                .as_ref()
+                .and_then(|item| item.mail_profile_id.clone())
+        });
         let Some(profile_id) = profile_id else {
             return Err(AppError::Other("新建邮件渠道要先选一台邮件服务器".into()));
         };
         let profiles = store::list_mail_profiles(store_handle)?;
         if !profiles.iter().any(|profile| profile.id == profile_id) {
-            return Err(AppError::Other("这台邮件服务器已经不在了，请重新选一台".into()));
+            return Err(AppError::Other(
+                "这台邮件服务器已经不在了，请重新选一台".into(),
+            ));
         }
         let raw = draft
             .get("recipients")
@@ -454,11 +506,22 @@ pub fn save_channel(store_handle: &Store, secrets: &SecretBox, draft: &Value) ->
             .filter(|value| EVENT_LABELS.iter().any(|(key, _)| key == value))
             .map(str::to_string)
             .collect(),
-        None => existing.as_ref().map(|item| item.events.clone()).unwrap_or_default(),
+        None => existing
+            .as_ref()
+            .map(|item| item.events.clone())
+            .unwrap_or_default(),
     };
 
-    let secret = draft.get("secret").and_then(Value::as_str).unwrap_or("").trim().to_string();
-    let keeps_secret = matches!(kind.as_str(), "dingtalk" | "feishu" | "wecom" | "slack" | "generic");
+    let secret = draft
+        .get("secret")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let keeps_secret = matches!(
+        kind.as_str(),
+        "dingtalk" | "feishu" | "wecom" | "slack" | "generic"
+    );
     let secret_enc = if keeps_secret {
         if secret.is_empty() {
             existing.as_ref().and_then(|item| item.secret_enc.clone())
@@ -485,7 +548,10 @@ pub fn save_channel(store_handle: &Store, secrets: &SecretBox, draft: &Value) ->
         kind,
         // 地址留空 = 沿用库里那一份；邮件渠道本来就只存服务器与收件人
         url_enc: if url.is_empty() {
-            existing.as_ref().map(|item| item.url_enc.clone()).unwrap_or_default()
+            existing
+                .as_ref()
+                .map(|item| item.url_enc.clone())
+                .unwrap_or_default()
         } else {
             secrets.encrypt(&url)?
         },
@@ -505,7 +571,10 @@ pub fn save_channel(store_handle: &Store, secrets: &SecretBox, draft: &Value) ->
         last_sent_at: existing.as_ref().and_then(|item| item.last_sent_at.clone()),
         last_error: existing.as_ref().and_then(|item| item.last_error.clone()),
         fail_count: existing.as_ref().map(|item| item.fail_count).unwrap_or(0),
-        created_at: existing.as_ref().map(|item| item.created_at.clone()).unwrap_or_default(),
+        created_at: existing
+            .as_ref()
+            .map(|item| item.created_at.clone())
+            .unwrap_or_default(),
         updated_at: String::new(),
     };
 
@@ -535,7 +604,12 @@ pub fn set_enabled(store_handle: &Store, id: &str, enabled: bool) -> AppResult<b
 // ========== 邮件服务器写操作 ==========
 
 pub fn save_mail(store_handle: &Store, secrets: &SecretBox, draft: &Value) -> AppResult<MailView> {
-    let id = draft.get("id").and_then(Value::as_str).unwrap_or("").trim().to_string();
+    let id = draft
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
     let existing = if id.is_empty() {
         None
     } else {
@@ -544,10 +618,17 @@ pub fn save_mail(store_handle: &Store, secrets: &SecretBox, draft: &Value) -> Ap
             .find(|profile| profile.id == id)
     };
     if !id.is_empty() && existing.is_none() {
-        return Err(AppError::Other("这台邮件服务器已经不在了，请刷新列表".into()));
+        return Err(AppError::Other(
+            "这台邮件服务器已经不在了，请刷新列表".into(),
+        ));
     }
 
-    let name = draft.get("name").and_then(Value::as_str).unwrap_or("").trim().to_string();
+    let name = draft
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
     if name.is_empty() {
         return Err(AppError::Other("服务器名字不能是空的".into()));
     }
@@ -555,10 +636,17 @@ pub fn save_mail(store_handle: &Store, secrets: &SecretBox, draft: &Value) -> Ap
         .into_iter()
         .any(|profile| profile.name == name && profile.id != id);
     if clash {
-        return Err(AppError::Other(format!("已经有同名的一台邮件服务器了：{name}")));
+        return Err(AppError::Other(format!(
+            "已经有同名的一台邮件服务器了：{name}"
+        )));
     }
 
-    let host = draft.get("host").and_then(Value::as_str).unwrap_or("").trim().to_string();
+    let host = draft
+        .get("host")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
     if host.is_empty() {
         return Err(AppError::Other("邮件服务器地址不能为空".into()));
     }
@@ -586,13 +674,21 @@ pub fn save_mail(store_handle: &Store, secrets: &SecretBox, draft: &Value) -> Ap
 
     // undefined 与空串含义不同：前者是「沿用」，后者才是明确的「不登录」
     let username = match draft.get("username") {
-        Some(Value::Null) | None => existing.as_ref().map(|item| item.username.clone()).unwrap_or_default(),
+        Some(Value::Null) | None => existing
+            .as_ref()
+            .map(|item| item.username.clone())
+            .unwrap_or_default(),
         Some(value) => value.as_str().unwrap_or("").trim().to_string(),
     };
     if username.chars().any(char::is_whitespace) || username.contains(',') {
         return Err(AppError::Other("用户名里不能有空格或逗号".into()));
     }
-    let password = draft.get("password").and_then(Value::as_str).unwrap_or("").trim().to_string();
+    let password = draft
+        .get("password")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
     let password_enc = if password.is_empty() {
         if username.is_empty() {
             // 账号清空就把密码一起丢：留着它下次填回用户名会拿一个没人记得的旧密码去试
@@ -624,7 +720,10 @@ pub fn save_mail(store_handle: &Store, secrets: &SecretBox, draft: &Value) -> Ap
             .and_then(Value::as_bool)
             .or_else(|| existing.as_ref().map(|item| item.allow_self_signed))
             .unwrap_or(false),
-        created_at: existing.as_ref().map(|item| item.created_at.clone()).unwrap_or_default(),
+        created_at: existing
+            .as_ref()
+            .map(|item| item.created_at.clone())
+            .unwrap_or_default(),
         updated_at: String::new(),
     };
     let saved_id = store::save_mail_profile(store_handle, &record)?;
@@ -682,7 +781,14 @@ fn truncate_to_bytes(text: &str, max_bytes: usize) -> String {
     }
 }
 
-fn render_text(kind: &str, level: &str, title: &str, body: &str, cluster: &str, at_ms: i64) -> String {
+fn render_text(
+    kind: &str,
+    level: &str,
+    title: &str,
+    body: &str,
+    cluster: &str,
+    at_ms: i64,
+) -> String {
     let head = if title.trim().is_empty() {
         event_label(kind)
     } else {
@@ -726,7 +832,11 @@ struct MailTarget {
     password: Option<String>,
 }
 
-fn resolve_mail(store_handle: &Store, secrets: &SecretBox, profile_id: Option<&str>) -> Result<MailTarget, String> {
+fn resolve_mail(
+    store_handle: &Store,
+    secrets: &SecretBox,
+    profile_id: Option<&str>,
+) -> Result<MailTarget, String> {
     let Some(profile_id) = profile_id.filter(|value| !value.is_empty()) else {
         return Err("这条邮件渠道还没选邮件服务器".into());
     };
@@ -803,8 +913,7 @@ async fn send_mail(
     }
     let transport = builder.build();
 
-    let mut message = MailMessage::builder()
-        .header(ContentType::TEXT_PLAIN);
+    let mut message = MailMessage::builder().header(ContentType::TEXT_PLAIN);
     match mail_from(record).parse() {
         Ok(from) => message = message.from(from),
         Err(error) => return (false, format!("发件地址拼不出来：{error}")),
@@ -860,7 +969,14 @@ fn classify_mail_failure(raw: &str) -> String {
     format!("{hint}（{}）", truncate_to_bytes(raw, 200))
 }
 
-fn record_delivery(store_handle: &Store, channel: &NotifyChannel, level: &str, ok: bool, skipped: bool, message: &str) {
+fn record_delivery(
+    store_handle: &Store,
+    channel: &NotifyChannel,
+    level: &str,
+    ok: bool,
+    skipped: bool,
+    message: &str,
+) {
     let delivery = NotifyDelivery {
         id: 0,
         channel_id: channel.id.clone(),
@@ -877,7 +993,11 @@ fn record_delivery(store_handle: &Store, channel: &NotifyChannel, level: &str, o
 }
 
 /// 「发送测试」：只发这一条渠道，并绕开订阅、级别与限流——点它要问的是「现在通不通」。
-pub async fn test_channel(store_handle: &Store, secrets: &SecretBox, id: &str) -> AppResult<DispatchView> {
+pub async fn test_channel(
+    store_handle: &Store,
+    secrets: &SecretBox,
+    id: &str,
+) -> AppResult<DispatchView> {
     let Some(channel) = store::get_channel(store_handle, id)? else {
         return Err(AppError::Other("这条渠道已经不在了，请刷新列表".into()));
     };
@@ -890,7 +1010,8 @@ pub async fn test_channel(store_handle: &Store, secrets: &SecretBox, id: &str) -
                 if !invalid.is_empty() || valid.is_empty() {
                     (
                         false,
-                        recipients_problem(&channel.recipients).unwrap_or_else(|| "收件人清单为空".into()),
+                        recipients_problem(&channel.recipients)
+                            .unwrap_or_else(|| "收件人清单为空".into()),
                     )
                 } else {
                     let text = render_text(&kind, &level, &title, &body, "", pm_core::now_ms());
@@ -1023,9 +1144,7 @@ fn remember_send(channel_id: &str, now_ms: i64) {
     let mut map = recent_sends()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    map.entry(channel_id.to_string())
-        .or_default()
-        .push(now_ms);
+    map.entry(channel_id.to_string()).or_default().push(now_ms);
 }
 
 /// 把一条事件派给全部渠道：该不该发由渠道自己的订阅清单与级别线决定，
@@ -1120,7 +1239,11 @@ pub async fn dispatch_event(
         // 运行结果回写到渠道行：界面的「上次发送 / 失败次数」靠这三个字段
         let mut updated = channel.clone();
         updated.fail_count = if outcome.0 { 0 } else { channel.fail_count + 1 };
-        updated.last_error = if outcome.0 { None } else { Some(outcome.1.clone()) };
+        updated.last_error = if outcome.0 {
+            None
+        } else {
+            Some(outcome.1.clone())
+        };
         updated.last_sent_at = if outcome.0 {
             Some(iso_from_ms(input.at_ms))
         } else {
@@ -1165,7 +1288,8 @@ async fn send_channel_mail(
             if !invalid.is_empty() || valid.is_empty() {
                 return (
                     false,
-                    recipients_problem(&channel.recipients).unwrap_or_else(|| "收件人清单为空".into()),
+                    recipients_problem(&channel.recipients)
+                        .unwrap_or_else(|| "收件人清单为空".into()),
                 );
             }
             let subject = build_subject(&channel.min_level, &channel.name);

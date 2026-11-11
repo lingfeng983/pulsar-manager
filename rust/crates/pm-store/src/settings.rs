@@ -8,11 +8,9 @@ use crate::db::Store;
 /// 不该反过来把进程挡在启动阶段。
 pub fn configured(key: &str) -> Option<String> {
     let path = crate::db::default_db_path();
-    let conn = rusqlite::Connection::open_with_flags(
-        &path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .ok()?;
+    let conn =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .ok()?;
     conn.query_row(
         "SELECT value FROM user_settings WHERE key = ?1",
         [key],
@@ -52,7 +50,9 @@ pub fn all(store: &Store) -> AppResult<AppSettings> {
                 "theme" => settings.theme = value,
                 "truncateLength" => settings.truncate_length = value.parse().unwrap_or(50),
                 "autoRefresh" => settings.auto_refresh = value != "false",
-                "refreshIntervalSeconds" => settings.refresh_interval_seconds = value.parse().unwrap_or(30),
+                "refreshIntervalSeconds" => {
+                    settings.refresh_interval_seconds = value.parse().unwrap_or(30)
+                }
                 "fontSize" => settings.font_size = value,
                 _ => {}
             }

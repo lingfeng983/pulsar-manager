@@ -5,7 +5,6 @@ use futures::TryStreamExt;
 use pm_core::{AdminConfig, AppError, AppResult, ConsumeOptions, Message, SendOptions, TopicPath};
 use pulsar::compression::{Compression, CompressionLz4, CompressionZlib, CompressionZstd};
 use pulsar::consumer::{ConsumerOptions, InitialPosition};
-use pulsar::producer::ProducerOptions;
 use pulsar::{producer, Authentication, Consumer, Pulsar, SubType, TokioExecutor};
 
 use crate::AdminClient;
@@ -377,26 +376,29 @@ fn into_message(topic: &str, message: pulsar::consumer::Message<Vec<u8>>) -> Mes
 }
 
 impl NativeClient {
-    /// 长连接生产者：工作台的一条会话对应这里的一个 producer。
-    pub async fn open_producer(&self, topic: &str) -> AppResult<pulsar::Producer<TokioExecutor>> {
-        self.open_producer_with(topic, ProducerOptions::default())
+    /// 长连接生产者：工作台的一条会话对应这里的一个 NativeProducer。
+    pub async fn open_producer(&self, topic: &str) -> AppResult<NativeProducer> {
+        self.open_producer_with(topic, NativeProducerOptions::default())
             .await
     }
 
-    /// 带 producer 选项的版本：压测要按界面选择开压缩/批量/允许队列满时阻塞。
+    /// 带生产选项的版本：压测要按界面选择开压缩/批量。选项不暴露 pulsar 类型，
+    /// 具体映射在 `NativeProducerOptions::into_pulsar` 里完成。
     pub async fn open_producer_with(
         &self,
         topic: &str,
-        options: ProducerOptions,
-    ) -> AppResult<pulsar::Producer<TokioExecutor>> {
-        self.pulsar
+        options: NativeProducerOptions,
+    ) -> AppResult<NativeProducer> {
+        let inner = self
+            .pulsar
             .producer()
             .with_topic(topic.to_string())
             .with_name(format!("pulsar-manager-{}", &pm_core::new_id()[..8]))
-            .with_options(options)
+            .with_options(options.into_pulsar())
             .build()
             .await
-            .map_err(|e| AppError::Network(format!("创建 producer 失败: {e}")))
+            .map_err(|e| AppError::Network(format!("创建 producer 失败: {e}")))?;
+        Ok(NativeProducer { inner })
     }
 
     /// 把界面的压缩名映射成 crate 的枚举；未知值保持不压缩。
@@ -488,5 +490,132 @@ impl NativeClient {
             topic: topic.to_string(),
             stop,
         })
+    }
+}
+
+// ========== 长连接生产者：broker 二进制口 I/O 只留在 pm-pulsar ==========
+
+/// 一条待发消息：只承载界面语义的字段，不暴露 `pulsar::producer::Message`。
+/// pm-services 填好它交给 `NativeProducer`，由本层翻译成 crate 的消息类型。
+#[derive(Debug, Clone, Default)]
+pub struct ProducerMessage {
+    pub payload: Vec<u8>,
+    pub properties: HashMap<String, String>,
+    pub partition_key: Option<String>,
+    pub event_time: Option<u64>,
+    pub deliver_at_time: Option<i64>,
+}
+
+impl ProducerMessage {
+    fn into_pulsar(self) -> producer::Message {
+        producer::Message {
+            payload: self.payload,
+            properties: self.properties,
+            partition_key: self.partition_key,
+            event_time: self.event_time,
+            deliver_at_time: self.deliver_at_time,
+            ..Default::default()
+        }
+    }
+}
+
+/// 生产选项：同样不暴露 pulsar 的 `ProducerOptions` / `Compression`。
+/// 批量的具体阈值与压缩名映射都留在 pm-pulsar，pm-services 只表达「是否批量、用哪种压缩」。
+#[derive(Debug, Clone, Default)]
+pub struct NativeProducerOptions {
+    pub batching: bool,
+    pub compression: String,
+}
+
+impl NativeProducerOptions {
+    fn into_pulsar(self) -> producer::ProducerOptions {
+        producer::ProducerOptions {
+            batch_size: self.batching.then_some(100),
+            batch_byte_size: self.batching.then_some(128 * 1024),
+            batch_timeout: self.batching.then_some(Duration::from_millis(10)),
+            compression: if self.compression.is_empty() {
+                None
+            } else {
+                Some(NativeClient::compression_from(&self.compression))
+            },
+            ..Default::default()
+        }
+    }
+}
+
+/// 长连接生产者：把裸 `pulsar::Producer<TokioExecutor>` 包起来，收发相关方法只以
+/// pm-core / 基础类型的形式对外暴露，pm-services 因此不必依赖 pulsar crate。
+pub struct NativeProducer {
+    inner: pulsar::Producer<TokioExecutor>,
+}
+
+/// 一次已入队的发送：把 crate 的确认 future 包成不暴露 pulsar 类型的 future。
+/// 压测先释放 producer 的锁再 await 它，靠这个维持同一 producer 上多个在途消息
+/// （max_in_flight 的并发度），不因封装而被迫串行。
+pub struct PendingSend {
+    inner: std::pin::Pin<Box<dyn std::future::Future<Output = AppResult<String>> + Send>>,
+}
+
+impl std::future::Future for PendingSend {
+    type Output = AppResult<String>;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        // 字段是 Pin<Box<..>>，整体 Unpin，可直接拿到可变借用再 poll 内部 future
+        self.get_mut().inner.as_mut().poll(cx)
+    }
+}
+
+impl NativeProducer {
+    /// 入队一条消息。错误分类与旧的裸调用一致：入队失败是「发送失败」，
+    /// broker 没确认是「broker 未确认消息」（后者在 PendingSend 完成时判定）。
+    pub async fn enqueue(&mut self, message: ProducerMessage) -> AppResult<PendingSend> {
+        let send = self
+            .inner
+            .send_non_blocking(message.into_pulsar())
+            .await
+            .map_err(|e| AppError::Other(format!("发送失败: {e}")))?;
+        Ok(PendingSend {
+            inner: Box::pin(async move {
+                let receipt = send
+                    .await
+                    .map_err(|e| AppError::Other(format!("broker 未确认消息: {e}")))?;
+                Ok(receipt
+                    .message_id
+                    .map(|id| {
+                        format!(
+                            "{}:{}:{}",
+                            id.ledger_id,
+                            id.entry_id,
+                            id.partition.unwrap_or(-1)
+                        )
+                    })
+                    .unwrap_or_else(|| "sent".to_string()))
+            }),
+        })
+    }
+
+    /// 发送并等确认，返回 messageId（`ledger:entry:partition`）；broker 未给 id 时为 "sent"。
+    /// 参数承载 payload / properties / partition_key / event_time / deliver_at_time。
+    pub async fn send_one(&mut self, message: ProducerMessage) -> AppResult<String> {
+        self.enqueue(message).await?.await
+    }
+
+    /// 把批量队列最后一段推出去。返回 AppResult 供调用方按需判断（现有调用点忽略它）。
+    pub async fn send_batch(&mut self) -> AppResult<()> {
+        self.inner
+            .send_batch()
+            .await
+            .map_err(|e| AppError::Other(e.to_string()))
+    }
+
+    /// 关闭 producer。现有调用点忽略返回值。
+    pub async fn close(&mut self) -> AppResult<()> {
+        self.inner
+            .close()
+            .await
+            .map_err(|e| AppError::Other(e.to_string()))
     }
 }

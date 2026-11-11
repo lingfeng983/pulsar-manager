@@ -202,29 +202,50 @@ const ConfigCenter: React.FC = () => {
     };
 
     const handleImport = async (file: File) => {
-        setBusy(true);
+        // 先做只读体检：文件不对就不必弹确认框，免得确认完才报「不是本工具的配置」。
+        let parsed: unknown = null;
         try {
-            const text = await file.text();
-            const parsed: unknown = JSON.parse(text);
-            if (!looksLikeConfigBundle(parsed)) {
-                message.error('文件不是本工具导出的配置（缺少 format/version 标记）');
-                return;
-            }
-            const response = await window.electronAPI.config.import(parsed);
-            if (!response.success || !response.data) {
-                message.error(`导入失败：${response.error || '未知错误'}`);
-                return;
-            }
-            const result: ConfigImportResult = response.data;
-            const skipped = result.clustersSkipped.length ? `，跳过同名集群 ${result.clustersSkipped.join('、')}` : '';
-            message.success(`导入完成：新增集群 ${result.clustersImported} 个${skipped}，应用设置已更新`);
-            // 导入直接写了库，渲染层三份状态必须重新取，否则界面还停在旧值上
-            await Promise.all([useSettingsStore.getState().load(), fetchClusters(), loadShortcuts()]);
+            parsed = JSON.parse(await file.text());
         } catch (error) {
             message.error(`导入失败：${(error as Error).message}`);
-        } finally {
-            setBusy(false);
+            return;
         }
+        if (!looksLikeConfigBundle(parsed)) {
+            message.error('文件不是本工具导出的配置（缺少 format/version 标记）');
+            return;
+        }
+        // 收成 const：onOk 是闭包，let 上的类型守卫收窄不会带进闭包里。
+        const bundle: ConfigBundle = parsed;
+        // 导入是整库覆盖：应用设置会被文件里的值替换，且不可撤销。
+        // 与清空日志/恢复默认一致，这类不可逆动作先过一次危险确认。
+        confirmDanger({
+            title: '导入配置',
+            description:
+                '导入会用文件中的配置覆盖当前应用设置（界面、刷新、告警、更新等），不可撤销；' +
+                '集群只做新增，同名集群会被跳过，凭据不会随文件导入。',
+            okText: '导入',
+            onOk: async () => {
+                setBusy(true);
+                try {
+                    const response = await window.electronAPI.config.import(bundle);
+                    if (!response.success || !response.data) {
+                        message.error(`导入失败：${response.error || '未知错误'}`);
+                        return;
+                    }
+                    const result: ConfigImportResult = response.data;
+                    const skipped = result.clustersSkipped.length
+                        ? `，跳过同名集群 ${result.clustersSkipped.join('、')}`
+                        : '';
+                    message.success(`导入完成：新增集群 ${result.clustersImported} 个${skipped}，应用设置已更新`);
+                    // 导入直接写了库，渲染层三份状态必须重新取，否则界面还停在旧值上
+                    await Promise.all([useSettingsStore.getState().load(), fetchClusters(), loadShortcuts()]);
+                } catch (error) {
+                    message.error(`导入失败：${(error as Error).message}`);
+                } finally {
+                    setBusy(false);
+                }
+            },
+        });
     };
 
     const handleClearLogs = () => {

@@ -38,7 +38,11 @@ pub fn save(store: &Store, report: &InspectionReport) -> AppResult<()> {
     })
 }
 
-pub fn list(store: &Store, cluster_id: Option<&str>, limit: i64) -> AppResult<Vec<InspectionReport>> {
+pub fn list(
+    store: &Store,
+    cluster_id: Option<&str>,
+    limit: i64,
+) -> AppResult<Vec<InspectionReport>> {
     store.with(|conn| {
         let mut stmt = conn.prepare(
             "SELECT id, cluster_id, cluster_name, version, generated_at, crit, warn, ok, skip, \
@@ -96,7 +100,10 @@ pub fn delete(store: &Store, id: &str) -> AppResult<()> {
 
 /// 巡检口径：没有行就是「没改过判定线」，返回 None 让调用方用默认值，
 /// 不要在这里补一份默认口径落库。
-pub fn profile(store: &Store, cluster_id: &str) -> AppResult<Option<(InspectionThresholds, i64, i64, String)>> {
+pub fn profile(
+    store: &Store,
+    cluster_id: &str,
+) -> AppResult<Option<(InspectionThresholds, i64, i64, String)>> {
     store.with(|conn| {
         let row = conn
             .query_row(
@@ -232,7 +239,10 @@ pub fn mark_run(
 /// 清空这台集群的全部历史（界面上「清空历史」就是这一个动作）。
 pub fn delete_cluster(store: &Store, cluster_id: &str) -> AppResult<i64> {
     store.with(|conn| {
-        let affected = conn.execute("DELETE FROM inspections WHERE cluster_id = ?1", [cluster_id])?;
+        let affected = conn.execute(
+            "DELETE FROM inspections WHERE cluster_id = ?1",
+            [cluster_id],
+        )?;
         Ok(affected as i64)
     })
 }

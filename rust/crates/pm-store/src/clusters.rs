@@ -3,7 +3,8 @@ use rusqlite::{params, OptionalExtension, Row};
 
 use crate::db::{flag, Store};
 
-const COLUMNS: &str = "id, name, service_url, web_service_url, auth_plugin, auth_params, tls_enabled, \
+const COLUMNS: &str =
+    "id, name, service_url, web_service_url, auth_plugin, auth_params, tls_enabled, \
      tls_trust_certs, use_ssh_tunnel, ssh_config_id, use_k8s_forward, k8s_config_id, \
      admin_api_timeout, status, version, created_at, updated_at";
 
@@ -42,7 +43,11 @@ pub fn list(store: &Store) -> AppResult<Vec<Cluster>> {
 pub fn get(store: &Store, id: &str) -> AppResult<Option<Cluster>> {
     store.with(|conn| {
         Ok(conn
-            .query_row(&format!("SELECT {COLUMNS} FROM clusters WHERE id = ?1"), [id], map)
+            .query_row(
+                &format!("SELECT {COLUMNS} FROM clusters WHERE id = ?1"),
+                [id],
+                map,
+            )
             .optional()?)
     })
 }

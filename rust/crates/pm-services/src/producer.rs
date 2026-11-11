@@ -10,9 +10,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pm_core::{AdminConfig, AppError, AppResult, ConsumeOptions, TemplateVariable, TopicPath};
-use pm_pulsar::native::NativeClient;
+// broker 二进制口的收发只走 pm-pulsar 的包装类型，这里不再直接依赖 pulsar crate。
+use pm_pulsar::native::{NativeClient, NativeProducer, NativeProducerOptions, ProducerMessage};
 use pm_pulsar::AdminClient;
-use pulsar::producer;
 use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
 
@@ -595,39 +595,22 @@ pub async fn start(
     Ok(view)
 }
 
-async fn send_one(
-    producer: &mut pulsar::Producer<pulsar::TokioExecutor>,
-    item: &SendItem,
-) -> AppResult<String> {
-    let message = producer::Message {
-        payload: item.payload.clone(),
-        properties: item
-            .properties
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect(),
-        partition_key: item.partition_key.clone(),
-        event_time: item.event_time.map(|value| value as u64),
-        deliver_at_time: item.deliver_at,
-        ..Default::default()
-    };
-    let receipt = producer
-        .send_non_blocking(message)
-        .await
-        .map_err(|e| AppError::Other(format!("发送失败: {e}")))?
-        .await
-        .map_err(|e| AppError::Other(format!("broker 未确认消息: {e}")))?;
-    Ok(receipt
-        .message_id
-        .map(|id| {
-            format!(
-                "{}:{}:{}",
-                id.ledger_id,
-                id.entry_id,
-                id.partition.unwrap_or(-1)
-            )
+/// 把界面语义的 SendItem 翻译成 pm-pulsar 的 ProducerMessage 后交给包装层发送。
+/// messageId 的 `ledger:entry:partition` 转换与错误分类都留在 pm-pulsar，服务层不碰裸 crate 类型。
+async fn send_one(producer: &mut NativeProducer, item: &SendItem) -> AppResult<String> {
+    producer
+        .send_one(ProducerMessage {
+            payload: item.payload.clone(),
+            properties: item
+                .properties
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            partition_key: item.partition_key.clone(),
+            event_time: item.event_time.map(|value| value as u64),
+            deliver_at_time: item.deliver_at,
         })
-        .unwrap_or_else(|| "sent".to_string()))
+        .await
 }
 
 fn rate_of(count: i64, elapsed: Duration) -> f64 {
@@ -741,12 +724,11 @@ pub async fn run_benchmark(
     let rate = spec.rate_per_sec.max(0.0);
 
     let client = NativeClient::connect(config).await?;
-    let options = producer::ProducerOptions {
-        batch_size: spec.batching.then_some(100),
-        batch_byte_size: spec.batching.then_some(128 * 1024),
-        batch_timeout: spec.batching.then_some(Duration::from_millis(10)),
-        compression: Some(NativeClient::compression_from(&spec.compression)),
-        ..Default::default()
+    // 只表达「是否批量 / 用哪种压缩」，阈值与压缩枚举的映射由 pm-pulsar 的
+    // NativeProducerOptions 负责，服务层不再构造 pulsar::ProducerOptions。
+    let options = NativeProducerOptions {
+        batching: spec.batching,
+        compression: spec.compression.clone(),
     };
     let mut slots = Vec::with_capacity(producers);
     for _ in 0..producers {
@@ -853,17 +835,20 @@ pub async fn run_benchmark(
                     }
                 }
                 let payload = vec![b'x'; message_size];
-                let message = producer::Message {
+                let message = ProducerMessage {
                     payload: payload.clone(),
                     ..Default::default()
                 };
                 let at = Instant::now();
+                // 先在锁里 enqueue 拿到确认 future，再释放锁 await：保持原来
+                // max_in_flight 个在途消息并发，不因封装被串行化。错误分类沿用
+                // pm-pulsar 的「发送失败 / broker 未确认消息」文案。
                 let enqueued = {
                     let mut producer = slot.lock().await;
-                    producer.send_non_blocking(message).await
+                    producer.enqueue(message).await
                 };
                 match enqueued {
-                    Ok(receipt) => match receipt.await {
+                    Ok(pending) => match pending.await {
                         Ok(_) => {
                             sent.fetch_add(1, Ordering::Relaxed);
                             bytes_sent.fetch_add(payload.len() as i64, Ordering::Relaxed);
@@ -877,14 +862,14 @@ pub async fn run_benchmark(
                         Err(error) => {
                             failed.fetch_add(1, Ordering::Relaxed);
                             if let Ok(mut slot) = last_error.lock() {
-                                *slot = Some(format!("broker 未确认消息: {error}"));
+                                *slot = Some(error.to_string());
                             }
                         }
                     },
                     Err(error) => {
                         failed.fetch_add(1, Ordering::Relaxed);
                         if let Ok(mut slot) = last_error.lock() {
-                            *slot = Some(format!("发送失败: {error}"));
+                            *slot = Some(error.to_string());
                         }
                     }
                 }

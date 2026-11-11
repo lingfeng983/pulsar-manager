@@ -30,6 +30,11 @@ impl AppContext {
         let store = Arc::new(Store::open(db_path)?);
         let secrets = Arc::new(SecretBox::load_or_create(secret_dir)?);
         let warning = secrets.warning().map(str::to_string);
+        // 密钥轮换这类启动期告警原本只存在字段里、没有任何读取点，界面永远看不到；
+        // 启动就写一行日志，排障时至少能从日志看出「已存凭据需要重新填」。
+        if let Some(warning) = warning.as_deref() {
+            pm_core::pm_warn!("[cluster] 启动期告警：{warning}");
+        }
         Ok(Self {
             store,
             secrets,

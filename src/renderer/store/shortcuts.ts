@@ -1,5 +1,6 @@
 import {create} from 'zustand';
 import {z} from 'zod';
+import {message} from 'antd';
 import {COMMAND_CATALOG, COMMAND_BY_ID, type CommandId} from './commands';
 import {detectPlatform, type Platform} from '../utils/keybinding';
 
@@ -61,20 +62,37 @@ interface ShortcutState {
     config: ShortcutConfig;
     ready: boolean;
     load: () => Promise<void>;
-    setBinding: (id: CommandId, binding: string | null) => Promise<void>;
-    resetOne: (id: CommandId) => Promise<void>;
-    resetAll: () => Promise<void>;
-    setEnabled: (enabled: boolean) => Promise<void>;
+    /** 返回是否真正落库：界面据此决定要不要报「已保存」这类成功提示。 */
+    setBinding: (id: CommandId, binding: string | null) => Promise<boolean>;
+    resetOne: (id: CommandId) => Promise<boolean>;
+    resetAll: () => Promise<boolean>;
+    setEnabled: (enabled: boolean) => Promise<boolean>;
     exportConfig: () => string;
-    importConfig: (raw: string) => {success: boolean; error?: string};
+    /** async：解析与落库都可能失败，返回真实结果，不再无条件 success:true。 */
+    importConfig: (raw: string) => Promise<{success: boolean; error?: string}>;
 }
 
-async function persist(config: ShortcutConfig): Promise<void> {
+// rpc 永不 reject：写库失败只体现在 response.success === false，
+// 所以必须判 success，不能只靠 catch（那样 catch 永远不会触发）。
+// 返回是否真的落库；showError=false 用于 importConfig——那一路由调用点统一弹提示，避免重复。
+async function persist(config: ShortcutConfig, showError = true): Promise<boolean> {
     try {
-        await window.electronAPI.settings.set(SETTINGS_KEY, JSON.stringify(config));
+        const response = await window.electronAPI.settings.set(SETTINGS_KEY, JSON.stringify(config));
+        if (response.success) {
+            return true;
+        }
+        console.error('[shortcut] persist failed', response.error);
+        if (showError) {
+            message.error(`快捷键保存失败：${response.error || '写入配置失败'}，本次改动仅在当前会话生效`);
+        }
+        return false;
     } catch (error) {
-        // 写库失败不影响本次会话内的可用性，只记录一次。
+        // transport 层真的抛异常时也要反馈，而不是静默吞掉。
         console.error('[shortcut] persist failed', error);
+        if (showError) {
+            message.error(`快捷键保存失败：${error instanceof Error ? error.message : String(error)}`);
+        }
+        return false;
     }
 }
 
@@ -101,7 +119,7 @@ export const useShortcutStore = create<ShortcutState>((set, get) => ({
             [current.platform]: {...current.config[current.platform], [id]: binding},
         };
         set({config});
-        await persist(config);
+        return persist(config);
     },
 
     resetOne: async id => {
@@ -110,31 +128,33 @@ export const useShortcutStore = create<ShortcutState>((set, get) => ({
         delete next[id];
         const config: ShortcutConfig = {...current.config, [current.platform]: next};
         set({config});
-        await persist(config);
+        return persist(config);
     },
 
     resetAll: async () => {
         const config = emptyConfig();
         set({config});
-        await persist(config);
+        return persist(config);
     },
 
     setEnabled: async enabled => {
         const config = {...get().config, enabled};
         set({config});
-        await persist(config);
+        return persist(config);
     },
 
     exportConfig: () => JSON.stringify(get().config, null, 2),
 
-    importConfig: raw => {
+    importConfig: async raw => {
         const parsed = parseConfig(raw);
         if (!parsed) {
             return {success: false, error: '配置文件格式无效或版本不受支持'};
         }
         set({config: parsed});
-        void persist(parsed);
-        return {success: true};
+        // 等落库结果再回报：写库失败就是导入失败，不能无条件 success:true。
+        // 不在这里弹 toast，交给调用点按 result 统一提示，避免重复。
+        const ok = await persist(parsed, false);
+        return ok ? {success: true} : {success: false, error: '配置写入失败，改动仅在当前会话生效'};
     },
 }));
 

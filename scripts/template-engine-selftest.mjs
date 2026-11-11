@@ -281,6 +281,21 @@ check('referencedVariables 收正文字面引用，不含函数与变量表达�
     assert.deepEqual(referencedVariables(body), ['region']);
 });
 
+// 深层嵌套在 JSON.parse 那一步是合法的，真正会炸的是校验期的递归遍历：
+// 栈溢出抛的是 RangeError，调用处 catch 不住，在渲染进程里就是整页白屏。
+// 这两条钉的是「宁可给一句可读的报错，也不能把调用方带崩」。
+check('validateTemplate：超深嵌套给可读报错而不是栈溢出', () => {
+    const deep = '{"a":'.repeat(400) + '1' + '}'.repeat(400);
+    const result = validateTemplate(deep, []);
+    assert.equal(result.ok, false);
+    assert.match(result.error, /嵌套层级异常/);
+});
+
+check('referencedVariables：超深嵌套不抛异常，仍能收集变量', () => {
+    const deep = '{"a":'.repeat(400) + '"${x}"' + '}'.repeat(400);
+    assert.deepEqual(referencedVariables(deep), ['x']);
+});
+
 check('坏 JSON 不抛异常：referencedVariables 回空、resolve 回错误文本', () => {
     assert.deepEqual(referencedVariables('{'), []);
     const failure = resolveTemplate('{', []);

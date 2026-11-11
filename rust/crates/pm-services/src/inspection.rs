@@ -50,7 +50,10 @@ pub fn resolve_thresholds(draft: Option<&serde_json::Value>) -> AppResult<Inspec
             continue;
         };
         if !value.is_finite() {
-            return Err(invalid(&format!("{} 必须是一个有限的数字", field_label(field))));
+            return Err(invalid(&format!(
+                "{} 必须是一个有限的数字",
+                field_label(field)
+            )));
         }
         if integer && value.fract() != 0.0 {
             return Err(invalid(&format!("{} 只能是整数", field_label(field))));
@@ -61,7 +64,11 @@ pub fn resolve_thresholds(draft: Option<&serde_json::Value>) -> AppResult<Inspec
                 field_label(field)
             )));
         }
-        let value = if integer { value } else { (value * 100.0).round() / 100.0 };
+        let value = if integer {
+            value
+        } else {
+            (value * 100.0).round() / 100.0
+        };
         match field {
             "backlogWarn" => next.backlog_warn = value,
             "backlogCrit" => next.backlog_crit = value,
@@ -74,7 +81,9 @@ pub fn resolve_thresholds(draft: Option<&serde_json::Value>) -> AppResult<Inspec
 
     // 两个数各自合法，合起来却让分级反过来：超过关注线却永远到不了严重线
     if next.backlog_crit < next.backlog_warn {
-        return Err(invalid("积压严重线不能低于关注线，否则积压只会报到「关注」就停住"));
+        return Err(invalid(
+            "积压严重线不能低于关注线，否则积压只会报到「关注」就停住",
+        ));
     }
     Ok(next)
 }
@@ -88,7 +97,10 @@ pub struct Sampling {
     pub max_topics: i64,
 }
 
-pub fn resolve_sampling(max_namespaces: Option<i64>, max_topics: Option<i64>) -> AppResult<Sampling> {
+pub fn resolve_sampling(
+    max_namespaces: Option<i64>,
+    max_topics: Option<i64>,
+) -> AppResult<Sampling> {
     let out = Sampling {
         max_namespaces: max_namespaces.unwrap_or(DEFAULT_MAX_NAMESPACES),
         max_topics: max_topics.unwrap_or(DEFAULT_MAX_TOPICS),
@@ -118,7 +130,10 @@ pub fn threshold_overrides(thresholds: &InspectionThresholds) -> Vec<String> {
         out.push(format!("入向/出向倍数 {} 倍", thresholds.rate_ratio));
     }
     if thresholds.rate_min_in != defaults.rate_min_in {
-        out.push(format!("速率判定的入向下限 {} 条/秒", thresholds.rate_min_in));
+        out.push(format!(
+            "速率判定的入向下限 {} 条/秒",
+            thresholds.rate_min_in
+        ));
     }
     if thresholds.detail_top_n != defaults.detail_top_n {
         out.push(format!("明细最多列几条 {} 条", thresholds.detail_top_n));
@@ -181,7 +196,13 @@ pub fn build_connectivity_check(healthy: bool) -> InspectionCheck {
     if healthy {
         InspectionCheck::new("connectivity", "Broker 健康检查", CheckLevel::Ok, "通过")
     } else {
-        InspectionCheck::new("connectivity", "Broker 健康检查", CheckLevel::Crit, "未通过").suggestion(
+        InspectionCheck::new(
+            "connectivity",
+            "Broker 健康检查",
+            CheckLevel::Crit,
+            "未通过",
+        )
+        .suggestion(
             "确认 webServiceUrl 指向的是 broker 而不是其它 HTTP 服务，并检查认证是否仍然有效",
         )
     }
@@ -189,12 +210,17 @@ pub fn build_connectivity_check(healthy: bool) -> InspectionCheck {
 
 pub fn build_broker_check(active: usize, all: usize) -> InspectionCheck {
     if active == 0 {
-        return InspectionCheck::new("brokers", "Broker 存活", CheckLevel::Crit, "集群里没有活跃 broker")
-            .detail(if all > 0 {
-                vec![format!("已登记 {all} 个，全部不在列表")]
-            } else {
-                Vec::new()
-            });
+        return InspectionCheck::new(
+            "brokers",
+            "Broker 存活",
+            CheckLevel::Crit,
+            "集群里没有活跃 broker",
+        )
+        .detail(if all > 0 {
+            vec![format!("已登记 {all} 个，全部不在列表")]
+        } else {
+            Vec::new()
+        });
     }
     if all > active {
         return InspectionCheck::new(
@@ -215,7 +241,12 @@ pub fn build_broker_check(active: usize, all: usize) -> InspectionCheck {
 
 pub fn build_consumer_check(rows: &[TopicRow], th: &InspectionThresholds) -> InspectionCheck {
     if rows.is_empty() {
-        return InspectionCheck::new("consumers", "消费端在读", CheckLevel::Skip, "没有采样到 topic，无法判断");
+        return InspectionCheck::new(
+            "consumers",
+            "消费端在读",
+            CheckLevel::Skip,
+            "没有采样到 topic，无法判断",
+        );
     }
     let mut stalled: Vec<&TopicRow> = rows
         .iter()
@@ -229,7 +260,11 @@ pub fn build_consumer_check(rows: &[TopicRow], th: &InspectionThresholds) -> Ins
             "采样范围内没有「有积压但无消费者」的 topic",
         );
     }
-    stalled.sort_by(|a, b| b.backlog.partial_cmp(&a.backlog).unwrap_or(std::cmp::Ordering::Equal));
+    stalled.sort_by(|a, b| {
+        b.backlog
+            .partial_cmp(&a.backlog)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let total: f64 = stalled.iter().map(|row| row.backlog).sum();
     InspectionCheck::new(
         "consumers",
@@ -253,17 +288,25 @@ pub fn build_consumer_check(rows: &[TopicRow], th: &InspectionThresholds) -> Ins
             })
             .collect(),
     )
-    .suggestion("这些 topic 的积压只会随生产继续增长：确认消费者是否崩溃、订阅是否被删，或先把生产端停掉")
+    .suggestion(
+        "这些 topic 的积压只会随生产继续增长：确认消费者是否崩溃、订阅是否被删，或先把生产端停掉",
+    )
 }
 
 pub fn build_backlog_check(rows: &[TopicRow], th: &InspectionThresholds) -> InspectionCheck {
     if rows.is_empty() {
-        return InspectionCheck::new("backlog", "消息积压", CheckLevel::Skip, "没有采样到 topic，无法判断积压");
+        return InspectionCheck::new(
+            "backlog",
+            "消息积压",
+            CheckLevel::Skip,
+            "没有采样到 topic，无法判断积压",
+        );
     }
     let total: f64 = rows.iter().map(|row| row.backlog).sum();
-    let worst = rows
-        .iter()
-        .fold(&rows[0], |max, row| if row.backlog > max.backlog { row } else { max });
+    let worst = rows.iter().fold(
+        &rows[0],
+        |max, row| if row.backlog > max.backlog { row } else { max },
+    );
     let level = if worst.backlog >= th.backlog_crit {
         CheckLevel::Crit
     } else if worst.backlog >= th.backlog_warn {
@@ -272,7 +315,11 @@ pub fn build_backlog_check(rows: &[TopicRow], th: &InspectionThresholds) -> Insp
         CheckLevel::Ok
     };
     let mut sorted: Vec<&TopicRow> = rows.iter().collect();
-    sorted.sort_by(|a, b| b.backlog.partial_cmp(&a.backlog).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| {
+        b.backlog
+            .partial_cmp(&a.backlog)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     InspectionCheck::new(
         "backlog",
         "消息积压",
@@ -311,7 +358,10 @@ pub fn build_unacked_check(rows: &[TopicRow], th: &InspectionThresholds) -> Insp
         );
     }
     let total: f64 = rows.iter().map(|row| row.max_unacked).sum();
-    let blocked: Vec<&TopicRow> = rows.iter().filter(|row| !row.blocked_subscriptions.is_empty()).collect();
+    let blocked: Vec<&TopicRow> = rows
+        .iter()
+        .filter(|row| !row.blocked_subscriptions.is_empty())
+        .collect();
     if !blocked.is_empty() {
         return InspectionCheck::new(
             "unacked",
@@ -355,7 +405,9 @@ pub fn build_throughput_check(rows: &[TopicRow], th: &InspectionThresholds) -> I
     }
     let mut lagging: Vec<&TopicRow> = rows
         .iter()
-        .filter(|row| row.msg_rate_in >= th.rate_min_in && row.msg_rate_in >= row.msg_rate_out * th.rate_ratio)
+        .filter(|row| {
+            row.msg_rate_in >= th.rate_min_in && row.msg_rate_in >= row.msg_rate_out * th.rate_ratio
+        })
         .collect();
     if lagging.is_empty() {
         return InspectionCheck::new(
@@ -365,7 +417,11 @@ pub fn build_throughput_check(rows: &[TopicRow], th: &InspectionThresholds) -> I
             "采样范围内没有持续入大于出的 topic",
         );
     }
-    lagging.sort_by(|a, b| b.msg_rate_in.partial_cmp(&a.msg_rate_in).unwrap_or(std::cmp::Ordering::Equal));
+    lagging.sort_by(|a, b| {
+        b.msg_rate_in
+            .partial_cmp(&a.msg_rate_in)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     InspectionCheck::new(
         "throughput",
         "生产与消费速率",
@@ -376,19 +432,37 @@ pub fn build_throughput_check(rows: &[TopicRow], th: &InspectionThresholds) -> I
         lagging
             .iter()
             .take(th.top_n())
-            .map(|row| format!("{}：入 {:.1}/s，出 {:.1}/s", row.name, row.msg_rate_in, row.msg_rate_out))
+            .map(|row| {
+                format!(
+                    "{}：入 {:.1}/s，出 {:.1}/s",
+                    row.name, row.msg_rate_in, row.msg_rate_out
+                )
+            })
             .collect(),
     )
     .suggestion("要么加消费者，要么在生产端限流；这个比例维持下去积压会一直增长")
 }
 
-pub fn build_worker_check(state: Option<&serde_json::Value>, error: Option<&str>) -> InspectionCheck {
+pub fn build_worker_check(
+    state: Option<&serde_json::Value>,
+    error: Option<&str>,
+) -> InspectionCheck {
     if let Some(error) = error {
-        return InspectionCheck::new("workers", "函数 / 连接器 worker", CheckLevel::Skip, "worker 状态读不到")
-            .detail(vec![error.to_string()]);
+        return InspectionCheck::new(
+            "workers",
+            "函数 / 连接器 worker",
+            CheckLevel::Skip,
+            "worker 状态读不到",
+        )
+        .detail(vec![error.to_string()]);
     }
     let Some(state) = state else {
-        return InspectionCheck::new("workers", "函数 / 连接器 worker", CheckLevel::Skip, "worker 状态未采集");
+        return InspectionCheck::new(
+            "workers",
+            "函数 / 连接器 worker",
+            CheckLevel::Skip,
+            "worker 状态未采集",
+        );
     };
     if state["enabled"] != true {
         let notice = state["notice"].as_str().map(str::to_string);
@@ -420,7 +494,12 @@ pub fn build_worker_check(state: Option<&serde_json::Value>, error: Option<&str>
 
 pub fn build_alert_check(alerts: &[AlertRow], th: &InspectionThresholds) -> InspectionCheck {
     if alerts.is_empty() {
-        return InspectionCheck::new("alerts", "未恢复的本地告警", CheckLevel::Ok, "没有未恢复的告警事件");
+        return InspectionCheck::new(
+            "alerts",
+            "未恢复的本地告警",
+            CheckLevel::Ok,
+            "没有未恢复的告警事件",
+        );
     }
     InspectionCheck::new(
         "alerts",
@@ -483,8 +562,13 @@ pub async fn run(request: InspectionRequest<'_>) -> AppResult<InspectionReport> 
             brokers.all_brokers.len(),
         )),
         Err(error) => checks.push(
-            InspectionCheck::new("brokers", "Broker 存活", CheckLevel::Skip, "broker 列表读取失败")
-                .detail(vec![error.to_string()]),
+            InspectionCheck::new(
+                "brokers",
+                "Broker 存活",
+                CheckLevel::Skip,
+                "broker 列表读取失败",
+            )
+            .detail(vec![error.to_string()]),
         ),
     }
 
@@ -527,7 +611,9 @@ pub async fn run(request: InspectionRequest<'_>) -> AppResult<InspectionReport> 
         let topics = match client.topics(tenant, namespace).await {
             Ok(list) => list,
             Err(error) => {
-                errors.push(format!("命名空间 {namespace} 的 topic 列表读取失败：{error}"));
+                errors.push(format!(
+                    "命名空间 {namespace} 的 topic 列表读取失败：{error}"
+                ));
                 continue;
             }
         };
@@ -543,7 +629,10 @@ pub async fn run(request: InspectionRequest<'_>) -> AppResult<InspectionReport> 
             let name = topic.name.clone();
             let persistent = topic.persistent;
             async move {
-                match client.topic_stats(tenant, namespace, &name, persistent).await {
+                match client
+                    .topic_stats(tenant, namespace, &name, persistent)
+                    .await
+                {
                     Ok(stats) => Ok(to_topic_row(&name, persistent, &stats)),
                     Err(error) => Err(format!("topic {name} 的统计读取失败：{error}")),
                 }
@@ -583,7 +672,9 @@ pub async fn run(request: InspectionRequest<'_>) -> AppResult<InspectionReport> 
                 format!("{} 次请求没有拿到数据", errors.len()),
             )
             .detail(errors.iter().take(thresholds.top_n()).cloned().collect())
-            .suggestion("局部失败不影响其余判定，但报告覆盖范围比看上去小：老 broker 缺少端点时会集中出现"),
+            .suggestion(
+                "局部失败不影响其余判定，但报告覆盖范围比看上去小：老 broker 缺少端点时会集中出现",
+            ),
         );
     }
 
@@ -618,7 +709,12 @@ const LEVEL_RANK: [(&str, i32); 4] = [("ok", 0), ("skip", 1), ("warn", 2), ("cri
 
 fn level_rank(level: Option<&str>) -> i32 {
     level
-        .and_then(|level| LEVEL_RANK.iter().find(|(key, _)| *key == level).map(|(_, rank)| *rank))
+        .and_then(|level| {
+            LEVEL_RANK
+                .iter()
+                .find(|(key, _)| *key == level)
+                .map(|(_, rank)| *rank)
+        })
         .unwrap_or(0)
 }
 
@@ -757,12 +853,8 @@ pub fn build_inspection_diff(
 
 // ========== 导出 ==========
 
-const LEVEL_MARKS: [(&str, &str); 4] = [
-    ("crit", "🔴"),
-    ("warn", "🟠"),
-    ("ok", "🟢"),
-    ("skip", "⚪"),
-];
+const LEVEL_MARKS: [(&str, &str); 4] =
+    [("crit", "🔴"), ("warn", "🟠"), ("ok", "🟢"), ("skip", "⚪")];
 
 const LEVEL_NAMES: [(&str, &str); 4] = [
     ("crit", "严重"),
@@ -800,7 +892,10 @@ fn render_diff_markdown(diff: &serde_json::Value, lines: &mut Vec<String>) {
     let previous_at = diff["previousGeneratedAt"].as_str().unwrap_or("-");
     lines.push(format!("## 与上次巡检的差别（上次：{previous_at}）"));
     lines.push(String::new());
-    let changes = diff["thresholdChanges"].as_array().cloned().unwrap_or_default();
+    let changes = diff["thresholdChanges"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     if !changes.is_empty() {
         let text: Vec<String> = changes
             .iter()
@@ -888,14 +983,22 @@ pub fn render_markdown(report: &InspectionReport, diff: Option<&serde_json::Valu
         lines.push(format!("- {}", describe_thresholds(thresholds)));
     }
     if report.scope.truncated {
-        lines.push("- 注意：采样在命名空间或 topic 上限处被截断，未采样的部分不在本报告结论之内".to_string());
+        lines.push(
+            "- 注意：采样在命名空间或 topic 上限处被截断，未采样的部分不在本报告结论之内"
+                .to_string(),
+        );
     }
     lines.push(String::new());
     if let Some(diff) = diff {
         render_diff_markdown(diff, &mut lines);
     }
     for item in &report.checks {
-        lines.push(format!("## {} {}（{}）", mark(&item.level), item.title, level_name(&item.level)));
+        lines.push(format!(
+            "## {} {}（{}）",
+            mark(&item.level),
+            item.title,
+            level_name(&item.level)
+        ));
         lines.push(String::new());
         lines.push(item.summary.clone());
         if !item.detail.is_empty() {
@@ -954,9 +1057,17 @@ mod tests {
             InspectionCheck::new("backlog", "积压", CheckLevel::Ok, "还好"),
             InspectionCheck::new("alerts", "告警", CheckLevel::Warn, "两条"),
         ];
-        let current = vec![InspectionCheck::new("backlog", "积压", CheckLevel::Crit, "炸了")];
+        let current = vec![InspectionCheck::new(
+            "backlog",
+            "积压",
+            CheckLevel::Crit,
+            "炸了",
+        )];
         let items = diff_inspection_checks(&previous, &current);
-        let kinds: Vec<&str> = items.iter().filter_map(|item| item["kind"].as_str()).collect();
+        let kinds: Vec<&str> = items
+            .iter()
+            .filter_map(|item| item["kind"].as_str())
+            .collect();
         assert!(kinds.contains(&"worsened"));
         assert!(kinds.contains(&"resolved"));
         // 排序按「需要人处理的排前面」：恶化第一，本次未出现第二

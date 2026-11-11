@@ -9,13 +9,21 @@ use pm_core::{AppResult, InspectionSchedule};
 use pm_services::inspection::{self, AlertRow, InspectionRequest};
 use serde_json::{json, Value};
 
-use crate::bridge::{blocking, fail, emit, ok, Shared};
+use crate::bridge::{blocking, emit, fail, ok, Shared};
 
+// 巡检阈值：与前端 `src/shared/inspection-schedule.ts`、`inspection-summary.ts`
+// 各硬编码一份。TS 与 Rust 之间无法共享同一个常量定义，跨语言同步成本过高，
+// 所以这里在 Rust 侧集中成常量并钉住口径——改任何一处都必须同步另一处，值不能自行漂移。
 const HISTORY_LIST_LIMIT: i64 = 50;
+/// 每簇滚动保留份数，对应前端 INSPECTION_HISTORY_KEEP
 const HISTORY_KEEP: i64 = 30;
+/// 一次逐台巡检的集群上限，对应前端 FLEET_RUN_MAX_CLUSTERS
 const FLEET_RUN_MAX_CLUSTERS: i64 = 20;
+/// 默认间隔 6 小时，对应前端 DEFAULT_INTERVAL_MINUTES
 const DEFAULT_INTERVAL_MINUTES: i64 = 360;
+/// 间隔下限 30 分钟，对应前端 INTERVAL_LIMITS.min
 const MIN_INTERVAL: i64 = 30;
+/// 间隔上限 7 天（10080 分钟），对应前端 INTERVAL_LIMITS.max
 const MAX_INTERVAL: i64 = 10_080;
 
 pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option<Value> {
@@ -24,7 +32,10 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
         "inspection:run" => run_once(context, &params, "manual").await,
         "inspection:history" => {
             let cluster = text(&params, "clusterId");
-            let limit = params.get("limit").and_then(Value::as_i64).unwrap_or(HISTORY_LIST_LIMIT);
+            let limit = params
+                .get("limit")
+                .and_then(Value::as_i64)
+                .unwrap_or(HISTORY_LIST_LIMIT);
             let context = context.clone();
             blocking(move || {
                 let rows = pm_store::inspections::list(&context.store, Some(&cluster), limit)?;
@@ -82,7 +93,10 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
         "inspection:schedule:save" => schedule_save(context, &params).await,
         "inspection:summary" => {
             let context = context.clone();
-            blocking(move || pm_services::inspection_fleet::build_summary(&context.store, pm_core::now_ms())).await
+            blocking(move || {
+                pm_services::inspection_fleet::build_summary(&context.store, pm_core::now_ms())
+            })
+            .await
         }
         "inspection:summary:run" => fleet_run(context, &params).await,
         _ => return None,
@@ -103,24 +117,43 @@ async fn execute(
     max_namespaces: Option<i64>,
     max_topics: Option<i64>,
 ) -> AppResult<Value> {
-    let cluster = context.get_cluster(cluster_id)?;
-    let profile = pm_store::inspections::profile(&context.store, cluster_id)?;
-    let thresholds = profile.as_ref().map(|(thresholds, _, _, _)| thresholds.clone());
+    // get_cluster / profile / list_events / admin_for 都是同步 SQLite I/O，不能卡在
+    // tokio worker 上。bridge::blocking 会把结果直接包成 RPC 的 Value，而这里还要
+    // 继续跑异步巡检并把 AppResult 交给调用方，所以用不上它；沿用 resource.rs /
+    // message.rs 的 spawn_blocking 写法，只把同步段挪到阻塞线程池。
+    let setup = {
+        let context = context.clone();
+        let id = cluster_id.to_string();
+        tokio::task::spawn_blocking(move || -> AppResult<_> {
+            let cluster = context.get_cluster(&id)?;
+            let profile = pm_store::inspections::profile(&context.store, &id)?;
+            let alerts: Vec<AlertRow> =
+                pm_store::alerts::list_events(&context.store, Some(&id), 50)?
+                    .into_iter()
+                    .filter(|event| event.state == "firing")
+                    .map(|event| AlertRow {
+                        rule_name: event.rule_name,
+                        scope_label: event.scope_label,
+                        message: event.message,
+                    })
+                    .collect();
+            let client = context.admin_for(&id)?;
+            Ok((cluster, profile, alerts, client))
+        })
+        .await
+    };
+    let (cluster, profile, alerts, client) = match setup {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => return Err(error),
+        Err(error) => return Err(pm_core::AppError::Other(format!("任务失败：{error}"))),
+    };
+    let thresholds = profile
+        .as_ref()
+        .map(|(thresholds, _, _, _)| thresholds.clone());
     let sampling = profile
         .as_ref()
         .map(|(_, namespaces, topics, _)| (*namespaces, *topics));
 
-    let alerts: Vec<AlertRow> = pm_store::alerts::list_events(&context.store, Some(cluster_id), 50)?
-        .into_iter()
-        .filter(|event| event.state == "firing")
-        .map(|event| AlertRow {
-            rule_name: event.rule_name,
-            scope_label: event.scope_label,
-            message: event.message,
-        })
-        .collect();
-
-    let client = context.admin_for(cluster_id)?;
     let mut report = inspection::run(InspectionRequest {
         client: &client,
         cluster_id,
@@ -133,33 +166,45 @@ async fn execute(
     .await?;
     report.source = source.to_string();
 
-    // 环比要与上一份比：先取上一份，再渲染导出文本，最后落库
-    let previous = pm_store::inspections::previous(
-        &context.store,
-        cluster_id,
-        &report.generated_at,
-        &report.id,
-    )?;
-    let diff = previous.as_ref().map(|previous| {
-        pm_services::inspection::build_inspection_diff(
-            &previous.id,
-            &previous.generated_at,
-            &previous.checks,
-            &report.checks,
-            previous.thresholds.as_ref(),
-            report.thresholds.as_ref(),
-        )
-    });
-    report.markdown = inspection::render_markdown(&report, diff.as_ref());
-    pm_store::inspections::save(&context.store, &report)?;
-    let _ = pm_store::inspections::prune(&context.store, cluster_id, HISTORY_KEEP);
-
-    Ok(json!({
-        "report": report,
-        "markdown": report.markdown,
-        "diff": diff,
-        "source": report.source,
-    }))
+    // 环比、渲染、落库同样含同步 SQLite I/O，一起放到阻塞线程池。
+    let finish = {
+        let context = context.clone();
+        let id = cluster_id.to_string();
+        tokio::task::spawn_blocking(move || -> AppResult<Value> {
+            let mut report = report;
+            let previous = pm_store::inspections::previous(
+                &context.store,
+                &id,
+                &report.generated_at,
+                &report.id,
+            )?;
+            let diff = previous.as_ref().map(|previous| {
+                pm_services::inspection::build_inspection_diff(
+                    &previous.id,
+                    &previous.generated_at,
+                    &previous.checks,
+                    &report.checks,
+                    previous.thresholds.as_ref(),
+                    report.thresholds.as_ref(),
+                )
+            });
+            report.markdown = inspection::render_markdown(&report, diff.as_ref());
+            pm_store::inspections::save(&context.store, &report)?;
+            let _ = pm_store::inspections::prune(&context.store, &id, HISTORY_KEEP);
+            Ok(json!({
+                "report": report,
+                "markdown": report.markdown,
+                "diff": diff,
+                "source": report.source,
+            }))
+        })
+        .await
+    };
+    match finish {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(error),
+        Err(error) => Err(pm_core::AppError::Other(format!("任务失败：{error}"))),
+    }
 }
 
 async fn run_once(context: Shared, params: &Value, source: &str) -> Value {
@@ -177,8 +222,9 @@ async fn detail(context: Shared, params: &Value) -> Value {
     let result = blocking({
         let context = context.clone();
         move || -> AppResult<Value> {
-            let report = pm_store::inspections::get(&context.store, &id)?
-                .ok_or_else(|| pm_core::AppError::NotFound("这份巡检报告不存在，可能已被清理".into()))?;
+            let report = pm_store::inspections::get(&context.store, &id)?.ok_or_else(|| {
+                pm_core::AppError::NotFound("这份巡检报告不存在，可能已被清理".into())
+            })?;
             // markdown 取库里那份原文而不是重新渲染：重渲染会换掉当时的文案
             let markdown = report.markdown.clone();
             let previous = pm_store::inspections::previous(
@@ -218,7 +264,9 @@ async fn profile_save(context: Shared, params: &Value) -> Value {
         let context = context.clone();
         move || -> AppResult<Value> {
             if context.get_cluster(&cluster_id).is_err() {
-                return Err(pm_core::AppError::NotFound("集群不存在，请先在集群配置里添加".into()));
+                return Err(pm_core::AppError::NotFound(
+                    "集群不存在，请先在集群配置里添加".into(),
+                ));
             }
             // 先判口径合不合法，再落库：严重线低于关注线这类组合要在写库前拒掉
             let thresholds = inspection::resolve_thresholds(draft.as_ref())?;
@@ -274,9 +322,8 @@ async fn schedule_save(context: Shared, params: &Value) -> Value {
                 cluster_id: cluster_id.clone(),
                 enabled: enabled.unwrap_or_else(|| existing.as_ref().is_some_and(|s| s.enabled)),
                 interval_minutes,
-                notify_on_crit: notify.unwrap_or_else(|| {
-                    existing.as_ref().map(|s| s.notify_on_crit).unwrap_or(true)
-                }),
+                notify_on_crit: notify
+                    .unwrap_or_else(|| existing.as_ref().map(|s| s.notify_on_crit).unwrap_or(true)),
                 last_run_at: existing.as_ref().and_then(|s| s.last_run_at.clone()),
                 last_error: existing.as_ref().and_then(|s| s.last_error.clone()),
                 last_notified_crit: existing.as_ref().map(|s| s.last_notified_crit).unwrap_or(0),
@@ -382,14 +429,15 @@ async fn fleet_run(context: Shared, params: &Value) -> Value {
     }
 
     // 跑完按新的库重算：否则界面要自己再拼一遍，口径会和单集群那份报告对不上
-    let summary = match pm_services::inspection_fleet::build_summary(&context.store, pm_core::now_ms()) {
-        Ok(mut summary) => {
-            summary["failures"] = json!(failures);
-            summary["skipped"] = json!(skipped);
-            summary
-        }
-        Err(error) => return fail(error),
-    };
+    let summary =
+        match pm_services::inspection_fleet::build_summary(&context.store, pm_core::now_ms()) {
+            Ok(mut summary) => {
+                summary["failures"] = json!(failures);
+                summary["skipped"] = json!(skipped);
+                summary
+            }
+            Err(error) => return fail(error),
+        };
 
     let _ = BTreeSet::<u8>::new();
     ok(json!({

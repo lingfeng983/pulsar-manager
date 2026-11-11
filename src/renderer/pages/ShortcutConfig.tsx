@@ -91,11 +91,16 @@ const ShortcutConfig: React.FC = () => {
                 setPreviewError(`已被「${COMMAND_BY_ID[holder.id].name}」占用，请改按其它组合键`);
                 return;
             }
-            void setBinding(capturing, binding);
+            const id = capturing;
+            // 持久化失败时 persist 已弹错误，别再叠一条「已绑定」的成功提示。
+            void setBinding(id, binding).then(ok => {
+                if (ok) {
+                    message.success(`已绑定「${COMMAND_BY_ID[id].name}」`);
+                }
+            });
             setCapturing(null);
             setPreview(null);
             setPreviewError(null);
-            message.success(`已绑定「${COMMAND_BY_ID[capturing].name}」`);
         };
         window.addEventListener('keydown', handleKeyDown, true);
         return () => window.removeEventListener('keydown', handleKeyDown, true);
@@ -117,7 +122,8 @@ const ShortcutConfig: React.FC = () => {
     const handleImportFile = async (file: File) => {
         try {
             const raw = await file.text();
-            const result = importConfig(raw);
+            // importConfig 现在是 async（要等写库结果），必须 await 才能拿到真实的成功/失败。
+            const result = await importConfig(raw);
             if (result.success) {
                 message.success('配置已导入');
             } else {
@@ -134,8 +140,12 @@ const ShortcutConfig: React.FC = () => {
             description: '所有自定义绑定与解绑都会被清空，无法撤销。',
             okText: '恢复',
             onOk: () => {
-                resetAll();
-                message.success('已恢复出厂快捷键');
+                // 只在实际落库成功后报成功，失败时 persist 会弹错误提示。
+                void resetAll().then(ok => {
+                    if (ok) {
+                        message.success('已恢复出厂快捷键');
+                    }
+                });
             },
         });
     };

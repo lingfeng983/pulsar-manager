@@ -60,10 +60,15 @@ const ContextMenu: React.FC<ContextMenuProps> = ({x, y, items, ariaLabel, fixed,
     }, [onClose]);
 
     useEffect(() => {
-        const firstEnabled = menuRef.current?.querySelector<HTMLElement>(
-            '[role="menuitem"]:not([aria-disabled="true"])',
-        );
-        firstEnabled?.focus();
+        const container = menuRef.current;
+        if (!container) {
+            return;
+        }
+        const firstEnabled = container.querySelector<HTMLElement>('[role="menuitem"]:not([aria-disabled="true"])');
+        // 四项全禁用（或只剩分隔线）时没有任何可聚焦的菜单项，菜单里没焦点，
+        // onKeyDown 就收不到 Escape。兜底把焦点落到容器本身，容器上的 keydown
+        // 监听才会生效，Escape 的 stopPropagation 也才拦得住全局快捷键。
+        (firstEnabled ?? container).focus();
     }, []);
 
     const focusSibling = (current: HTMLElement, direction: 1 | -1) => {
@@ -129,6 +134,7 @@ const ContextMenu: React.FC<ContextMenuProps> = ({x, y, items, ariaLabel, fixed,
             style={{left: x, top: y, position: fixed ? 'fixed' : undefined}}
             role="menu"
             aria-label={ariaLabel}
+            tabIndex={-1}
             onKeyDown={handleKeyDown}
             onClick={event => event.stopPropagation()}
         >

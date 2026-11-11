@@ -295,8 +295,11 @@ check('真实文档：常用检索词能命中对应那一篇', () => {
     }
 });
 
-console.log(`ALL PASS（${passed} 项）`);
-if (failures.length) {
+// 先判失败再打印结论：原来的顺序是无条件先打 ALL PASS 再 exit(1)，
+// 日志里留着一行「全通过」、退出码却是 1，人和 CI 都容易看反。
+if (failures.length > 0) {
+    console.log(`FAILED（${failures.length} 项失败 / ${passed} 项通过）`);
     failures.forEach(f => console.log('  - ' + f));
     process.exit(1);
 }
+console.log(`ALL PASS（${passed} 项）`);

@@ -15,7 +15,8 @@ fn map(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageTemplate> {
         body: row.get(4)?,
         variables: serde_json::from_str(&variables_json).unwrap_or_default(),
         properties: serde_json::from_str(&properties_json).unwrap_or_default(),
-        producer_options: serde_json::from_str(&producer_options_json).unwrap_or(serde_json::Value::Null),
+        producer_options: serde_json::from_str(&producer_options_json)
+            .unwrap_or(serde_json::Value::Null),
         schema_mode: row.get(8)?,
         schema_json: row.get(9)?,
         created_at: row.get(10)?,
@@ -25,7 +26,11 @@ fn map(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageTemplate> {
 
 /// `topic_uri` 为空表示「该集群全部模板」；传了 topic 则取「这个 topic 能用的」，
 /// 即该 topic 自己的加上通用条目（topic_uri = ''）。
-pub fn list(store: &Store, cluster_id: &str, topic_uri: Option<&str>) -> AppResult<Vec<MessageTemplate>> {
+pub fn list(
+    store: &Store,
+    cluster_id: &str,
+    topic_uri: Option<&str>,
+) -> AppResult<Vec<MessageTemplate>> {
     store.with(|conn| {
         const BASE: &str = "SELECT id, cluster_id, topic_uri, name, body, variables_json, properties_json, \
              producer_options_json, schema_mode, schema_json, created_at, updated_at FROM message_templates";

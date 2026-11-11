@@ -62,7 +62,7 @@ function rateText(rate: NamespacePolicyView['dispatchRate']): string {
     const period = rate.periodInSeconds && rate.periodInSeconds > 0 ? rate.periodInSeconds : 1;
     const parts: string[] = [];
     parts.push(rate.msgPerPeriod < 0 ? '条数不限' : `${round(rate.msgPerPeriod / period)} 条/秒`);
-    parts.push(rate.bytePerPeriod < 0 ? '大小不限' : `${round(rate.bytePerPeriod / period / 1024)} KB/秒`);
+    parts.push(rate.bytePerPeriod < 0 ? '大小不限' : `${round(rate.bytePerPeriod / period / 1024)} KiB/秒`);
     if (period !== 1) {
         parts.push(`周期 ${period}s`);
     }

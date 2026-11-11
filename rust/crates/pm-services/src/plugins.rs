@@ -238,7 +238,8 @@ pub fn plugins_dir() -> PathBuf {
 /// 解析并校验一份插件 JSON。通过时返回**只含已知字段**的规范形态（多余的键会被丢掉，
 /// 和 zod `.parse()` 之后的形状一致）；不通过时返回人话的原因。
 pub fn parse_manifest(raw: &str) -> Result<Value, String> {
-    let json: Value = serde_json::from_str(raw).map_err(|error| format!("不是合法的 JSON：{error}"))?;
+    let json: Value =
+        serde_json::from_str(raw).map_err(|error| format!("不是合法的 JSON：{error}"))?;
     validate_manifest(&json)
 }
 
@@ -301,7 +302,8 @@ fn validate_manifest(value: &Value) -> Result<Value, String> {
         None
     };
 
-    let total = benchmarks.as_ref().map(Vec::len).unwrap_or(0) + templates.as_ref().map(Vec::len).unwrap_or(0);
+    let total = benchmarks.as_ref().map(Vec::len).unwrap_or(0)
+        + templates.as_ref().map(Vec::len).unwrap_or(0);
     if total == 0 {
         return Err("contributions：插件至少要贡献一条压测预设或 Topic 模板".into());
     }
@@ -359,10 +361,9 @@ fn check_id(id: &str) -> Result<(), String> {
     if !bytes[0].is_ascii_lowercase() && !bytes[0].is_ascii_digit() {
         return Err("id 需为 2~64 位小写字母、数字、点、下划线或连字符".into());
     }
-    if !bytes[1..]
-        .iter()
-        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-'))
-    {
+    if !bytes[1..].iter().all(|byte| {
+        byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+    }) {
         return Err("id 需为 2~64 位小写字母、数字、点、下划线或连字符".into());
     }
     Ok(())
@@ -383,7 +384,8 @@ fn benchmark_preset(item: &Value, path: &str) -> Result<Value, String> {
     let Some(object) = item.as_object() else {
         return Err(format!("{path}：需要是一个对象"));
     };
-    let name = required_str(object, "name").map_err(|message| message.replace("name：", &format!("{path}.name：")))?;
+    let name = required_str(object, "name")
+        .map_err(|message| message.replace("name：", &format!("{path}.name：")))?;
     if name.chars().count() < 1 || name.chars().count() > 40 {
         return Err(format!("{path}.name：需为 1~40 个字符"));
     }
@@ -438,7 +440,8 @@ fn topic_template(item: &Value, path: &str) -> Result<Value, String> {
     let Some(object) = item.as_object() else {
         return Err(format!("{path}：需要是一个对象"));
     };
-    let name = required_str(object, "name").map_err(|message| message.replace("name：", &format!("{path}.name：")))?;
+    let name = required_str(object, "name")
+        .map_err(|message| message.replace("name：", &format!("{path}.name：")))?;
     if name.chars().count() < 1 || name.chars().count() > 40 {
         return Err(format!("{path}.name：需为 1~40 个字符"));
     }
@@ -471,7 +474,13 @@ fn topic_template(item: &Value, path: &str) -> Result<Value, String> {
     Ok(Value::Object(out))
 }
 
-fn int_range(object: &Map<String, Value>, key: &str, min: i64, max: i64, path: &str) -> Result<i64, String> {
+fn int_range(
+    object: &Map<String, Value>,
+    key: &str,
+    min: i64,
+    max: i64,
+    path: &str,
+) -> Result<i64, String> {
     let Some(value) = object.get(key) else {
         return Err(format!("{path}.{key}：必填"));
     };
@@ -522,7 +531,10 @@ fn scan_installed(dir: &Path) -> (Vec<Found>, Vec<Value>) {
             if nested.exists() {
                 candidates.push(nested);
             } else {
-                errors.push(load_error(&format!("{name}/plugin.json"), "目录里没有 plugin.json"));
+                errors.push(load_error(
+                    &format!("{name}/plugin.json"),
+                    "目录里没有 plugin.json",
+                ));
             }
         }
     }
@@ -541,7 +553,11 @@ fn scan_installed(dir: &Path) -> (Vec<Found>, Vec<Value>) {
         };
         match parse_manifest(&raw) {
             Ok(manifest) => found.push(Found {
-                id: manifest.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
+                id: manifest
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
                 manifest,
             }),
             Err(reason) => errors.push(load_error(&label, &reason)),
@@ -609,7 +625,10 @@ pub fn list_at(dir: &Path, store: &Store) -> AppResult<Value> {
 
     let mut entries = Vec::new();
     for official in official_catalog() {
-        let official_id = official.get("id").and_then(Value::as_str).unwrap_or_default();
+        let official_id = official
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         let local = others
             .iter()
             .position(|item| item.id == official_id)
@@ -626,12 +645,20 @@ pub fn list_at(dir: &Path, store: &Store) -> AppResult<Value> {
     }
     for item in others {
         let id = item.id.clone();
-        entries.push(entry(&item.manifest, "local", true, !disabled.contains(&id)));
+        entries.push(entry(
+            &item.manifest,
+            "local",
+            true,
+            !disabled.contains(&id),
+        ));
     }
 
     entries.sort_by(|left, right| {
         let left_name = left.get("name").and_then(Value::as_str).unwrap_or_default();
-        let right_name = right.get("name").and_then(Value::as_str).unwrap_or_default();
+        let right_name = right
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         collation_key(left_name)
             .cmp(&collation_key(right_name))
             .then_with(|| left_name.cmp(right_name))
@@ -650,7 +677,10 @@ pub fn list(store: &Store) -> AppResult<Value> {
 
 fn write_plugin_file(dir: &Path, manifest: &Value) -> AppResult<()> {
     create_dir(dir)?;
-    let id = manifest.get("id").and_then(Value::as_str).unwrap_or_default();
+    let id = manifest
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let text = format!("{}\n", serde_json::to_string_pretty(manifest)?);
     std::fs::write(dir.join(format!("{id}.json")), text)?;
     Ok(())
@@ -695,7 +725,11 @@ pub fn install_official(store: &Store, id: &str) -> AppResult<Value> {
 pub fn install_from_text_at(dir: &Path, store: &Store, raw: &str) -> AppResult<Value> {
     let manifest = parse_manifest(raw)
         .map_err(|reason| pm_core::AppError::Other(format!("插件文件无效：{reason}")))?;
-    let id = manifest.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+    let id = manifest
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
     write_plugin_file(dir, &manifest)?;
     let entries = entries_of(&list_at(dir, store)?);
     pick_entry(&entries, &id).ok_or_else(|| pm_core::AppError::Other("安装后未能加载该插件".into()))
@@ -741,9 +775,14 @@ pub fn uninstall_at(dir: &Path, store: &Store, id: &str) -> AppResult<Value> {
         }
     }
     if !removed {
-        return Err(pm_core::AppError::Other(format!("{id} 没有安装在本机，无需卸载")));
+        return Err(pm_core::AppError::Other(format!(
+            "{id} 没有安装在本机，无需卸载"
+        )));
     }
-    let disabled: Vec<String> = read_disabled(store).into_iter().filter(|item| item != id).collect();
+    let disabled: Vec<String> = read_disabled(store)
+        .into_iter()
+        .filter(|item| item != id)
+        .collect();
     write_disabled(store, disabled)?;
     Ok(json!({ "id": id }))
 }
@@ -769,7 +808,8 @@ pub fn set_enabled_at(dir: &Path, store: &Store, id: &str, enabled: bool) -> App
     write_disabled(store, disabled.into_iter().collect())?;
 
     let refreshed = entries_of(&list_at(dir, store)?);
-    pick_entry(&refreshed, id).ok_or_else(|| pm_core::AppError::Other("状态更新后未能加载该插件".into()))
+    pick_entry(&refreshed, id)
+        .ok_or_else(|| pm_core::AppError::Other("状态更新后未能加载该插件".into()))
 }
 
 pub fn set_enabled(store: &Store, id: &str, enabled: bool) -> AppResult<Value> {

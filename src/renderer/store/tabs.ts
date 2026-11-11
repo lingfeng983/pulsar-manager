@@ -1,5 +1,11 @@
 import {create} from 'zustand';
 
+// data 是各页签自带的载荷：topic / topology / producer / consumer / metrics 等
+// 每种 type 带的字段都不同（clusterId、tenant、topic、instanceSeq……），形状由
+// tabIds.ts 等构造方决定。这里刻意保留 any 而不硬收成联合类型：精确化得把全部
+// 构造方与读取方一起改成判别联合，牵连大量本任务不拥有的调用点；改成 unknown
+// 又会让本文件里的 t.data?.clusterId、{...tab.data} 直接编译不过。属于成本过高，
+// 保留并注明，而不是硬改成一个错误的类型。
 export interface TabItem {
     id: string;
     title: string;

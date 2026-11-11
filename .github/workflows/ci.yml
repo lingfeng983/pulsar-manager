@@ -1,0 +1,65 @@
+# 最小可用 CI：把仓库里本来就有的门禁原样搬到云端，让「本地能过」不再是唯一证据。
+# 这里不做发布、不需要任何 secret——发版仍由 scripts/release-publish.mjs 在本机手工执行，
+# 因为它依赖标签、安装包与 Windows 凭据管理器，云端跑没有意义。
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支上的新提交顶掉旧的一次运行：省额度，也省等结果的时间。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    name: 前端（类型 / 规范 / 自测 / 构建）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # 用锁文件安装：package.json 与 package-lock.json 不同步时这里就会失败，
+      # 这正是我们要在合并前发现的事。
+      - name: 安装依赖
+        run: npm ci
+      - name: 类型检查
+        run: npm run typecheck
+      - name: ESLint
+        run: npm run lint
+      - name: Prettier
+        run: npm run format:check
+      - name: 模板引擎自测
+        run: npm run selftest
+      - name: 文档中心自测
+        run: npm run selftest:docs
+      - name: 渲染层构建
+        run: npm run build:renderer
+
+  rust:
+    name: Rust（格式 / 单测）
+    # 用 windows 而不是 ubuntu：产品只出 Windows NSIS 包，而在 Linux 上编译 tauri 需要
+    # webkit2gtk / gtk / appindicator 一整套系统库，装齐了测的也不是要发的那个目标。
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: 格式检查
+        working-directory: rust
+        run: cargo fmt --all -- --check
+      - name: 单元测试
+        working-directory: rust
+        run: cargo test --workspace

@@ -1,5 +1,17 @@
 import {create} from 'zustand';
+import {message} from 'antd';
 import type {APIResponse, BenchmarkPreset, PluginEntry, PluginLoadError, TopicTemplate} from '../types';
+
+// 启动期 load 可能被多处触发，同一个插件读取故障只弹一次，避免刷屏。
+// 模块级状态，整个应用生命周期内去重；成功路径不碰它。
+let loadFailureNotified = false;
+function notifyLoadFailure(): void {
+    if (loadFailureNotified) {
+        return;
+    }
+    loadFailureNotified = true;
+    message.error('读取插件列表失败，界面将按「无插件」显示');
+}
 
 export interface PresetOption {
     pluginId: string;
@@ -63,6 +75,8 @@ export const usePluginStore = create<PluginsState>((set, get) => ({
         } catch {
             // 落到 ready:true：插件读不到只影响预设，不该把界面卡住
         }
+        // success:false 或 transport 异常都按失败处理：提示用户，再按空插件显示。
+        notifyLoadFailure();
         set({ready: true});
     },
 

@@ -22,7 +22,8 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
                 .filter(|value| !value.is_empty())
                 .map(str::to_string);
             let context = context.clone();
-            blocking(move || pm_store::templates::list(&context.store, &cluster, topic.as_deref())).await
+            blocking(move || pm_store::templates::list(&context.store, &cluster, topic.as_deref()))
+                .await
         }
         "template:create" | "template:update" => {
             let params = args.first().cloned().unwrap_or_else(|| json!({}));
@@ -164,7 +165,10 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
             let topic = text(&params, "topicUri");
             let limit = params.get("limit").and_then(Value::as_i64).unwrap_or(200);
             let context = context.clone();
-            blocking(move || pm_store::history::list_for_topic(&context.store, &cluster, &topic, limit)).await
+            blocking(move || {
+                pm_store::history::list_for_topic(&context.store, &cluster, &topic, limit)
+            })
+            .await
         }
         "sendHistory:get" => {
             let params = args.first().cloned().unwrap_or_else(|| json!({}));
@@ -210,7 +214,9 @@ fn upsert_template(context: &Shared, params: &Value) -> pm_core::AppResult<Messa
         properties: params
             .get("properties")
             .cloned()
-            .map(|value| serde_json::from_value::<BTreeMap<String, String>>(value).unwrap_or_default())
+            .map(|value| {
+                serde_json::from_value::<BTreeMap<String, String>>(value).unwrap_or_default()
+            })
             .unwrap_or_default(),
         producer_options: params
             .get("producerOptions")
@@ -219,7 +225,10 @@ fn upsert_template(context: &Shared, params: &Value) -> pm_core::AppResult<Messa
         // 非 inline 一律不存 schema：切回「不校验」后还留着旧内容，
         // 下次再选 inline 时会拿一份没人看过的 schema 去校验
         schema_json: if schema_mode == "inline" {
-            params.get("schemaJson").and_then(Value::as_str).map(str::to_string)
+            params
+                .get("schemaJson")
+                .and_then(Value::as_str)
+                .map(str::to_string)
         } else {
             None
         },
@@ -235,7 +244,11 @@ fn upsert_template(context: &Shared, params: &Value) -> pm_core::AppResult<Messa
     }
 
     let saved = pm_store::templates::save(&context.store, &template)?;
-    let action = if existing.is_some() { "update" } else { "create" };
+    let action = if existing.is_some() {
+        "update"
+    } else {
+        "create"
+    };
     let _ = context.log(
         Some(&template.cluster_id),
         action,
@@ -313,7 +326,11 @@ fn upsert_consumer_config(context: &Shared, params: &Value) -> pm_core::AppResul
     }
 
     let saved = consumer_configs::save(&context.store, &config)?;
-    let action = if existing.is_some() { "update" } else { "create" };
+    let action = if existing.is_some() {
+        "update"
+    } else {
+        "create"
+    };
     let _ = context.log(
         Some(&config.cluster_id),
         action,
@@ -323,7 +340,10 @@ fn upsert_consumer_config(context: &Shared, params: &Value) -> pm_core::AppResul
         "success",
         None,
     );
-    Ok(flatten_config(&consumer_configs::require(&context.store, &saved)?))
+    Ok(flatten_config(&consumer_configs::require(
+        &context.store,
+        &saved,
+    )?))
 }
 
 fn text(value: &Value, key: &str) -> String {
@@ -355,11 +375,20 @@ pub fn record_send(
         template_id: None,
         template_name: template_name.to_string(),
         body_preview: preview,
-        body_full: if keep_full { Some(body.to_string()) } else { None },
+        body_full: if keep_full {
+            Some(body.to_string())
+        } else {
+            None
+        },
         body_bytes: body.len() as i64,
         message_count: 1,
         message_id: message_id.map(str::to_string),
-        status: if error.is_some() { "failure" } else { "success" }.to_string(),
+        status: if error.is_some() {
+            "failure"
+        } else {
+            "success"
+        }
+        .to_string(),
         error_message: error.map(str::to_string),
         created_at: pm_core::now_iso(),
     };

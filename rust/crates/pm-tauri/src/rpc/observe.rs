@@ -90,7 +90,10 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
             blocking(move || {
                 // 顶部徽标只关心"当前有多少条待处理"，按 500 条上限读一次够用
                 let events = pm_store::alerts::list_events(&context.store, None, 500)?;
-                Ok(events.iter().filter(|event| event.state == "firing").count() as i64)
+                Ok(events
+                    .iter()
+                    .filter(|event| event.state == "firing")
+                    .count() as i64)
             })
             .await
         }
@@ -102,8 +105,10 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
                 .map(str::to_string);
             let limit = payload.get("limit").and_then(Value::as_i64).unwrap_or(200);
             let context = context.clone();
-            blocking(move || pm_store::alerts::list_events(&context.store, cluster.as_deref(), limit))
-                .await
+            blocking(move || {
+                pm_store::alerts::list_events(&context.store, cluster.as_deref(), limit)
+            })
+            .await
         }
 
         // ---------- 告警（写入） ----------
@@ -221,10 +226,14 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
         }
         "notify:channel:enable" => {
             let id = string_of(&payload, "id");
-            let enabled = payload.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+            let enabled = payload
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
             let context = context.clone();
             blocking(move || {
-                let updated = pm_services::notify_center::set_enabled(&context.store, &id, enabled)?;
+                let updated =
+                    pm_services::notify_center::set_enabled(&context.store, &id, enabled)?;
                 Ok(json!({"updated": updated}))
             })
             .await
@@ -232,7 +241,8 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
         "notify:channel:test" => {
             let id = string_of(&payload, "id");
             settle(
-                pm_services::notify_center::test_channel(&context.store, &context.secrets, &id).await,
+                pm_services::notify_center::test_channel(&context.store, &context.secrets, &id)
+                    .await,
             )
         }
         "notify:mail:save" => {
@@ -291,7 +301,9 @@ fn save_rule(store: &pm_store::Store, draft: &Value) -> pm_core::AppResult<Value
 
     let cluster_id = string_of(draft, "clusterId");
     if cluster_id.is_empty() {
-        return Err(pm_core::AppError::Other("集群不存在，请先添加该集群".into()));
+        return Err(pm_core::AppError::Other(
+            "集群不存在，请先添加该集群".into(),
+        ));
     }
     let name = string_of(draft, "name");
     if name.is_empty() {
@@ -303,11 +315,17 @@ fn save_rule(store: &pm_store::Store, draft: &Value) -> pm_core::AppResult<Value
         .unwrap_or("cluster")
         .to_string();
     if !matches!(scope.as_str(), "cluster" | "namespace" | "topic") {
-        return Err(pm_core::AppError::Other(format!("未知的告警作用域 {scope}")));
+        return Err(pm_core::AppError::Other(format!(
+            "未知的告警作用域 {scope}"
+        )));
     }
     let (tenant, namespace, topic) = match scope.as_str() {
         "cluster" => (String::new(), String::new(), String::new()),
-        "namespace" => (string_of(draft, "tenant"), string_of(draft, "namespace"), String::new()),
+        "namespace" => (
+            string_of(draft, "tenant"),
+            string_of(draft, "namespace"),
+            String::new(),
+        ),
         _ => (
             string_of(draft, "tenant"),
             string_of(draft, "namespace"),
@@ -325,25 +343,36 @@ fn save_rule(store: &pm_store::Store, draft: &Value) -> pm_core::AppResult<Value
         .unwrap_or("gt")
         .to_string();
     if !matches!(comparator.as_str(), "gt" | "gte" | "lt" | "lte") {
-        return Err(pm_core::AppError::Other(format!("未知的比较方式 {comparator}")));
+        return Err(pm_core::AppError::Other(format!(
+            "未知的比较方式 {comparator}"
+        )));
     }
 
     let rule = pm_core::AlertRule {
         id,
         cluster_id,
         name,
-        enabled: draft.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+        enabled: draft
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
         scope,
         tenant,
         namespace,
         topic,
-        persistent: draft.get("persistent").and_then(Value::as_bool).unwrap_or(true),
+        persistent: draft
+            .get("persistent")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
         metric,
         comparator,
         threshold: number_of(draft, "threshold"),
         consecutive: number_of(draft, "consecutive").max(1.0) as i64,
         notify: draft.get("notify").and_then(Value::as_bool).unwrap_or(true),
-        created_at: existing.as_ref().map(|item| item.created_at.clone()).unwrap_or_default(),
+        created_at: existing
+            .as_ref()
+            .map(|item| item.created_at.clone())
+            .unwrap_or_default(),
         updated_at: String::new(),
     };
     let saved_id = pm_store::alerts::save_rule(store, &rule)?;

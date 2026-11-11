@@ -25,6 +25,18 @@ pub fn resolve_base_url(config: &AdminConfig) -> AppResult<String> {
                 "TLS 已开启，但 Admin API 地址不是 HTTPS（{web}）。请改用 https:// 地址或关闭 TLS。"
             )));
         }
+        // 显式 webServiceUrl 可能带 userinfo / ?token=... / #fragment：原样透传会把
+        // 凭据拼进请求地址，也可能让后续 path 拼接错位。用 Url 解析后清掉这些成分，
+        // 只保留 scheme + host + port + path（与 redact_endpoint 同一口径）。
+        if let Ok(mut url) = Url::parse(web) {
+            url.set_query(None);
+            url.set_fragment(None);
+            if !url.username().is_empty() || url.password().is_some() {
+                let _ = url.set_username("");
+                let _ = url.set_password(None);
+            }
+            return Ok(url.to_string().trim_end_matches('/').to_string());
+        }
         return Ok(web.trim_end_matches('/').to_string());
     }
 

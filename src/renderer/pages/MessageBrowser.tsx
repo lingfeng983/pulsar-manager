@@ -35,7 +35,6 @@ import dayjs from 'dayjs';
 import {saveTextFile} from '../utils/saveFile';
 import {useCommand, PaneActiveContext} from '../hooks/useKeybindings';
 import StateBlock from '../components/common/StateBlock';
-import PageShell from '../components/common/PageShell';
 import ErrorBanner from '../components/common/ErrorBanner';
 import MessageDetailModal from '../components/message/MessageDetailModal';
 import CodePane, {type CodePaneHandle} from '../components/editor/CodePane';
@@ -1064,7 +1063,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
 
     const streamControls =
         mode === 'consume' ? (
-            <Space wrap size="small">
+            <Space className="stream-controls" wrap size="small">
                 <div>
                     <label style={fieldLabel}>订阅:</label>
                     <AutoComplete
@@ -1127,7 +1126,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                 </Tooltip>
             </Space>
         ) : (
-            <Space wrap size="small">
+            <Space className="stream-controls" wrap size="small">
                 <div>
                     <label style={fieldLabel}>起始位置:</label>
                     <Select
@@ -1205,7 +1204,9 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
     const isRunning = !!sessionId;
 
     return (
-        <PageShell>
+        // 本页是 Topic 详情里的内嵌页签，外层 PageShell 已经给了 12px 内容区边距；
+        // 这里再套一层会变成 24px，和概览、Schema、订阅几个页签对不齐。
+        <>
             {/* 一个整体：模式切换、该模式的参数区、结果区全在同一张卡里。
                 原先是「工具栏卡 + 结果卡」两张，切换发送/消费/读取时两张卡各自长高、
                 各自换内容，界面上就是所有东西分头跳一次。 */}
@@ -1278,14 +1279,37 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                 }
             >
                 {mode !== 'send' && (
-                    <div style={{marginBottom: 'var(--spacing-sm)'}}>
-                        {streamControls}
+                    <>
+                        {/* 起始位置等会话参数与「消息列表 N 条 / 筛选按钮 / 筛选标签」同一行：
+                            统计组靠行尾，窄窗口放不下时才整体折到下一行。 */}
+                        <div className="stream-toolbar">
+                            {streamControls}
+                            <div className="stream-toolbar-summary">
+                                <span>
+                                    消息列表 <strong>{messages.length}</strong> 条{isRunning && '（实时推送中）'}
+                                </span>
+                                <Tooltip title="按 Producer、Properties 与发布时间筛选当前已收到的消息；双击任意一行可全屏查看正文">
+                                    <Button
+                                        size="small"
+                                        aria-label="显示消息过滤"
+                                        type={filterOpen || filterActive ? 'primary' : 'text'}
+                                        icon={<FilterOutlined />}
+                                        onClick={() => setFilterOpen(open => !open)}
+                                    />
+                                </Tooltip>
+                                {filterActive && (
+                                    <Tag color="blue">
+                                        筛出 {visibleMessages.length} / {messages.length} 条
+                                    </Tag>
+                                )}
+                            </div>
+                        </div>
                         {mode === 'consume' && !autoAck && (
-                            <div className="hint-text" style={{marginTop: 'var(--spacing-sm)'}}>
+                            <div className="hint-text" style={{marginBottom: 'var(--spacing-sm)'}}>
                                 已关闭自动 ack：未确认的消息会在客户端重连后重投，重投列会显示次数。
                             </div>
                         )}
-                    </div>
+                    </>
                 )}
 
                 <ErrorBanner error={error} title="操作失败" onClose={() => setError(null)} />
@@ -1294,26 +1318,6 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                     sendPanel
                 ) : (
                     <>
-                        <div className="summary-line">
-                            <span>
-                                消息列表 <strong>{messages.length}</strong> 条{isRunning && '（实时推送中）'}
-                            </span>
-                            <Tooltip title="按 Producer、Properties 与发布时间筛选当前已收到的消息；双击任意一行可全屏查看正文">
-                                <Button
-                                    size="small"
-                                    aria-label="显示消息过滤"
-                                    type={filterOpen || filterActive ? 'primary' : 'text'}
-                                    icon={<FilterOutlined />}
-                                    onClick={() => setFilterOpen(open => !open)}
-                                />
-                            </Tooltip>
-                            {filterActive && (
-                                <Tag color="blue">
-                                    筛出 {visibleMessages.length} / {messages.length} 条
-                                </Tag>
-                            )}
-                        </div>
-
                         {filterOpen && (
                             <div style={{marginBottom: 'var(--spacing-sm)'}}>
                                 <Space wrap size="small">
@@ -1389,7 +1393,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
             </Card>
 
             <MessageDetailModal message={showFullMessage} onClose={() => setShowFullMessage(null)} />
-        </PageShell>
+        </>
     );
 };
 

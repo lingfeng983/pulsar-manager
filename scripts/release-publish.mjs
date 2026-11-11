@@ -14,6 +14,12 @@
 //   npm run release -- --check-auth                # 只验凭据能不能通过 GitHub 认证，不发版
 //   npm run release -- --notes <路径>              # 指定发行说明（默认 docs/releases/v<版本>.md）
 //
+// 两条安全约定：
+//   1. --allow-dirty 只对 --dry-run 有效。正式发版带着它，等于放行「安装包与标签不是同一份代码」，
+//      而那正是这个脚本唯一要拦的事。
+//   2. 发行版一旦创建，上传附件或匿名回读校验任何一步失败都会自动删除它再报错——半成品发行版
+//      会让旧客户端看到「有新版本」却下载校验失败，比一次失败的发版更难收拾。
+//
 // 凭据：按「环境变量 GITHUB_TOKEN（或 GitHub CLI 惯用的 GH_TOKEN）→ Windows 凭据管理器」的顺序取，
 //   不接受文件里的令牌。Windows 上推荐一次性把令牌存进凭据管理器（交互式，不回显、不进 shell 历史）：
 //     powershell -NoProfile -ExecutionPolicy Bypass -File scripts/wincred.ps1 -Action store
@@ -182,14 +188,19 @@ function sha256FromNotes(notes) {
 
 function checkTree(options) {
     step('工作区与标签');
+    // 只允许在 dry-run 里放宽：排练时带着未提交改动是合理用法，正式发版则必须干净，
+    // 否则安装包与标签指向的不是同一份代码，而这个脚本存在的意义就是钉死这一点。
+    if (options.allowDirty && !options.dryRun) {
+        fail('--allow-dirty 只能配合 --dry-run 使用；正式发版请先提交，否则安装包与标签对不上。');
+    }
     const tracked = git(['status', '--porcelain', '--untracked-files=no']);
     if (tracked) {
         if (!options.allowDirty) {
             fail(
-                `有未提交的已跟踪改动，发出去的包会和标签对不上：\n${tracked}\n  先提交（或用 --allow-dirty 跳过这条）。`,
+                `有未提交的已跟踪改动，发出去的包会和标签对不上：\n${tracked}\n  先提交（或用 --dry-run --allow-dirty 排练）。`,
             );
         }
-        warn('工作区有未提交改动（--allow-dirty），确认安装包就是当前代码打出来的');
+        warn('工作区有未提交改动（--allow-dirty，仅 dry-run 放行），确认安装包就是当前代码打出来的');
     } else {
         ok('已跟踪文件无未提交改动');
     }
@@ -222,23 +233,40 @@ function checkTag(tag, options) {
     }
     ok(`标签 ${tag} 指向 HEAD ${head.slice(0, 7)}`);
     // 全局 credential.helper 被有意置空（见 AGENTS.md），这里只对这条只读查询显式指定一个 helper。
-    const remote = spawnSync(
-        'git',
-        ['-c', 'credential.helper=manager', 'ls-remote', '--tags', 'origin', `refs/tags/${tag}`],
-        {
-            cwd: ROOT,
-            encoding: 'utf8',
-            env: {...process.env, GIT_TERMINAL_PROMPT: '0'},
-        },
-    );
+    // 不加 ref 过滤：annotated tag 的「解引用后指向哪个提交」是单独一行 `refs/tags/<tag>^{}`，
+    // 带了精确 ref 就只拿得到 tag 对象本身，没法与 HEAD 比。
+    const remote = spawnSync('git', ['-c', 'credential.helper=manager', 'ls-remote', '--tags', 'origin'], {
+        cwd: ROOT,
+        encoding: 'utf8',
+        env: {...process.env, GIT_TERMINAL_PROMPT: '0'},
+    });
     if (remote.status !== 0) {
-        warn('读不到 origin（离线或没有凭据），跳过「标签已推送」检查');
-        return;
+        // 正式发版不能靠猜：标签没推上去，客户端按 tag 找发行版就是 404，而发行版已经建好了。
+        if (options.dryRun) {
+            warn('读不到 origin（离线或没有凭据），dry-run 跳过「标签已推送」检查');
+            return;
+        }
+        fail('读不到 origin（离线或没有凭据），无法确认标签已推送；正式发版不能跳过这条门禁。');
     }
-    if (!remote.stdout.trim()) {
+    const lines = remote.stdout
+        .trim()
+        .split('\n')
+        .map(line => line.trim().split(/\s+/))
+        .filter(parts => parts.length >= 2);
+    const exact = lines.filter(([, ref]) => ref === `refs/tags/${tag}`);
+    if (exact.length === 0) {
         fail(`标签 ${tag} 还没推到 origin；先 git push origin ${tag}。`);
     }
-    ok('标签已在 origin 上');
+    // annotated tag 优先用解引用后的提交号，lightweight tag 直接用 tag 本身那一行。
+    const peeled = lines.find(([, ref]) => ref === `refs/tags/${tag}^{}`);
+    const remoteSha = (peeled || exact[0])[0];
+    if (remoteSha !== head) {
+        fail(
+            `origin 上的 ${tag} 指向 ${remoteSha.slice(0, 7)}，本地 HEAD 是 ${head.slice(0, 7)}；` +
+                '远端标签与这次要发的代码不是同一份，先更新标签或改发正确的提交。',
+        );
+    }
+    ok(`标签已在 origin 上，且指向 HEAD ${head.slice(0, 7)}`);
 }
 
 function build() {
@@ -272,10 +300,14 @@ function checkExeVersion(file, version) {
         encoding: 'utf8',
     });
     if (result.status !== 0) {
-        warn('读不到 exe 版本信息，跳过该检查');
-        return;
+        // 读不到版本就无从确认这个 exe 是不是刚构建出来的——这正是本门禁要拦的事，
+        // 软放行等于门禁失效。Windows 上 powershell 是发版前置条件，缺了就该停下来。
+        fail(`读不到 exe 版本信息（powershell 退出码 ${result.status}），无法确认安装包版本，拒绝发版。`);
     }
     const [fileVersion, productVersion] = result.stdout.trim().split('|');
+    if (!fileVersion || !productVersion) {
+        fail(`exe 版本信息为空（powershell 输出「${result.stdout.trim()}」），无法确认安装包版本，拒绝发版。`);
+    }
     const matches = value => value === version || value === `${version}.0`;
     if (!matches(fileVersion) || !matches(productVersion)) {
         fail(`exe 属性里的版本是 ${fileVersion}/${productVersion}，不是 ${version}；安装包可能是旧构建。`);
@@ -309,8 +341,11 @@ function notesPathFor(version) {
     return path.join(ROOT, NOTES_DIR, `v${version}.md`);
 }
 
-function writeDraftNotes(file, version, tag) {
-    mkdirSync(path.dirname(file), {recursive: true});
+/**
+ * 按提交记录生成发行说明草稿。纯函数：不写盘，dry-run 与正式发版共用同一份内容，
+ * 这样排练看到的草稿就是真发时拿到的草稿。
+ */
+function buildDraftNotes(version, tag) {
     const short = git(['rev-parse', '--short', 'HEAD']);
     let previous = null;
     try {
@@ -339,13 +374,24 @@ function writeDraftNotes(file, version, tag) {
         '直接运行本安装包覆盖安装即可，本地数据与凭据无需迁移；也可以在应用内「设置 → 检查更新」升级。',
         '',
     ].join('\n');
-    writeFileSync(file, draft, 'utf8');
+    return draft;
+}
+
+function writeDraftNotes(file, version, tag) {
+    mkdirSync(path.dirname(file), {recursive: true});
+    writeFileSync(file, buildDraftNotes(version, tag), 'utf8');
 }
 
 function resolveNotes(version, options, tag) {
     step('发行说明');
     const file = options.notes ? path.resolve(ROOT, options.notes) : notesPathFor(version);
     if (!existsSync(file)) {
+        if (options.dryRun) {
+            // dry-run 是只读排练：不往 docs/releases/ 里落文件。草稿在内存里走完后面
+            // 那套 SHA 注入与校验，排练才有意义，但仓库不该因此多出一个未提交的文件。
+            warn(`发行说明不存在（${path.relative(ROOT, file)}），dry-run 不写盘，按提交记录临时生成草稿`);
+            return {file, raw: buildDraftNotes(version, tag)};
+        }
         writeDraftNotes(file, version, tag);
         fail(
             `发行说明不存在，已按提交记录生成草稿：\n  ${path.relative(ROOT, file)}\n  补全内容后重新运行；草稿里的 {{SHA256}} 会由脚本换成实际值。`,
@@ -547,6 +593,23 @@ async function createRelease(repo, tag, notes, auth) {
     return release;
 }
 
+/**
+ * 回滚：删掉刚创建的发行版。
+ * 删不掉也不能吞——留下一个没有附件、或说明里 SHA256 与附件对不上的发行版，比这次发版失败更糟：
+ * 旧客户端会读到它、拿说明里的 SHA256 去校验一个下不下来的包，然后一直拒绝更新。
+ */
+async function deleteRelease(repo, releaseId, tag, auth) {
+    try {
+        await api(`/repos/${repo}/releases/${releaseId}`, {method: 'DELETE', auth});
+        ok(`已回滚：删除发行版 ${tag}（id ${releaseId}）`);
+    } catch (error) {
+        console.error(
+            `  ✗ 回滚失败：发行版 ${tag}（id ${releaseId}）仍在，请手工删除 https://github.com/${repo}/releases\n` +
+                `    原因：${error.message}`,
+        );
+    }
+}
+
 async function uploadAsset(repo, releaseId, artifact, auth) {
     const upload = await api(`/repos/${repo}/releases/${releaseId}/assets?name=${encodeURIComponent(artifact.name)}`, {
         method: 'POST',
@@ -711,8 +774,14 @@ async function main() {
     const auth = resolveAuth();
     await ensureReleaseAbsent(options.repo, tag, auth);
     const release = await createRelease(options.repo, tag, notes, auth);
-    await uploadAsset(options.repo, release.id, artifact, auth);
-    await verifyRelease(options.repo, tag, artifact);
+    try {
+        await uploadAsset(options.repo, release.id, artifact, auth);
+        await verifyRelease(options.repo, tag, artifact);
+    } catch (error) {
+        // 发行版创建后就已经对外可见了：任何一步失败都先回滚，再把原始错误抛出去。
+        await deleteRelease(options.repo, release.id, tag, auth);
+        throw error;
+    }
     console.log(
         `\n✔ ${tag} 已发布：https://github.com/${options.repo}/releases/tag/${tag}\n` +
             `  SHA256 ${artifact.sha256}\n` +

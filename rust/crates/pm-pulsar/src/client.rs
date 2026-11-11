@@ -300,7 +300,7 @@ impl AdminClient {
                     pm_core::pm_warn!("[admin] !! {label} 连接失败（{elapsed}ms）：{reason}");
                     return Err(AppError::Network(format!(
                         "无法连接 {}：{}",
-                        self.base,
+                        pm_core::redact_endpoint(&self.base),
                         condense_error(&error.to_string())
                     )));
                 }
@@ -532,7 +532,7 @@ impl AdminClient {
                     );
                     return Err(AppError::Network(format!(
                         "无法连接 {}：{}",
-                        self.base,
+                        pm_core::redact_endpoint(&self.base),
                         condense_error(&error.to_string())
                     )));
                 }

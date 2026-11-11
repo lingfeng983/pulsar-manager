@@ -47,7 +47,9 @@ fn example() -> &'static str {
 
 #[test]
 fn rejects_bad_manifests_with_path_and_reason() {
-    assert!(parse_manifest("{oops").unwrap_err().starts_with("不是合法的 JSON："));
+    assert!(parse_manifest("{oops")
+        .unwrap_err()
+        .starts_with("不是合法的 JSON："));
     // 校验顺序跟 zod 的定义顺序一致：id → name → version → description/author → contributions
     assert_eq!(
         parse_manifest(r#"{"id":"A","name":"x","version":"1.0"}"#).unwrap_err(),
@@ -62,7 +64,8 @@ fn rejects_bad_manifests_with_path_and_reason() {
         "version：version 需形如 1.0 或 1.0.0"
     );
     assert_eq!(
-        parse_manifest(r#"{"id":"a.b","name":"x","version":"1.0","contributions":{}}"#).unwrap_err(),
+        parse_manifest(r#"{"id":"a.b","name":"x","version":"1.0","contributions":{}}"#)
+            .unwrap_err(),
         "contributions：插件至少要贡献一条压测预设或 Topic 模板"
     );
 }
@@ -92,13 +95,18 @@ fn rejects_out_of_range_params() {
     );
     // 浮点数不接受：界面上是整数字段，1.5 个生产者没有意义
     let fractional = example().replace("\"producers\": 2", "\"producers\": 1.5");
-    assert!(parse_manifest(&fractional).unwrap_err().contains("需为 1~64 的整数"));
+    assert!(parse_manifest(&fractional)
+        .unwrap_err()
+        .contains("需为 1~64 的整数"));
 }
 
 #[test]
 fn official_catalog_is_listed_as_installable() {
     let dir = scratch_dir();
-    let entries = list_at(&dir, &store()).unwrap()["entries"].as_array().cloned().unwrap();
+    let entries = list_at(&dir, &store()).unwrap()["entries"]
+        .as_array()
+        .cloned()
+        .unwrap();
     assert_eq!(entries.len(), official_catalog().len());
     for entry in &entries {
         assert_eq!(entry["source"], "official");
@@ -124,7 +132,10 @@ fn install_official_reports_installed_and_enabled() {
 
     let uninstalled = uninstall_at(&dir, &store, &id).unwrap();
     assert_eq!(uninstalled["id"], id);
-    let back = list_at(&dir, &store).unwrap()["entries"].as_array().cloned().unwrap();
+    let back = list_at(&dir, &store).unwrap()["entries"]
+        .as_array()
+        .cloned()
+        .unwrap();
     let entry = back.iter().find(|item| item["id"] == id.as_str()).unwrap();
     assert_eq!(entry["installed"], false);
     assert_eq!(entry["enabled"], false);
@@ -137,10 +148,18 @@ fn installed_official_plugin_overrides_catalog_content() {
     let id = official_catalog()[0]["id"].as_str().unwrap().to_string();
     install_official_at(&dir, &store, &id).unwrap();
     // 本地同名文件改了名字：列表要以本地为准，但来源仍是官方
-    let custom = example().replace("pm-demo", &id).replace("演示预设", "改过的名字");
+    let custom = example()
+        .replace("pm-demo", &id)
+        .replace("演示预设", "改过的名字");
     install_from_text_at(&dir, &store, &custom).unwrap();
-    let entries = list_at(&dir, &store).unwrap()["entries"].as_array().cloned().unwrap();
-    let entry = entries.iter().find(|item| item["id"] == id.as_str()).unwrap();
+    let entries = list_at(&dir, &store).unwrap()["entries"]
+        .as_array()
+        .cloned()
+        .unwrap();
+    let entry = entries
+        .iter()
+        .find(|item| item["id"] == id.as_str())
+        .unwrap();
     assert_eq!(entry["name"], "改过的名字");
     assert_eq!(entry["source"], "official");
 }
@@ -150,12 +169,18 @@ fn broken_files_show_up_as_errors_not_silence() {
     let dir = scratch_dir();
     std::fs::write(dir.join("bad.json"), "{not json").unwrap();
     std::fs::create_dir_all(dir.join("half-baked")).unwrap();
-    let errors = list_at(&dir, &store()).unwrap()["errors"].as_array().cloned().unwrap();
+    let errors = list_at(&dir, &store()).unwrap()["errors"]
+        .as_array()
+        .cloned()
+        .unwrap();
     assert_eq!(errors.len(), 2);
     assert_eq!(errors[0]["file"], "half-baked/plugin.json");
     assert_eq!(errors[0]["reason"], "目录里没有 plugin.json");
     assert_eq!(errors[1]["file"], "bad.json");
-    assert!(errors[1]["reason"].as_str().unwrap().starts_with("不是合法的 JSON："));
+    assert!(errors[1]["reason"]
+        .as_str()
+        .unwrap()
+        .starts_with("不是合法的 JSON："));
 }
 
 #[test]
@@ -169,11 +194,21 @@ fn uninstall_rejects_uninstalled_and_path_smuggling() {
 #[test]
 fn sorting_follows_pinyin_not_codepoints() {
     // 「常用」chang 要排在「端到端」duan 之前；按 Unicode 码位排的话两者前后颠倒
-    let names = ["端到端读写预设", "常用 Topic 模板", "批量化对比预设", "冒烟与吞吐预设"];
+    let names = [
+        "端到端读写预设",
+        "常用 Topic 模板",
+        "批量化对比预设",
+        "冒烟与吞吐预设",
+    ];
     let mut sorted = names.to_vec();
     sorted.sort_by_key(|name| collation_key(name));
     assert_eq!(
         sorted,
-        ["常用 Topic 模板", "端到端读写预设", "冒烟与吞吐预设", "批量化对比预设"]
+        [
+            "常用 Topic 模板",
+            "端到端读写预设",
+            "冒烟与吞吐预设",
+            "批量化对比预设"
+        ]
     );
 }

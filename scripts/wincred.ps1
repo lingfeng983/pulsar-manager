@@ -7,10 +7,12 @@ Windows Credential Manager helper for the release script (scripts/release-publis
 
 Default target: pulsar-manager:github-token
 
-The token lives only in Credential Manager: it is never written to a file and,
-when storing interactively (default), never appears on the command line or in
-the shell history. -Token exists for non-interactive tests only; do not use it
-with a real token.
+The token lives only in Credential Manager: it is never written to a file and
+never appears on a command line or in the shell history. There is deliberately
+no -Token parameter: anything passed as an argument is visible in the process
+list, in the parent shell's history, and in the console transcript, which is
+exactly the exposure this helper exists to avoid. `store` always prompts and
+reads the token with Read-Host -AsSecureString.
 #>
 [CmdletBinding()]
 param(
@@ -20,9 +22,7 @@ param(
 
     [string]$Target = 'pulsar-manager:github-token',
 
-    [string]$UserName = 'lingfeng983',
-
-    [string]$Token = ''
+    [string]$UserName = 'lingfeng983'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -68,21 +68,25 @@ public static class NativeCred
 Add-Type -TypeDefinition $typeDefinition -ErrorAction Stop
 
 $CRED_TYPE_GENERIC = 1
+# 为什么是 LOCAL_MACHINE(2) 而不是 SESSION(1) 或 ENTERPRISE(3)：
+#   - SESSION 只活到本次登录，重启后 release-publish.mjs 又取不到令牌，这个 helper 就白做了；
+#   - ENTERPRISE 会随用户的漫游配置文件同步到域控制器，等于把令牌复制到更多地方。
+# LOCAL_MACHINE 这个名字有误导性：generic credential 的 blob 仍然存在**当前用户**的
+# DPAPI 保护配置里（%LOCALAPPDATA%\Microsoft\Credentials），并不对其他账户可见。
 $CRED_PERSIST_LOCAL_MACHINE = 2
 $ERROR_NOT_FOUND = 1168
 
 function Invoke-Store {
-    param([string]$TargetName, [string]$Account, [string]$PlainToken)
+    param([string]$TargetName, [string]$Account)
 
-    if ([string]::IsNullOrWhiteSpace($PlainToken)) {
-        $secure = Read-Host -Prompt 'Paste the GitHub token (input is hidden)' -AsSecureString
-        $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-        try {
-            $PlainToken = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
-        }
-        finally {
-            [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
-        }
+    # 只走交互式读取：SecureString → BSTR 只在解出明文的那一小段存在，用完立刻 ZeroFree。
+    $secure = Read-Host -Prompt 'Paste the GitHub token (input is hidden)' -AsSecureString
+    $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+    try {
+        $PlainToken = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+    }
+    finally {
+        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
     }
 
     $PlainToken = $PlainToken.Trim()
@@ -154,7 +158,7 @@ function Invoke-Delete {
 }
 
 switch ($Action) {
-    'store' { Invoke-Store -TargetName $Target -Account $UserName -PlainToken $Token }
+    'store' { Invoke-Store -TargetName $Target -Account $UserName }
     'get' { Invoke-Get -TargetName $Target }
     'delete' { Invoke-Delete -TargetName $Target }
 }

@@ -3,8 +3,11 @@ import {Modal, Alert, Button, Space, Progress, Typography, Descriptions, message
 import {useUpdateStore, isFresh} from '../store/update';
 import {renderMarkdown} from '../utils/markdown';
 
+// 按 1024 换算就写 IEC 单位（MiB/KiB）：下载体积与「设置 → 关于」里的包大小
+// 必须是同一套口径，否则同一个安装包在两处显示成不同的数。
+// 这里不用 utils/format 的 formatBytes：进度需要「最小 1 KiB」而不是「512 B」。
 const formatBytes = (n: number): string =>
-    n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
+    n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MiB` : `${Math.max(1, Math.round(n / 1024))} KiB`;
 
 /**
  * 软件更新弹窗。
@@ -192,12 +195,13 @@ const UpdateModal: React.FC<{open: boolean; onClose: () => void; force?: boolean
                         <Descriptions.Item label="当前版本">{result.currentVersion}</Descriptions.Item>
                         <Descriptions.Item label="最新版本">
                             {result.latestVersion}
+                            {/* 「可更新 / 已是最新」是 14px 正文：语义色本身白底对比度不足，用文字专用色 */}
                             {hasUpdate ? (
-                                <Typography.Text style={{marginLeft: 8, color: 'var(--color-warning)'}}>
+                                <Typography.Text style={{marginLeft: 8, color: 'var(--color-warning-text)'}}>
                                     可更新
                                 </Typography.Text>
                             ) : (
-                                <Typography.Text style={{marginLeft: 8, color: 'var(--color-success)'}}>
+                                <Typography.Text style={{marginLeft: 8, color: 'var(--color-success-text)'}}>
                                     已是最新
                                 </Typography.Text>
                             )}

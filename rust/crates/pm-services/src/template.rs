@@ -94,7 +94,11 @@ fn whole_placeholder(content: &str) -> Option<&str> {
     (!name.is_empty()).then_some(name)
 }
 
-fn interpolate(content: &str, variables: &[TemplateVariable], used: &mut Vec<(String, Value)>) -> AppResult<String> {
+fn interpolate(
+    content: &str,
+    variables: &[TemplateVariable],
+    used: &mut Vec<(String, Value)>,
+) -> AppResult<String> {
     let mut out = String::with_capacity(content.len());
     let mut rest = content;
     while let Some(start) = rest.find("{{") {
@@ -138,9 +142,9 @@ fn build_value(variable: &TemplateVariable) -> AppResult<Value> {
             if let Ok(int) = raw.parse::<i64>() {
                 return Ok(Value::from(int));
             }
-            let parsed: f64 = raw
-                .parse()
-                .map_err(|_| AppError::config(format!("变量「{}」不是数字：{raw}", variable.name)))?;
+            let parsed: f64 = raw.parse().map_err(|_| {
+                AppError::config(format!("变量「{}」不是数字：{raw}", variable.name))
+            })?;
             Ok(Value::from(parsed))
         }
         "boolean" | "bool" => {
@@ -151,9 +155,9 @@ fn build_value(variable: &TemplateVariable) -> AppResult<Value> {
             if raw.is_empty() {
                 Ok(Value::from(pm_core::now_ms()))
             } else {
-                let parsed: i64 = raw
-                    .parse()
-                    .map_err(|_| AppError::config(format!("变量「{}」不是时间戳：{raw}", variable.name)))?;
+                let parsed: i64 = raw.parse().map_err(|_| {
+                    AppError::config(format!("变量「{}」不是时间戳：{raw}", variable.name))
+                })?;
                 Ok(Value::from(parsed))
             }
         }
@@ -178,7 +182,10 @@ fn build_value(variable: &TemplateVariable) -> AppResult<Value> {
         }
         "enum" => {
             if variable.options.is_empty() {
-                return Err(AppError::config(format!("变量「{}」是枚举但没有选项", variable.name)));
+                return Err(AppError::config(format!(
+                    "变量「{}」是枚举但没有选项",
+                    variable.name
+                )));
             }
             if raw.is_empty() {
                 Ok(Value::from(variable.options[0].clone()))
@@ -215,7 +222,10 @@ mod tests {
         // 第二个占位符在字符串外，模板本身不合法（JSON 结构里），这里只验证字符串内的类型保持
         let rendered = render(
             r#"{"orderId":"{{id}}","count":"{{count}}"}"#,
-            &[variable("id", "string", "A-1"), variable("count", "number", "42")],
+            &[
+                variable("id", "string", "A-1"),
+                variable("count", "number", "42"),
+            ],
         )
         .unwrap();
         assert_eq!(rendered.body, r#"{"orderId":"A-1","count":42}"#);

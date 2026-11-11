@@ -241,6 +241,13 @@ const PolicySyncModal: React.FC<PolicySyncModalProps> = ({
                 setPlan(null);
                 setPlanError(response.error || '预览差异失败');
             }
+        } catch (error) {
+            // rpc 正常不 reject，但 transport 异常或渲染层抛错仍会走到这里；
+            // 只靠 finally 收掉 loading 会把失败静默吞掉，必须落到可见错误态并提示。
+            const reason = error instanceof Error ? error.message : String(error);
+            setPlan(null);
+            setPlanError(reason);
+            message.error(`预览差异失败：${reason}`);
         } finally {
             setPlanning(false);
         }
@@ -259,6 +266,11 @@ const PolicySyncModal: React.FC<PolicySyncModalProps> = ({
                 setResult(null);
                 setApplyError(response.error || '同步失败');
             }
+        } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error);
+            setResult(null);
+            setApplyError(reason);
+            message.error(`同步失败：${reason}`);
         } finally {
             setApplying(false);
         }

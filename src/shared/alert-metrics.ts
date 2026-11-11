@@ -19,9 +19,11 @@ export const ALERT_METRICS: AlertMetricMeta[] = [
     {key: 'backlog', label: '积压消息数', unit: '条', scale: 1, integer: true, clusterSupported: true},
     {key: 'msgRateIn', label: '入向速率', unit: '条/秒', scale: 1, integer: false, clusterSupported: true},
     {key: 'msgRateOut', label: '出向速率', unit: '条/秒', scale: 1, integer: false, clusterSupported: true},
-    {key: 'throughputIn', label: '入向吞吐', unit: 'KB/秒', scale: 1024, integer: false, clusterSupported: true},
-    {key: 'throughputOut', label: '出向吞吐', unit: 'KB/秒', scale: 1024, integer: false, clusterSupported: true},
-    {key: 'storageSize', label: '存储大小', unit: 'MB', scale: 1024 * 1024, integer: false, clusterSupported: false},
+    // 换算用 1024，单位就得写 IEC 的 KiB/MiB：写成 KB/MB 会让"1 KB 到底 1000 还是 1024 字节"
+    // 这件事跟着文案一起漂。Pulsar 的字节类指标本身就是 1024 进制，改单位名不动数值。
+    {key: 'throughputIn', label: '入向吞吐', unit: 'KiB/秒', scale: 1024, integer: false, clusterSupported: true},
+    {key: 'throughputOut', label: '出向吞吐', unit: 'KiB/秒', scale: 1024, integer: false, clusterSupported: true},
+    {key: 'storageSize', label: '存储大小', unit: 'MiB', scale: 1024 * 1024, integer: false, clusterSupported: false},
     {key: 'producers', label: '生产者数', unit: '个', scale: 1, integer: true, clusterSupported: true},
     {key: 'consumers', label: '消费者数', unit: '个', scale: 1, integer: true, clusterSupported: true},
 ];
@@ -42,9 +44,13 @@ export function alertMetric(key: string): AlertMetricMeta {
     );
 }
 
+// 与 Rust 侧 compare() 的白名单一一对应。少列一个的后果不是"少个选项"，而是后台
+// 存进去的规则在界面上找不到对应项、被兜底成第一项，用户再点保存就把阈值语义改掉了。
 export const ALERT_COMPARATORS: {key: AlertComparator; symbol: string; label: string}[] = [
     {key: 'gt', symbol: '>', label: '高于'},
+    {key: 'gte', symbol: '≥', label: '不低于'},
     {key: 'lt', symbol: '<', label: '低于'},
+    {key: 'lte', symbol: '≤', label: '不高于'},
 ];
 
 export function alertComparator(key: string) {
@@ -125,7 +131,9 @@ export function buildRecoveredMessage(
     observedValue: number,
 ): string {
     const comparator = alertComparator(event.comparator);
-    const backTo = comparator.key === 'gt' ? '回落到' : '恢复到';
+    // 「高于 / 不低于」类阈值超标后是往下走回来的，「低于 / 不高于」类则是往上走回去的。
+    // 四个比较符都要落到其中一支：只判 gt 会把 gte 说成"恢复到"。
+    const backTo = comparator.key === 'gt' || comparator.key === 'gte' ? '回落到' : '恢复到';
     return (
         `${event.scopeLabel} ${alertMetric(event.metric).label} ${backTo} ` +
         `${formatAlertValue(event.metric, observedValue)}` +

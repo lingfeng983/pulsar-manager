@@ -26,7 +26,11 @@ fn parse_iso(text: &str) -> Option<i64> {
         .map(|value| value.timestamp_millis())
 }
 
-fn freshness(report: Option<&InspectionReport>, now_ms: i64, schedule: Option<&InspectionSchedule>) -> &'static str {
+fn freshness(
+    report: Option<&InspectionReport>,
+    now_ms: i64,
+    schedule: Option<&InspectionSchedule>,
+) -> &'static str {
     let Some(report) = report else {
         return "never";
     };
@@ -102,7 +106,9 @@ pub fn build_summary(store: &Store, now_ms: i64) -> AppResult<Value> {
     for cluster in &clusters {
         let report = latest.get(&cluster.id);
         let schedule = schedule_map.get(&cluster.id);
-        let checks = report.map(|report| report.checks.clone()).unwrap_or_default();
+        let checks = report
+            .map(|report| report.checks.clone())
+            .unwrap_or_default();
         let row = json!({
             "clusterId": cluster.id,
             "clusterName": cluster.name,
@@ -164,9 +170,7 @@ pub fn build_summary(store: &Store, now_ms: i64) -> AppResult<Value> {
     }
     let mut crit_groups: Vec<Value> = groups
         .into_iter()
-        .map(|(key, (title, items))| {
-            json!({"key": key, "title": title, "items": items})
-        })
+        .map(|(key, (title, items))| json!({"key": key, "title": title, "items": items}))
         .collect();
     crit_groups.sort_by(|a, b| {
         let left = a["items"].as_array().map(Vec::len).unwrap_or(0);
@@ -258,7 +262,10 @@ mod tests {
             section_order(section_of(Some(&pm_core::InspectionTotals::default()))),
             3
         );
-        let crit = pm_core::InspectionTotals { crit: 1, ..Default::default() };
+        let crit = pm_core::InspectionTotals {
+            crit: 1,
+            ..Default::default()
+        };
         assert_eq!(section_order(section_of(Some(&crit))), 0);
     }
 }

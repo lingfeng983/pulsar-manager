@@ -49,7 +49,8 @@ impl SecretBox {
             .map_err(|_| AppError::Other("凭据密钥长度不合法".into()))?;
         let mut iv = [0u8; GCM_IV_BYTES];
         rand::Rng::fill(&mut rand::rng(), &mut iv[..]);
-        let nonce = Nonce::try_from(&iv[..]).map_err(|_| AppError::Other("IV 长度不合法".into()))?;
+        let nonce =
+            Nonce::try_from(&iv[..]).map_err(|_| AppError::Other("IV 长度不合法".into()))?;
         let sealed = cipher
             .encrypt(&nonce, plaintext.as_bytes())
             .map_err(|_| AppError::Other("加密凭据失败".into()))?;
@@ -124,7 +125,10 @@ fn load_key(dir: &Path) -> AppResult<([u8; 32], Option<String>)> {
                     format!(
                         "原有凭据密钥已无法解密（{error}），旧文件备份为 {} 并生成了新密钥。\
                          已保存的集群认证参数、通知渠道密钥需要重新填写。",
-                        backup.file_name().and_then(|name| name.to_str()).unwrap_or("备份文件")
+                        backup
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("备份文件")
                     )
                 } else {
                     format!(
@@ -142,7 +146,14 @@ fn load_key(dir: &Path) -> AppResult<([u8; 32], Option<String>)> {
         let hex_key = std::fs::read_to_string(&legacy)?.trim().to_string();
         let key = parse_hex_key(&hex_key)?;
         persist_key(dir, &hex_key)?;
-        let _ = std::fs::remove_file(&legacy);
+        // 明文密钥文件删除失败不能静默丢掉：磁盘上会一直留着解密后的密钥，
+        // 与「迁移到系统密钥库」的前提相悖，写一行告警让人能发现。
+        if let Err(error) = std::fs::remove_file(&legacy) {
+            pm_core::pm_warn!(
+                "[crypto] 删除明文密钥文件失败 {}：{error}",
+                legacy.display()
+            );
+        }
         return Ok((key, None));
     }
 
@@ -157,9 +168,13 @@ fn create_key(dir: &Path) -> AppResult<[u8; 32]> {
 }
 
 fn parse_hex_key(value: &str) -> AppResult<[u8; 32]> {
-    let bytes = hex::decode(value.trim()).map_err(|_| AppError::Other("密钥不是合法十六进制".into()))?;
+    let bytes =
+        hex::decode(value.trim()).map_err(|_| AppError::Other("密钥不是合法十六进制".into()))?;
     if bytes.len() != 32 {
-        return Err(AppError::Other(format!("密钥长度应为 32 字节，实际 {}", bytes.len())));
+        return Err(AppError::Other(format!(
+            "密钥长度应为 32 字节，实际 {}",
+            bytes.len()
+        )));
     }
     let mut key = [0u8; 32];
     key.copy_from_slice(&bytes);
@@ -286,7 +301,8 @@ mod dpapi {
             if ok == 0 {
                 return Err("CryptProtectData 调用失败".to_string());
             }
-            let bytes = std::slice::from_raw_parts(output.pb_data, output.cb_data as usize).to_vec();
+            let bytes =
+                std::slice::from_raw_parts(output.pb_data, output.cb_data as usize).to_vec();
             LocalFree(output.pb_data as *mut c_void);
             Ok(bytes)
         }
@@ -314,7 +330,8 @@ mod dpapi {
             if ok == 0 {
                 return Err("CryptUnprotectData 调用失败（可能不是同一 Windows 用户）".to_string());
             }
-            let bytes = std::slice::from_raw_parts(output.pb_data, output.cb_data as usize).to_vec();
+            let bytes =
+                std::slice::from_raw_parts(output.pb_data, output.cb_data as usize).to_vec();
             LocalFree(output.pb_data as *mut c_void);
             Ok(bytes)
         }
@@ -344,6 +361,64 @@ mod tests {
         let secrets = SecretBox::load_or_create(&dir).unwrap();
         assert_eq!(secrets.encrypt("").unwrap(), "");
         assert_eq!(secrets.decrypt("").unwrap(), "");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tampered_ciphertext_fails_to_decrypt() {
+        let dir = std::env::temp_dir().join(format!("pm-crypto-{}", pm_core::new_id()));
+        let secrets = SecretBox::load_or_create(&dir).unwrap();
+        let cipher = secrets.encrypt("sensitive-token").unwrap();
+        // 翻掉 payload 段首个字符：base64 仍然合法，但 GCM tag 校验必须失败
+        let mut chars: Vec<char> = cipher.chars().collect();
+        let index = CIPHER_PREFIX.len();
+        chars[index] = if chars[index] == 'A' { 'B' } else { 'A' };
+        let tampered: String = chars.into_iter().collect();
+        assert_ne!(tampered, cipher);
+        assert!(secrets.decrypt(&tampered).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn invalid_base64_and_short_ciphertext_are_rejected() {
+        let dir = std::env::temp_dir().join(format!("pm-crypto-{}", pm_core::new_id()));
+        let secrets = SecretBox::load_or_create(&dir).unwrap();
+        let error = secrets.decrypt("v2:!!!not-base64!!!").unwrap_err();
+        assert!(error.to_string().contains("base64"), "{error}");
+        // 合法 base64 但不足 iv + tag，也别拿去解密
+        let short = format!(
+            "{CIPHER_PREFIX}{}",
+            base64::engine::general_purpose::STANDARD.encode([0u8; 8])
+        );
+        assert!(secrets
+            .decrypt(&short)
+            .unwrap_err()
+            .to_string()
+            .contains("长度"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_prefix_is_rejected_with_migration_hint() {
+        let dir = std::env::temp_dir().join(format!("pm-crypto-{}", pm_core::new_id()));
+        let secrets = SecretBox::load_or_create(&dir).unwrap();
+        let error = secrets.decrypt("v1:whatever").unwrap_err();
+        assert!(error.to_string().contains("Electron"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn broken_key_file_rotates_and_reports_warning() {
+        let dir = std::env::temp_dir().join(format!("pm-crypto-{}", pm_core::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 写一份解不开的密钥文件，模拟 Windows 账户变化 / 配置搬家后的 DPAPI 失败
+        std::fs::write(dir.join(KEY_FILE), b"v10-garbage-not-a-dpapi-blob").unwrap();
+        let secrets = SecretBox::load_or_create(&dir).unwrap();
+        let warning = secrets.warning().expect("密钥文件损坏必须给出轮换告警");
+        assert!(warning.contains("无法解密"), "{warning}");
+        // 轮换出来的新密钥能正常加解密
+        let cipher = secrets.encrypt("fresh").unwrap();
+        assert_eq!(secrets.decrypt(&cipher).unwrap(), "fresh");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -25,10 +25,11 @@ interface NamespacePolicyPanelProps {
 const MB = 1024 * 1024;
 
 function humanBytes(bytes: number): string {
+    // 1024 进制 → IEC 单位（MiB），与 utils/format 的 formatBytes 保持同一套口径。
     if (bytes >= MB) {
-        return `${Math.round((bytes / MB) * 100) / 100}MB`;
+        return `${Math.round((bytes / MB) * 100) / 100} MiB`;
     }
-    return `${bytes}B`;
+    return `${bytes} B`;
 }
 
 // 一个端点下挂着多条配额（按存储 / 按消息年龄），逐条列出来才能各清各的；

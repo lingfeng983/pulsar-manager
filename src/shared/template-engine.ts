@@ -402,6 +402,13 @@ const MAX_ACCUMULATED_CHARS = 8_000_000;
 // walk 无限递归，JS 栈溢出是原生层崩溃而不是友好报错，必须提前拦。
 const MAX_WALK_DEPTH = 256;
 
+// 编辑期校验走的是另一条递归路径（validateTemplate 里的 visit / referencedVariables 里的
+// scan），同样要防栈溢出：JSON.parse 本身能吃下上万层嵌套，但递归遍历深到一定程度抛的是
+// RangeError——在渲染进程里那是整页白屏，而不是编辑器下方一句能读的报错。层数上限与
+// walk 对齐；节点总量再单独封顶，拦住"层数不深但节点极多"把校验拖成假死的模板。
+const MAX_VALIDATE_DEPTH = 256;
+const MAX_VALIDATE_NODES = 200_000;
+
 function walk(node: JsonValue, ctx: WalkContext, path: string): JsonValue {
     ctx.budget.depth += 1;
     if (ctx.budget.depth > MAX_WALK_DEPTH) {
@@ -593,14 +600,23 @@ export function validateTemplate(body: string, variables: TemplateVariable[]): V
         }
     }
 
-    const visit = (node: JsonValue, path: string): string | null => {
+    const budget = {nodes: 0};
+    const visit = (node: JsonValue, path: string, depth = 0): string | null => {
+        // 闸门必须在递归入口就拦，等栈真的爆了再 catch 是接不住的。
+        if (depth > MAX_VALIDATE_DEPTH) {
+            return `模板嵌套层级异常（超过 ${MAX_VALIDATE_DEPTH} 层），请检查 $each 是否层层自引用`;
+        }
+        budget.nodes += 1;
+        if (budget.nodes > MAX_VALIDATE_NODES) {
+            return `模板节点数超过 ${MAX_VALIDATE_NODES}，请减少 $each 的 count 或字段数量`;
+        }
         const where = path ? `位置 ${path} ` : '';
         if (typeof node === 'string') {
             return scanString(node, where);
         }
         if (Array.isArray(node)) {
             for (let index = 0; index < node.length; index += 1) {
-                const failure = visit(node[index], `${path}[${index}]`);
+                const failure = visit(node[index], `${path}[${index}]`, depth + 1);
                 if (failure) {
                     return failure;
                 }
@@ -624,10 +640,10 @@ export function validateTemplate(body: string, variables: TemplateVariable[]): V
                 if (!countOk) {
                     return `${where || ''}$each 的 count 要是 0~10000 的整数或一个占位符`;
                 }
-                return visit(spec.of as JsonValue, `${path}.of`);
+                return visit(spec.of as JsonValue, `${path}.of`, depth + 1);
             }
             for (const key of Object.keys(node)) {
-                const failure = visit(node[key], path ? `${path}.${key}` : key);
+                const failure = visit(node[key], path ? `${path}.${key}` : key, depth + 1);
                 if (failure) {
                     return failure;
                 }
@@ -649,7 +665,14 @@ export function referencedVariables(body: string): string[] {
         return [];
     }
     const names = new Set<string>();
-    const scan = (value: JsonValue): void => {
+    // 显式栈而不是递归：这个函数只是"尽量把变量表补齐"，遇到层层嵌套的坏模板时
+    // 它不该把调用方一起带崩——栈溢出是 RangeError，调用处 catch 不住。
+    // 子节点倒序入栈，出栈顺序就与原来的深度优先前序一致，返回的变量顺序不变。
+    const stack: JsonValue[] = [parsed];
+    let visited = 0;
+    while (stack.length > 0 && visited < MAX_VALIDATE_NODES) {
+        const value = stack.pop() as JsonValue;
+        visited += 1;
         if (typeof value === 'string') {
             for (const match of value.matchAll(PLACEHOLDER)) {
                 const expression = String(match[1]).trim();
@@ -657,16 +680,12 @@ export function referencedVariables(body: string): string[] {
                     names.add(expression);
                 }
             }
-            return;
+            continue;
         }
-        if (Array.isArray(value)) {
-            value.forEach(scan);
-            return;
+        const children = Array.isArray(value) ? value : isPlainObject(value) ? Object.values(value) : [];
+        for (let index = children.length - 1; index >= 0; index -= 1) {
+            stack.push(children[index]);
         }
-        if (isPlainObject(value)) {
-            Object.values(value).forEach(scan);
-        }
-    };
-    scan(parsed);
+    }
     return [...names];
 }

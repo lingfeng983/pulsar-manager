@@ -82,9 +82,32 @@ export function installTauriBridge(): boolean {
         },
     };
 
-    (window as unknown as {electronAPI: unknown}).electronAPI = createBridge(transport);
+    window.electronAPI = createBridge(transport) as DeclaredApi;
     return true;
 }
+
+// ---------- 编译期形状对齐 ----------
+//
+// createBridge 的每个 invoke 都返回 Promise<unknown>（运行时就是未校验的 JSON），
+// 而 Window.electronAPI 是 api-contract.ts 末尾那份手维护的强类型契约，两者没法直接
+// 赋值兼容，所以落地时必然要断言一次。断言的价值取决于它是否还连着契约：过去这里写成
+// `(window as unknown as {electronAPI: unknown})`，把类型信息整个丢掉，契约改了名、
+// 实现没跟上也照样编译通过。现在断言目标是 Window['electronAPI']，再用下面这段
+// 只比「方法名」的检查把两边钉死——少一个通道、拼错一个方法、多出契约里没有的组，
+// 都在编译期就报错，而不是等页面点到那个按钮才收到「未知方法」。
+
+type BridgeApi = ReturnType<typeof createBridge>;
+type DeclaredApi = Window['electronAPI'];
+
+type SameKeys<A, B> = [keyof A] extends [keyof B] ? ([keyof B] extends [keyof A] ? true : false) : false;
+type GroupsAligned = SameKeys<BridgeApi, DeclaredApi>;
+type MethodsAligned = {
+    [K in keyof DeclaredApi & keyof BridgeApi]: SameKeys<BridgeApi[K], DeclaredApi[K]>;
+}[keyof DeclaredApi & keyof BridgeApi];
+
+// 这一行不是运行时逻辑，是给类型检查器看的：值恒为 true，类型对不上就赋不过去。
+const bridgeShapeAligned: GroupsAligned extends true ? (MethodsAligned extends true ? true : false) : false = true;
+void bridgeShapeAligned;
 
 // 关键：必须在模块求值时就接管，而不是等入口文件调用。
 // ESM 会先把所有 import 求值完才执行入口模块体，而有些 store 在自身顶层就调用

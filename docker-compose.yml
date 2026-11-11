@@ -18,9 +18,11 @@ services:
     image: apachepulsar/pulsar:3.3.0
     container_name: pulsar-manager-demo
     command: bin/pulsar standalone
+    # 只绑本机回环：standalone 默认没有任何认证，写成 "8080:8080" 会把 admin 与 broker
+    # 一起暴露到局域网（酒店/公司 Wi-Fi 上尤其危险）。要给同事连，显式改成 0.0.0.0 并自己加认证。
     ports:
-      - "6650:6650"   # broker 消息端口（pulsar://）
-      - "8080:8080"   # admin HTTP 端口（http://）
+      - "127.0.0.1:6650:6650"   # broker 消息端口（pulsar://）
+      - "127.0.0.1:8080:8080"   # admin HTTP 端口（http://）
     environment:
       # 单机体验足够的内存；机器内存紧张时也可以再调小
       PULSAR_MEM: "-Xms512m -Xmx1024m -XX:MaxDirectMemorySize=1024m"
