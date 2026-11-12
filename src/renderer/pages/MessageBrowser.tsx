@@ -137,7 +137,13 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
     const paneActive = useContext(PaneActiveContext);
     const visible = active && paneActive;
     const [mode, setMode] = useState<PanelMode>('send');
-    const [messages, setMessages] = useState<Message[]>([]);
+    // 列表内容与「累计收到」放同一个 state：界面只保留最近 MAX_DISPLAY_COUNT 条，
+    // 但累计值不能被裁掉——reader 一次读几千条时，只显示列表长度会永远停在 500，
+    // 看起来像读取卡住了（条数不动、其实还在进）。
+    const [{items: messages, received: receivedCount}, setStream] = useState<{items: Message[]; received: number}>({
+        items: [],
+        received: 0,
+    });
     const [sessionId, setSessionId] = useState<string | null>(null);
     const [starting, setStarting] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -236,7 +242,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
     // 切换模式或换 topic 都会让旧会话失去意义：先停，且不打扰用户
     useEffect(() => {
         void stopActiveSession(false);
-        setMessages([]);
+        setStream({items: [], received: 0});
         setError(null);
     }, [mode, clusterId, tenant, namespace, topic, persistent, stopActiveSession]);
 
@@ -261,8 +267,11 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
         // 流式会话重连时可能重投已经显示过的消息。按 messageId 去重后，
         // 表格才能把 messageId 当稳定 key——否则为躲重复 key 拼上 index，
         // 每来一批新消息都会让所有旧行的 index 后移，整张表重挂、展开状态全丢。
-        setMessages(prev => {
-            const seen = new Set(prev.map(item => item.messageId));
+        //
+        // 累计收到只加「新」的那部分：重投不该把数字吹大。列表长度另有上限，
+        // 两者一起更新才不会出现「数字停在 500、实际还在进」的错觉。
+        setStream(prev => {
+            const seen = new Set(prev.items.map(item => item.messageId));
             const fresh = batch.messages.filter(item => {
                 if (seen.has(item.messageId)) {
                     return false;
@@ -270,7 +279,13 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                 seen.add(item.messageId);
                 return true;
             });
-            return trimMessageList([...fresh, ...prev], MAX_DISPLAY_COUNT, STREAM_MAX_BYTES);
+            if (fresh.length === 0) {
+                return prev;
+            }
+            return {
+                items: trimMessageList([...fresh, ...prev.items], MAX_DISPLAY_COUNT, STREAM_MAX_BYTES),
+                received: prev.received + fresh.length,
+            };
         });
     }, []);
 
@@ -545,7 +560,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                 const sessionId = response.data.sessionId;
                 sessionRef.current = {sessionId, mode: streamMode};
                 setSessionId(sessionId);
-                setMessages([]);
+                setStream({items: [], received: 0});
                 // 认领上了才回放，并且是先批后结束：结束事件如果抢在响应前面到达，
                 // 这条会话其实已经跑完了，回放完它界面就直接落到"已停止"。
                 const early = earlyEvents.current;
@@ -635,7 +650,11 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                 maxMessages: consumeMax > 0 ? Math.min(consumeMax, 200) : 20,
             });
             if (response.success && response.data) {
-                setMessages(trimMessageList(response.data.messages, MAX_DISPLAY_COUNT, STREAM_MAX_BYTES));
+                // 偷看是一次性快照：累计条数就按这次返回的条数算，不是往旧列表上累加
+                setStream({
+                    items: trimMessageList(response.data.messages, MAX_DISPLAY_COUNT, STREAM_MAX_BYTES),
+                    received: response.data.messages.length,
+                });
                 if (response.data.note) {
                     message.info(response.data.note);
                 } else {
@@ -1286,7 +1305,20 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                             {streamControls}
                             <div className="stream-toolbar-summary">
                                 <span>
-                                    消息列表 <strong>{messages.length}</strong> 条{isRunning && '（实时推送中）'}
+                                    {/* 列表只保留最近 500 条，但 reader 一次可能读几千条：
+                                        只显示列表长度会让数字停在 500 不再变，看起来像读取停了。
+                                        超出上限时把累计值摆出来，并说明界面只留了多少。 */}
+                                    {receivedCount > messages.length ? (
+                                        <>
+                                            {mode === 'read' ? '已读' : '已收'} <strong>{receivedCount}</strong> 条
+                                            {`（界面保留最近 ${messages.length} 条）`}
+                                        </>
+                                    ) : (
+                                        <>
+                                            消息列表 <strong>{messages.length}</strong> 条
+                                        </>
+                                    )}
+                                    {isRunning && '（实时推送中）'}
                                 </span>
                                 <Tooltip title="按 Producer、Properties 与发布时间筛选当前已收到的消息；双击任意一行可全屏查看正文">
                                     <Button

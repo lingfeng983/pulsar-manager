@@ -16,10 +16,25 @@ use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 /// 只有托盘菜单的「退出」和装更新前的收尾才允许真正结束进程。
 static QUITTING: AtomicBool = AtomicBool::new(false);
 
+/// 用户主动把窗口收进了托盘。
+/// 有这个标记之后，任何「页面加载完成」都不许再把窗口弹回来——WebView2 在内存紧张时
+/// 会丢弃并重载页面，重载会再触发一次 on_page_load；不看这个标记的话，用户关掉的
+/// 窗口会在几分钟后自己出现在屏幕上。
+static USER_HIDDEN: AtomicBool = AtomicBool::new(false);
+
+/// 窗口是否已经显示过。
+/// 3 秒兜底只为「页面加载失败、on_page_load 永远不来」准备，判断条件必须是
+/// 「从没显示过」而不是「现在不可见」：后者会在启动 3 秒内点叉时把窗口重新弹出来，
+/// 也就是用户看到的「关掉又自己弹开」。
+static EVER_SHOWN: AtomicBool = AtomicBool::new(false);
+
 fn show_main_window(app: &tauri::AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
+    // 托盘/单实例唤回是用户主动要看的，清掉「收进托盘」的标记
+    USER_HIDDEN.store(false, Ordering::SeqCst);
+    EVER_SHOWN.store(true, Ordering::SeqCst);
     let _ = window.unminimize();
     let _ = window.show();
     let _ = window.set_focus();
@@ -165,7 +180,11 @@ fn main() {
                     // 与 Electron 版一样先不显示，首帧画完再亮，免得白屏闪一下
                     .visible(false)
                     .on_page_load(|window, payload| {
-                        if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                        // 只有首帧（或重载后用户本来就在看）才显示；收进托盘期间的重载不能弹窗
+                        if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)
+                            && !USER_HIDDEN.load(Ordering::SeqCst)
+                        {
+                            EVER_SHOWN.store(true, Ordering::SeqCst);
                             let _ = window.show();
                         }
                     })
@@ -194,6 +213,8 @@ fn main() {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     if !QUITTING.load(Ordering::SeqCst) {
                         api.prevent_close();
+                        // 先立标记再藏：晚一步的话，藏起来的同一瞬间若有重载事件到达就会弹回来
+                        USER_HIDDEN.store(true, Ordering::SeqCst);
                         let _ = closer.hide();
                     }
                 }
@@ -201,10 +222,15 @@ fn main() {
 
             // 页面加载失败时 on_page_load 不会来。没有这层兜底，用户只能对着托盘图标
             // 猜窗口去哪了——而那时候恰恰是最需要看到错误画面的。
+            // 只在「从没显示过」时补一次：已经显示过的窗口此时不可见，只可能是用户自己收进了托盘。
             let fallback = window.clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                if !fallback.is_visible().unwrap_or(true) {
+                if !EVER_SHOWN.load(Ordering::SeqCst)
+                    && !USER_HIDDEN.load(Ordering::SeqCst)
+                    && !fallback.is_visible().unwrap_or(true)
+                {
+                    EVER_SHOWN.store(true, Ordering::SeqCst);
                     let _ = fallback.show();
                 }
             });
