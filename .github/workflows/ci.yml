@@ -60,6 +60,15 @@ jobs:
       - name: 格式检查
         working-directory: rust
         run: cargo fmt --all -- --check
+      # tauri::generate_context!() 在编译期校验 frontendDist（../../../dist/renderer）存在，
+      # 不存在会直接 panic「proc macro panicked」。Rust 单测跑的是 debug/test 目标，
+      # 走 devUrl，不真正消费前端产物——这里放一个占位 index.html 就够，
+      # 真正的前端校验由上面的 frontend job 负责。
+      - name: 准备 frontendDist 占位
+        shell: bash
+        run: |
+          mkdir -p dist/renderer
+          echo '<!doctype html><title>ci placeholder</title>' > dist/renderer/index.html
       - name: 单元测试
         working-directory: rust
         run: cargo test --workspace
