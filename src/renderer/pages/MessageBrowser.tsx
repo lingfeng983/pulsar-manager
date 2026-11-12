@@ -1176,7 +1176,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                 {readFrom === 'recent' && (
                     <div>
                         <label style={fieldLabel}>条数:</label>
-                        <Tooltip title="原生 Reader 没有尾部锚点，这条是从最早开始扫、只留最后 N 条，扫完自动结束（最多扫 2 万条或 15 秒）。上限与列表保留条数一致。">
+                        <Tooltip title="原生 Reader 没有尾部锚点，这条是从最早开始扫、只留最后 N 条，扫完自动结束（最多扫 20 万条或 30 秒）。上限与列表保留条数一致。">
                             <InputNumber
                                 aria-label="最近多少条"
                                 min={1}
@@ -1190,7 +1190,7 @@ const MessageBrowser: React.FC<MessageBrowserProps> = ({
                     </div>
                 )}
                 {readFrom === 'messageId' && (
-                    <Tooltip title="没有按 ID 直取的协议路由，主进程从最早逐条比对到这个 ID 为止（护栏同回溯扫描：最多 2 万条或 15 秒），找到就显这一条">
+                    <Tooltip title="没有按 ID 直取的协议路由，主进程从最早逐条比对到这个 ID 为止（护栏同回溯扫描：最多 20 万条或 30 秒），找到就显这一条">
                         <Input
                             aria-label="目标 Message ID"
                             value={readMessageId}

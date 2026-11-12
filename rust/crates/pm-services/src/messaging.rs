@@ -23,6 +23,21 @@ const BATCH_MAX_BYTES: i64 = 8 * 1024 * 1024;
 /// 回溯扫描的护栏：recent / timestamp / messageId 都没有锚点，只能从 earliest 扫过去
 const SCAN_MAX_MESSAGES: i64 = 200_000;
 const SCAN_TIMEOUT_MS: u64 = 30_000;
+/// 扫描型读取「已经追上末尾」的判定：连续这么久没有新消息就收工。
+/// 为什么需要它：底层 Reader 是非持久 consumer，扫完不会给出「流结束」信号，
+/// 只会一直等新消息。没有这条判定，recent / timestamp / messageId 在消息数不足
+/// 上限时会永远不结束——而 recent 要等结束才把 tail 发出去，界面上就是
+/// 「一直在读、一条都不显示」。1.5s 足够跨过 broker 的分批投递间隔。
+const SCAN_IDLE_MS: u64 = 1_500;
+
+/// 定位型读取（按时间 / 按 ID）扫完整段都没命中时给用户的话。
+/// 两种起点的失败原因不同：时间点可能落在未来，ID 更可能是过期或不属于本 topic。
+fn miss_detail(from: &str) -> String {
+    match from {
+        "timestamp" => "没扫到起点：该时间之后没有消息，或更早的消息已过期".into(),
+        _ => "没找到这个 Message ID：可能已过期，或它不属于该 topic".into(),
+    }
+}
 
 pub const CONSUME_BATCH: &str = "msg:consume-batch";
 pub const READ_BATCH: &str = "msg:read-batch";
@@ -518,6 +533,8 @@ pub async fn start_read(
         let mut detail: Option<String> = None;
         let mut scanned = 0i64;
         let mut collecting = !scan;
+        // 最近一条消息到达的时刻：扫描型读取靠它判断「已经追上末尾」
+        let mut last_item_at = Instant::now();
         // recent：整段扫完再留最后 N 条，所以先攒着
         let mut tail: Vec<Message> = Vec::new();
         let started = Instant::now();
@@ -532,6 +549,7 @@ pub async fn start_read(
             match event {
                 Event::Item(Some(Ok(message))) => {
                     scanned += 1;
+                    last_item_at = Instant::now();
                     match request.from.as_str() {
                         "recent" => {
                             tail.push(message);
@@ -562,9 +580,9 @@ pub async fn start_read(
                                         || started.elapsed()
                                             >= Duration::from_millis(SCAN_TIMEOUT_MS)
                                     {
-                                        detail = Some(
-                                            "没扫到起点（消息可能已过期），请换个起点再试".into(),
-                                        );
+                                        // 撞护栏还没命中起点：对定位型读取来说这是「找不到」，
+                                        // 不是「只给出一部分」，所以单独给一句话并标成错误。
+                                        detail = Some(miss_detail(&request.from));
                                         reason = "error".into();
                                         break;
                                     }
@@ -573,6 +591,12 @@ pub async fn start_read(
                             }
                             buffer.push(message);
                             received.fetch_add(1, Ordering::Relaxed);
+                            // 按 ID 定位是「找到这一条就够」：继续往下读会把后面的消息一起带出来，
+                            // 与界面提示「找到就显这一条」不符。这里直接收工，buffer 由循环外的 flush 发出。
+                            if request.from == "messageId" {
+                                detail = Some("已定位到该消息".into());
+                                break;
+                            }
                         }
                         _ => {
                             buffer.push(message);
@@ -610,6 +634,39 @@ pub async fn start_read(
                     )));
                 }
                 Event::Tick => {
+                    // 扫描型读取的结束判定放在 tick 里：底层 Reader 扫完不会给「流结束」信号，
+                    // 只在收到消息时判护栏的话，消息数不到上限就会一直挂着。
+                    if scan {
+                        if scanned >= SCAN_MAX_MESSAGES
+                            || started.elapsed() >= Duration::from_millis(SCAN_TIMEOUT_MS)
+                        {
+                            // recent 是「留最后 N 条」，撞护栏还能给出已扫到的尾部；
+                            // 定位型读取撞护栏就是没找到，措辞和 reason 都要跟着变。
+                            detail = Some(if collecting || request.from == "recent" {
+                                "扫描到护栏上限，只给出已扫到的部分".to_string()
+                            } else {
+                                miss_detail(&request.from)
+                            });
+                            if !collecting && request.from != "recent" {
+                                reason = "error".into();
+                            }
+                            break;
+                        }
+                        if last_item_at.elapsed() >= Duration::from_millis(SCAN_IDLE_MS) {
+                            if scanned == 0 {
+                                detail = Some(
+                                    "没扫到任何消息：topic 可能是空的，或起点之前的消息已过期"
+                                        .into(),
+                                );
+                            } else if !collecting && request.from != "recent" {
+                                // 整段扫完都没命中起点：这不是「读到 0 条」，而是定位失败。
+                                // timestamp 与 messageId 都会走到这里，不能只判 messageId。
+                                detail = Some(miss_detail(&request.from));
+                                reason = "error".into();
+                            }
+                            break;
+                        }
+                    }
                     if !buffer.is_empty()
                         && last_flush.elapsed() >= Duration::from_millis(BATCH_FLUSH_MS)
                     {
