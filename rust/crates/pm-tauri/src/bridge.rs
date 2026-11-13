@@ -4,6 +4,7 @@
 //! 原样传入、返回 `{success, data?, error?, code?}`，永不 reject。
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use pm_core::AppError;
@@ -16,6 +17,11 @@ pub type Shared = Arc<AppContext>;
 /// 全局 AppHandle：后台任务（告警引擎、定时巡检、消费会话）都要往渲染进程推事件，
 /// 但它们拿不到 command 的参数，所以在这里留一个句柄。
 static APP_HANDLE: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
+
+/// 正在真正退出（托盘「退出」或更新安装前让位）。
+/// `CloseRequested` 见到它才放行；所有会自动显示窗口的路径见到它都必须让路，
+/// 否则用户点退出时窗口反而被重载事件或托盘双击叫回来，看起来像「要退出两次」。
+pub static QUITTING: AtomicBool = AtomicBool::new(false);
 
 pub fn set_app_handle(app: &tauri::AppHandle) {
     let _ = APP_HANDLE.set(app.clone());
@@ -33,6 +39,9 @@ pub fn emit(event: &str, payload: Value) {
 
 /// 退出应用：拉起安装器后必须让位，否则安装器写文件时本进程还占着 exe 与 dll。
 pub fn quit(code: i32) {
+    // 与托盘「退出」共用同一面旗：更新安装这条路径同样不能被 CloseRequested 拦下，
+    // 也不能在退出过程中把窗口重新显示出来。
+    QUITTING.store(true, Ordering::SeqCst);
     if let Some(app) = APP_HANDLE.get() {
         app.exit(code);
     }

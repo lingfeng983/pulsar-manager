@@ -8,13 +8,10 @@ mod scheduler;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crate::bridge::QUITTING;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
-use tauri::tray::{TrayIconBuilder, TrayIconEvent};
+use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
-
-/// 点窗口右上角的叉只是收进托盘，后台的告警评估与定时巡检继续跑。
-/// 只有托盘菜单的「退出」和装更新前的收尾才允许真正结束进程。
-static QUITTING: AtomicBool = AtomicBool::new(false);
 
 /// 用户主动把窗口收进了托盘。
 /// 有这个标记之后，任何「页面加载完成」都不许再把窗口弹回来——WebView2 在内存紧张时
@@ -28,7 +25,37 @@ static USER_HIDDEN: AtomicBool = AtomicBool::new(false);
 /// 也就是用户看到的「关掉又自己弹开」。
 static EVER_SHOWN: AtomicBool = AtomicBool::new(false);
 
+/// 托盘双击是否要唤回窗口：只认左键。
+/// tauri 的 `DoubleClick` 在 Windows 上也可能是右键（底层分支里有 `WM_RBUTTONDBLCLK`），
+/// 而右键是专门用来开菜单的；按按钮过滤，任何右键操作都不该把窗口叫回来。
+/// 这是防御性收紧，退出期间的主要保障是下面 `QUITTING` 的那一层闸门。
+fn tray_double_click_should_show(button: MouseButton) -> bool {
+    matches!(button, MouseButton::Left)
+}
+
+/// 页面加载完成后是否自动显示窗口。退出中、或用户已把窗口收进托盘，都不许弹。
+fn should_show_on_page_load(quitting: bool, user_hidden: bool) -> bool {
+    !quitting && !user_hidden
+}
+
+/// 3 秒兜底是否补一次显示：只为「从没显示过、且现在确实不可见」准备。
+/// 退出中一律不补，否则退出流程末尾窗口会闪回来。
+fn should_show_on_fallback(
+    quitting: bool,
+    user_hidden: bool,
+    ever_shown: bool,
+    visible: bool,
+) -> bool {
+    !quitting && !user_hidden && !ever_shown && !visible
+}
+
 fn show_main_window(app: &tauri::AppHandle) {
+    // 退出已经开始时，托盘双击、菜单「显示主窗口」、单实例唤回都不许把窗口叫回来。
+    // 这一步必须在最前面：下面的 show() 会清掉 USER_HIDDEN，晚一步就拦不住了。
+    if QUITTING.load(Ordering::SeqCst) {
+        pm_core::pm_warn!("[tray] 正在退出，忽略唤回窗口的请求");
+        return;
+    }
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
@@ -96,15 +123,24 @@ fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_main_window(app),
             "quit" => {
-                // 先立旗再退出：CloseRequested 的处理见到它才会放行
+                pm_core::pm_log!("[tray] 用户选择退出");
+                // 先立旗再退出：CloseRequested 与所有自动显示路径见到它才会让路。
+                // 这里直接用回调给的 app，不绕全局句柄，避免句柄尚未就绪时退出变成空操作。
                 QUITTING.store(true, Ordering::SeqCst);
+                // 立刻把窗口藏起来：用户看到的「点退出反而弹出页面」就是窗口在退出流程里
+                // 重新可见。先 hide 一次，配合上面的旗子，退出期间不会再有页面留在屏幕上。
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
                 app.exit(0);
             }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::DoubleClick { .. } = event {
-                show_main_window(tray.app_handle());
+            if let TrayIconEvent::DoubleClick { button, .. } = event {
+                if tray_double_click_should_show(button) {
+                    show_main_window(tray.app_handle());
+                }
             }
         })
         .build(app)?;
@@ -180,9 +216,13 @@ fn main() {
                     // 与 Electron 版一样先不显示，首帧画完再亮，免得白屏闪一下
                     .visible(false)
                     .on_page_load(|window, payload| {
-                        // 只有首帧（或重载后用户本来就在看）才显示；收进托盘期间的重载不能弹窗
+                        // 只有首帧（或重载后用户本来就在看）才显示；收进托盘期间的重载不能弹窗，
+                        // 退出流程里的重载更不能——那会把正在退出的窗口又叫回来
                         if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)
-                            && !USER_HIDDEN.load(Ordering::SeqCst)
+                            && should_show_on_page_load(
+                                QUITTING.load(Ordering::SeqCst),
+                                USER_HIDDEN.load(Ordering::SeqCst),
+                            )
                         {
                             EVER_SHOWN.store(true, Ordering::SeqCst);
                             let _ = window.show();
@@ -226,10 +266,12 @@ fn main() {
             let fallback = window.clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                if !EVER_SHOWN.load(Ordering::SeqCst)
-                    && !USER_HIDDEN.load(Ordering::SeqCst)
-                    && !fallback.is_visible().unwrap_or(true)
-                {
+                if should_show_on_fallback(
+                    QUITTING.load(Ordering::SeqCst),
+                    USER_HIDDEN.load(Ordering::SeqCst),
+                    EVER_SHOWN.load(Ordering::SeqCst),
+                    fallback.is_visible().unwrap_or(true),
+                ) {
                     EVER_SHOWN.store(true, Ordering::SeqCst);
                     let _ = fallback.show();
                 }
@@ -273,6 +315,36 @@ document.addEventListener('securitypolicyviolation', function (e) {
   window.__pmErrors.push('csp: ' + e.violatedDirective + ' blocked ' + e.blockedURI);
 });
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tray_double_click_only_left_button_reveals_window() {
+        assert!(tray_double_click_should_show(MouseButton::Left));
+        // 右键是开菜单用的，Windows 会为右键双击也发 DoubleClick
+        assert!(!tray_double_click_should_show(MouseButton::Right));
+        assert!(!tray_double_click_should_show(MouseButton::Middle));
+    }
+
+    #[test]
+    fn page_load_never_reveals_window_while_quitting_or_hidden() {
+        assert!(should_show_on_page_load(false, false));
+        assert!(!should_show_on_page_load(false, true));
+        assert!(!should_show_on_page_load(true, false));
+        assert!(!should_show_on_page_load(true, true));
+    }
+
+    #[test]
+    fn fallback_only_fires_once_for_a_never_shown_invisible_window() {
+        assert!(should_show_on_fallback(false, false, false, false));
+        assert!(!should_show_on_fallback(false, false, true, false));
+        assert!(!should_show_on_fallback(false, false, false, true));
+        assert!(!should_show_on_fallback(false, true, false, false));
+        assert!(!should_show_on_fallback(true, false, false, false));
+    }
+}
 
 const PROBE_JS: &str = r#"
 (function () {
