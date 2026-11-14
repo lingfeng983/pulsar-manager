@@ -393,6 +393,9 @@ pub struct AggregatedStats {
     pub total_throughput_out: f64,
     #[serde(default)]
     pub total_backlog: i64,
+    /// 下钻时读失败而被跳过的命名空间/topic 数：大于 0 说明上面的合计偏小
+    #[serde(default)]
+    pub failed_samples: i64,
 }
 
 /// 监控时序点（落库形态）。

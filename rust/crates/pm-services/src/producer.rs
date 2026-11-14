@@ -17,6 +17,7 @@ use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::messaging::Emit;
+use crate::schema_lite::PayloadSchema;
 
 pub const PRODUCER_STATS: &str = "msg:producer-stats";
 /// 统计推送节奏：界面上的速率与延迟面板按这个频率刷新
@@ -77,14 +78,177 @@ pub struct SendItem {
     pub deliver_at: Option<i64>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum EventTime {
+    #[default]
+    None,
+    Now,
+    Fixed(i64),
+    Field(String),
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum Delay {
+    #[default]
+    None,
+    After(i64),
+    At(i64),
+}
+
+/// 逐条报文参数（界面 `ProducerMessageOptions`）：只解析一次，时间类的值在每条真正发出时才算。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MessageOptions {
+    pub partition_key: Option<String>,
+    pub partition_key_field: Option<String>,
+    pub event_time: EventTime,
+    pub delay: Delay,
+}
+
+impl MessageOptions {
+    pub fn from_json(options: Option<&serde_json::Value>) -> Self {
+        let Some(options) = options else {
+            return Self::default();
+        };
+        let text = |key: &str| {
+            options
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        };
+        let number = |key: &str| options.get(key).and_then(serde_json::Value::as_i64);
+        let from_field = options
+            .get("usePartitionKeyFromField")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let event_time = match text("eventTimeMode").as_deref() {
+            Some("now") => EventTime::Now,
+            Some("fixed") => number("eventTimeFixed").map_or(EventTime::None, EventTime::Fixed),
+            Some("fromField") => text("eventTimeField").map_or(EventTime::None, EventTime::Field),
+            _ => EventTime::None,
+        };
+        let delay = match text("delayMode").as_deref() {
+            Some("deliverAfter") => number("deliverAfterMs").map_or(Delay::None, Delay::After),
+            Some("deliverAt") => number("deliverAt").map_or(Delay::None, Delay::At),
+            _ => Delay::None,
+        };
+        Self {
+            partition_key: text("partitionKey"),
+            partition_key_field: if from_field {
+                text("partitionKeyField")
+            } else {
+                None
+            },
+            event_time,
+            delay,
+        }
+    }
+
+    /// 返回 (partition_key, event_time, deliver_at)。按字段取不到时回落：路由键回落到固定值，事件时间不带。
+    fn resolve(&self, body: &str, now_ms: i64) -> (Option<String>, Option<i64>, Option<i64>) {
+        let needs_body =
+            self.partition_key_field.is_some() || matches!(self.event_time, EventTime::Field(_));
+        let parsed: Option<serde_json::Value> = if needs_body {
+            serde_json::from_str(body).ok()
+        } else {
+            None
+        };
+        let field = |path: &str| {
+            path.split('.')
+                .try_fold(parsed.as_ref()?, |node, key| node.get(key))
+        };
+
+        let partition_key = self
+            .partition_key_field
+            .as_deref()
+            .and_then(field)
+            .and_then(|value| match value {
+                serde_json::Value::String(text) => Some(text.clone()),
+                serde_json::Value::Number(number) => Some(number.to_string()),
+                serde_json::Value::Bool(flag) => Some(flag.to_string()),
+                _ => None,
+            })
+            .or_else(|| self.partition_key.clone());
+
+        let event_time = match &self.event_time {
+            EventTime::None => None,
+            EventTime::Now => Some(now_ms),
+            EventTime::Fixed(at) => Some(*at),
+            EventTime::Field(path) => field(path).and_then(|value| match value {
+                serde_json::Value::Number(number) => number.as_i64(),
+                serde_json::Value::String(text) => text.trim().parse::<i64>().ok().or_else(|| {
+                    chrono::DateTime::parse_from_rfc3339(text.trim())
+                        .ok()
+                        .map(|at| at.timestamp_millis())
+                }),
+                _ => None,
+            }),
+        };
+
+        let deliver_at = match self.delay {
+            Delay::None => None,
+            Delay::After(delay) => Some(now_ms + delay),
+            Delay::At(at) => Some(at),
+        };
+        (partition_key, event_time, deliver_at)
+    }
+}
+
+/// 一条报文怎么造：渲染模板 → 按 schema 把关 → 套逐条参数。手动发送与 flow 共用这一份。
 #[derive(Debug, Clone, Default)]
-pub struct FlowSpec {
+pub struct ItemRecipe {
     pub body: String,
     pub variables: Vec<TemplateVariable>,
     pub properties: BTreeMap<String, String>,
+    pub options: MessageOptions,
+    pub schema: PayloadSchema,
+}
+
+#[derive(Debug)]
+pub enum RecipeError {
+    /// 模板本身渲染不出来：每条都会一样失败
+    Template(AppError),
+    /// 渲染出来了但这一条没过 schema
+    Rejected(String),
+}
+
+impl ItemRecipe {
+    pub fn render(&self, now_ms: i64) -> Result<SendItem, RecipeError> {
+        let body = crate::template::render(&self.body, &self.variables)
+            .map_err(RecipeError::Template)?
+            .body;
+        self.schema.check(&body).map_err(RecipeError::Rejected)?;
+        let (partition_key, event_time, deliver_at) = self.options.resolve(&body, now_ms);
+        Ok(SendItem {
+            payload: body.into_bytes(),
+            properties: self.properties.clone(),
+            partition_key,
+            event_time,
+            deliver_at,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FlowSpec {
+    pub recipe: ItemRecipe,
+    /// 0 表示不限速：每个 tick 都按上限补发
     pub rate_per_sec: f64,
     /// 0 表示不限条数，收到停止为止
     pub total: i64,
+    pub stop_on_error: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum FlowFailure {
+    Template,
+    Rejected,
+    Send,
+}
+
+fn flow_should_stop(failure: FlowFailure, stop_on_error: bool) -> bool {
+    failure == FlowFailure::Template || stop_on_error
 }
 
 enum Command {
@@ -328,6 +492,45 @@ struct FlowState {
     last_tick: Instant,
 }
 
+impl FlowState {
+    fn new(spec: FlowSpec, now: Instant) -> Self {
+        Self {
+            rate: spec.rate_per_sec,
+            issued: 0,
+            due: 0.0,
+            last_tick: now,
+            spec,
+        }
+    }
+
+    /// 这个 tick 该尝试投几条：按速率累积、受单 tick 上限与剩余总量约束。
+    fn quota(&mut self, now: Instant) -> i64 {
+        let elapsed = now.saturating_duration_since(self.last_tick).as_secs_f64();
+        self.last_tick = now;
+        let budget = if self.rate <= 0.0 {
+            MAX_PER_TICK
+        } else {
+            self.due = (self.due + self.rate * elapsed).min(MAX_PER_TICK as f64);
+            self.due as i64
+        };
+        if self.spec.total > 0 {
+            budget.min((self.spec.total - self.issued).max(0))
+        } else {
+            budget
+        }
+    }
+
+    /// 尝试过一条（成功、失败、被 schema 拒都算）：总量按尝试数计，broker 一直拒收时也能走到头。
+    fn record_attempt(&mut self) {
+        self.issued += 1;
+        self.due = (self.due - 1.0).max(0.0);
+    }
+
+    fn finished(&self) -> bool {
+        self.spec.total > 0 && self.issued >= self.spec.total
+    }
+}
+
 pub async fn start(
     registry: Arc<ProducerRegistry>,
     config: &AdminConfig,
@@ -445,16 +648,12 @@ pub async fn start(
                     let _ = done.send(flushed);
                 }
                 Event::Cmd(Some(Command::StartFlow { spec, done })) => {
-                    if spec.rate_per_sec <= 0.0 {
-                        let _ = done.send(Err(AppError::Other("速率必须大于 0".into())));
+                    if !(spec.rate_per_sec >= 0.0) {
+                        let _ = done.send(Err(AppError::Other("速率不能为负".into())));
                     } else {
-                        flow = Some(FlowState {
-                            rate: spec.rate_per_sec,
-                            issued: 0,
-                            due: 0.0,
-                            last_tick: Instant::now(),
-                            spec,
-                        });
+                        flow = Some(FlowState::new(spec, Instant::now()));
+                        // 新一轮不背上一轮的终止原因
+                        end_error = None;
                         flow_running.store(true, Ordering::Relaxed);
                         let _ = done.send(Ok(()));
                     }
@@ -466,8 +665,8 @@ pub async fn start(
                     let _ = done.send(Ok(()));
                 }
                 Event::Cmd(Some(Command::SetRate { rate, done })) => {
-                    if rate <= 0.0 {
-                        let _ = done.send(Err(AppError::Other("速率必须大于 0".into())));
+                    if !(rate >= 0.0) {
+                        let _ = done.send(Err(AppError::Other("速率不能为负".into())));
                     } else {
                         if let Some(state) = flow.as_mut() {
                             state.rate = rate;
@@ -478,61 +677,63 @@ pub async fn start(
                     }
                 }
                 Event::Tick => {
+                    // Some(reason)：本轮结束；reason 为 Some 表示是出错停下的
+                    let mut ended: Option<Option<String>> = None;
                     if let Some(state) = flow.as_mut() {
-                        let elapsed = state.last_tick.elapsed().as_secs_f64();
-                        state.last_tick = Instant::now();
-                        state.due += state.rate * elapsed;
-                        let mut budget = state.due.min(MAX_PER_TICK as f64) as i64;
-                        while budget > 0 {
-                            if state.spec.total > 0 && state.issued >= state.spec.total {
-                                break;
-                            }
-                            let rendered = match crate::template::render(
-                                &state.spec.body,
-                                &state.spec.variables,
-                            ) {
-                                Ok(rendered) => rendered.body,
-                                Err(error) => {
-                                    last_error = Some(error.to_string());
-                                    end_error = Some(error.to_string());
-                                    break;
+                        let mut stop: Option<String> = None;
+                        for _ in 0..state.quota(Instant::now()) {
+                            let failure = match state.spec.recipe.render(pm_core::now_ms()) {
+                                Err(RecipeError::Template(error)) => {
+                                    Some((FlowFailure::Template, error.to_string()))
                                 }
-                            };
-                            let item = SendItem {
-                                payload: rendered.into_bytes(),
-                                properties: state.spec.properties.clone(),
-                                ..Default::default()
-                            };
-                            let started_at = Instant::now();
-                            match send_one(&mut producer, &item).await {
-                                Ok(_) => {
-                                    state.issued += 1;
-                                    sent.fetch_add(1, Ordering::Relaxed);
-                                    bytes_sent += item.payload.len() as i64;
-                                    samples.push(started_at.elapsed().as_secs_f64() * 1000.0);
-                                    if samples.len() > 500 {
-                                        samples.remove(0);
-                                    }
-                                    liveness.mark_online();
-                                }
-                                Err(error) => {
+                                Err(RecipeError::Rejected(reason)) => {
+                                    state.record_attempt();
                                     failed.fetch_add(1, Ordering::Relaxed);
-                                    last_error = Some(error.to_string());
-                                    liveness.mark_offline();
-                                    end_error = Some(error.to_string());
+                                    Some((FlowFailure::Rejected, reason))
+                                }
+                                Ok(item) => {
+                                    state.record_attempt();
+                                    let started_at = Instant::now();
+                                    match send_one(&mut producer, &item).await {
+                                        Ok(_) => {
+                                            sent.fetch_add(1, Ordering::Relaxed);
+                                            bytes_sent += item.payload.len() as i64;
+                                            samples
+                                                .push(started_at.elapsed().as_secs_f64() * 1000.0);
+                                            if samples.len() > 500 {
+                                                samples.remove(0);
+                                            }
+                                            liveness.mark_online();
+                                            None
+                                        }
+                                        Err(error) => {
+                                            failed.fetch_add(1, Ordering::Relaxed);
+                                            liveness.mark_offline();
+                                            Some((FlowFailure::Send, error.to_string()))
+                                        }
+                                    }
+                                }
+                            };
+                            if let Some((kind, reason)) = failure {
+                                last_error = Some(reason.clone());
+                                if flow_should_stop(kind, state.spec.stop_on_error) {
+                                    stop = Some(reason);
                                     break;
                                 }
                             }
-                            budget -= 1;
-                            state.due -= 1.0;
                         }
-                        if state.due < 0.0 {
-                            state.due = 0.0;
+                        if stop.is_some() || state.finished() {
+                            ended = Some(stop);
                         }
-                        if state.spec.total > 0 && state.issued >= state.spec.total {
-                            flow = None;
-                            flow_running.store(false, Ordering::Relaxed);
+                    }
+                    // 出错停下的只是这一轮 flow：会话与 producer 留着，用户修好模板还能接着发
+                    if let Some(reason) = ended {
+                        flow = None;
+                        flow_running.store(false, Ordering::Relaxed);
+                        if reason.is_some() {
+                            end_error = reason;
                         }
+                        let _ = producer.send_batch().await;
                     }
                 }
             }
@@ -555,10 +756,6 @@ pub async fn start(
                 if let Ok(payload) = serde_json::to_value(&stats) {
                     task_emit(PRODUCER_STATS, payload);
                 }
-            }
-
-            if end_error.is_some() && flow.is_none() {
-                break;
             }
         }
 
@@ -1064,5 +1261,172 @@ mod tests {
         assert!(registry.list(None).is_empty());
         assert!(!liveness.is_connected());
         assert!(!flow.load(Ordering::Relaxed));
+    }
+
+    use serde_json::json;
+
+    #[test]
+    fn message_options_parse_every_mode() {
+        let options = MessageOptions::from_json(Some(&json!({
+            "partitionKey": "fixed",
+            "usePartitionKeyFromField": true,
+            "partitionKeyField": "user.id",
+            "eventTimeMode": "fromField",
+            "eventTimeField": "ts",
+            "delayMode": "deliverAfter",
+            "deliverAfterMs": 3000
+        })));
+        assert_eq!(
+            options,
+            MessageOptions {
+                partition_key: Some("fixed".into()),
+                partition_key_field: Some("user.id".into()),
+                event_time: EventTime::Field("ts".into()),
+                delay: Delay::After(3000),
+            }
+        );
+        assert_eq!(MessageOptions::from_json(None), MessageOptions::default());
+        let fixed = MessageOptions::from_json(Some(&json!({
+            "partitionKey": "",
+            "usePartitionKeyFromField": false,
+            "partitionKeyField": "ignored",
+            "eventTimeMode": "fixed",
+            "eventTimeFixed": 42,
+            "delayMode": "deliverAt",
+            "deliverAt": 99
+        })));
+        assert_eq!(fixed.partition_key, None, "空串路由键等于不带");
+        assert_eq!(fixed.partition_key_field, None, "开关没开就不按字段取");
+        assert_eq!(fixed.event_time, EventTime::Fixed(42));
+        assert_eq!(fixed.delay, Delay::At(99));
+    }
+
+    #[test]
+    fn partition_key_comes_from_the_rendered_field_and_falls_back_to_fixed() {
+        let options = MessageOptions {
+            partition_key: Some("fallback".into()),
+            partition_key_field: Some("user.id".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            options.resolve(r#"{"user":{"id":"u-7"}}"#, 0).0.as_deref(),
+            Some("u-7")
+        );
+        assert_eq!(
+            options.resolve(r#"{"user":{"id":12}}"#, 0).0.as_deref(),
+            Some("12")
+        );
+        assert_eq!(
+            options.resolve(r#"{"user":{}}"#, 0).0.as_deref(),
+            Some("fallback")
+        );
+        assert_eq!(
+            options.resolve("not json", 0).0.as_deref(),
+            Some("fallback")
+        );
+    }
+
+    #[test]
+    fn event_time_is_taken_per_message() {
+        let now = MessageOptions {
+            event_time: EventTime::Now,
+            ..Default::default()
+        };
+        assert_eq!(now.resolve("{}", 1_000).1, Some(1_000));
+        assert_eq!(now.resolve("{}", 2_000).1, Some(2_000));
+
+        let field = MessageOptions {
+            event_time: EventTime::Field("ts".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            field.resolve(r#"{"ts":1700000000000}"#, 0).1,
+            Some(1_700_000_000_000)
+        );
+        assert_eq!(
+            field.resolve(r#"{"ts":"2023-11-14T22:13:20Z"}"#, 0).1,
+            Some(1_700_000_000_000)
+        );
+        assert_eq!(field.resolve(r#"{"ts":"later"}"#, 0).1, None);
+    }
+
+    #[test]
+    fn deliver_after_is_relative_to_each_send() {
+        let options = MessageOptions {
+            delay: Delay::After(500),
+            ..Default::default()
+        };
+        assert_eq!(options.resolve("{}", 10_000).2, Some(10_500));
+        assert_eq!(options.resolve("{}", 20_000).2, Some(20_500));
+    }
+
+    #[test]
+    fn recipe_renders_checks_schema_then_applies_options() {
+        let recipe = ItemRecipe {
+            body: r#"{"id":"a"}"#.into(),
+            options: MessageOptions {
+                partition_key_field: Some("id".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let item = recipe.render(0).expect("没有 schema 时直接放行");
+        assert_eq!(item.payload, br#"{"id":"a"}"#);
+        assert_eq!(item.partition_key.as_deref(), Some("a"));
+
+        let strict = ItemRecipe {
+            schema: PayloadSchema::Inline(json!({"required": ["ts"]})),
+            ..recipe
+        };
+        match strict.render(0) {
+            Err(RecipeError::Rejected(reason)) => assert!(reason.contains("ts：必填字段缺失")),
+            other => panic!("schema 不过应当是 Rejected，实际 {other:?}"),
+        }
+    }
+
+    fn flow(rate: f64, total: i64) -> FlowState {
+        FlowState::new(
+            FlowSpec {
+                rate_per_sec: rate,
+                total,
+                ..Default::default()
+            },
+            Instant::now(),
+        )
+    }
+
+    #[test]
+    fn zero_rate_means_unthrottled() {
+        let mut state = flow(0.0, 0);
+        let at = state.last_tick;
+        assert_eq!(state.quota(at), MAX_PER_TICK);
+        assert_eq!(state.quota(at), MAX_PER_TICK, "不限速时每个 tick 都给满");
+    }
+
+    #[test]
+    fn quota_follows_rate_and_never_exceeds_the_remaining_total() {
+        let mut state = flow(10.0, 0);
+        let start = state.last_tick;
+        assert_eq!(state.quota(start + Duration::from_millis(500)), 5);
+
+        let mut capped = flow(0.0, 3);
+        let at = capped.last_tick;
+        assert_eq!(capped.quota(at), 3);
+        capped.record_attempt();
+        capped.record_attempt();
+        assert_eq!(capped.quota(at), 1);
+        assert!(!capped.finished());
+        capped.record_attempt();
+        assert!(capped.finished());
+        assert_eq!(capped.quota(at), 0);
+    }
+
+    #[test]
+    fn template_errors_always_stop_while_message_errors_follow_the_switch() {
+        assert!(flow_should_stop(FlowFailure::Template, false));
+        assert!(flow_should_stop(FlowFailure::Send, true));
+        assert!(flow_should_stop(FlowFailure::Rejected, true));
+        assert!(!flow_should_stop(FlowFailure::Send, false));
+        assert!(!flow_should_stop(FlowFailure::Rejected, false));
     }
 }

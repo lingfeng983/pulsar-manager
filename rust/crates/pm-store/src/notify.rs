@@ -98,6 +98,27 @@ pub fn save_channel(store: &Store, channel: &NotifyChannel) -> AppResult<String>
     Ok(id)
 }
 
+/// 只回写运行结果，按 id 条件更新：派发期间渠道被改或被删时，不能拿发送前的快照覆盖回去。
+pub fn record_channel_status(
+    store: &Store,
+    id: &str,
+    ok: bool,
+    sent_at: Option<&str>,
+    error: Option<&str>,
+) -> AppResult<()> {
+    store.with(|conn| {
+        conn.execute(
+            "UPDATE notify_channels SET \
+             last_sent_at = COALESCE(?2, last_sent_at), \
+             last_error = ?3, \
+             fail_count = CASE WHEN ?4 THEN 0 ELSE fail_count + 1 END \
+             WHERE id = ?1",
+            params![id, sent_at, error, ok],
+        )?;
+        Ok(())
+    })
+}
+
 pub fn delete_channel(store: &Store, id: &str) -> AppResult<()> {
     store.with(|conn| {
         conn.execute("DELETE FROM notify_channels WHERE id = ?1", [id])?;
@@ -227,4 +248,57 @@ pub fn delete_mail_profile(store: &Store, id: &str) -> AppResult<()> {
         conn.execute("DELETE FROM notify_mail_profiles WHERE id = ?1", [id])?;
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn channel(store: &Store) -> String {
+        save_channel(
+            store,
+            &NotifyChannel {
+                name: "ops".into(),
+                kind: "generic".into(),
+                enabled: true,
+                min_level: "info".into(),
+                timeout_ms: 5000,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn status_write_back_persists_and_counts_failures() {
+        let store = Store::open_in_memory().unwrap();
+        let id = channel(&store);
+        record_channel_status(&store, &id, false, None, Some("超时")).unwrap();
+        record_channel_status(&store, &id, false, None, Some("超时")).unwrap();
+        let failed = get_channel(&store, &id).unwrap().unwrap();
+        assert_eq!(failed.fail_count, 2);
+        assert_eq!(failed.last_error.as_deref(), Some("超时"));
+
+        record_channel_status(&store, &id, true, Some("2026-11-14T00:00:00Z"), None).unwrap();
+        let ok = get_channel(&store, &id).unwrap().unwrap();
+        assert_eq!(ok.fail_count, 0);
+        assert_eq!(ok.last_error, None);
+        assert_eq!(ok.last_sent_at.as_deref(), Some("2026-11-14T00:00:00Z"));
+    }
+
+    /// 派发是异步的：发送途中用户关掉或删掉渠道，回写状态不能把它改回去
+    #[test]
+    fn status_write_back_never_touches_config_or_resurrects() {
+        let store = Store::open_in_memory().unwrap();
+        let id = channel(&store);
+        let mut edited = get_channel(&store, &id).unwrap().unwrap();
+        edited.enabled = false;
+        save_channel(&store, &edited).unwrap();
+        record_channel_status(&store, &id, true, Some("2026-11-14T00:00:00Z"), None).unwrap();
+        assert!(!get_channel(&store, &id).unwrap().unwrap().enabled);
+
+        delete_channel(&store, &id).unwrap();
+        record_channel_status(&store, &id, true, Some("2026-11-14T00:00:00Z"), None).unwrap();
+        assert!(get_channel(&store, &id).unwrap().is_none());
+    }
 }

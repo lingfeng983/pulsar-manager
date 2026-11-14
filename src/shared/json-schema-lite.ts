@@ -1,4 +1,5 @@
-// 「模板内联 schema」用的 JSON Schema 子集校验器，主进程与渲染层共用，保持零 import。
+// 「模板内联 schema」用的 JSON Schema 子集校验器，渲染层编辑时用，保持零 import；
+// 发送路径上的逐条校验在 rust/crates/pm-services/src/schema_lite.rs，两边规则要一起改。
 // 只认这些关键字：type（含 integer/number 区分）、enum、const、required、properties、
 // items（单 schema 或元组）。$ref、allOf/anyOf/oneOf、format 与一切数值/长度边界
 // 都不支持——发送路径上"这条报文为什么被拒"必须每条规则都解释得清，

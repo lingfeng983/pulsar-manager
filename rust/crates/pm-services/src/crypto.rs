@@ -106,7 +106,18 @@ impl SecretBox {
     }
 }
 
+type Protect = dyn Fn(&[u8]) -> Result<Vec<u8>, String>;
+
 fn load_key(dir: &Path) -> AppResult<([u8; 32], Option<String>)> {
+    let allow_plaintext = std::env::var("ALLOW_PLAINTEXT_KEY").ok().as_deref() == Some("1");
+    load_key_with(dir, &protect_key, allow_plaintext)
+}
+
+fn load_key_with(
+    dir: &Path,
+    protect: &Protect,
+    allow_plaintext: bool,
+) -> AppResult<([u8; 32], Option<String>)> {
     let protected = dir.join(KEY_FILE);
     if protected.exists() {
         let raw = std::fs::read(&protected)?;
@@ -120,7 +131,7 @@ fn load_key(dir: &Path) -> AppResult<([u8; 32], Option<String>)> {
                     chrono::Local::now().format("%Y%m%d%H%M%S")
                 ));
                 let backed_up = std::fs::rename(&protected, &backup).is_ok();
-                let key = create_key(dir)?;
+                let key = create_key(dir, protect, allow_plaintext)?;
                 let warning = if backed_up {
                     format!(
                         "原有凭据密钥已无法解密（{error}），旧文件备份为 {} 并生成了新密钥。\
@@ -145,7 +156,10 @@ fn load_key(dir: &Path) -> AppResult<([u8; 32], Option<String>)> {
     if legacy.exists() {
         let hex_key = std::fs::read_to_string(&legacy)?.trim().to_string();
         let key = parse_hex_key(&hex_key)?;
-        persist_key(dir, &hex_key)?;
+        // 退回明文时 persist_key 写的就是这个文件：此时删掉它等于删掉唯一的密钥
+        if persist_key(dir, &hex_key, protect, allow_plaintext)? == Storage::Plaintext {
+            return Ok((key, None));
+        }
         // 明文密钥文件删除失败不能静默丢掉：磁盘上会一直留着解密后的密钥，
         // 与「迁移到系统密钥库」的前提相悖，写一行告警让人能发现。
         if let Err(error) = std::fs::remove_file(&legacy) {
@@ -157,13 +171,13 @@ fn load_key(dir: &Path) -> AppResult<([u8; 32], Option<String>)> {
         return Ok((key, None));
     }
 
-    Ok((create_key(dir)?, None))
+    Ok((create_key(dir, protect, allow_plaintext)?, None))
 }
 
-fn create_key(dir: &Path) -> AppResult<[u8; 32]> {
+fn create_key(dir: &Path, protect: &Protect, allow_plaintext: bool) -> AppResult<[u8; 32]> {
     let mut key = [0u8; 32];
     rand::Rng::fill(&mut rand::rng(), &mut key[..]);
-    persist_key(dir, &hex::encode(key))?;
+    persist_key(dir, &hex::encode(key), protect, allow_plaintext)?;
     Ok(key)
 }
 
@@ -181,24 +195,35 @@ fn parse_hex_key(value: &str) -> AppResult<[u8; 32]> {
     Ok(key)
 }
 
-fn persist_key(dir: &Path, hex_key: &str) -> AppResult<()> {
+#[derive(Debug, PartialEq, Eq)]
+enum Storage {
+    Protected,
+    Plaintext,
+}
+
+fn persist_key(
+    dir: &Path,
+    hex_key: &str,
+    protect: &Protect,
+    allow_plaintext: bool,
+) -> AppResult<Storage> {
     let path = dir.join(KEY_FILE);
-    match protect_key(hex_key.as_bytes()) {
+    match protect(hex_key.as_bytes()) {
         Ok(blob) => {
             // Chromium / Electron safeStorage 的 Windows 形态：`v10` + DPAPI blob
             let mut payload = b"v10".to_vec();
             payload.extend_from_slice(&blob);
             std::fs::write(&path, payload)?;
-            Ok(())
+            Ok(Storage::Protected)
         }
         Err(error) => {
-            if std::env::var("ALLOW_PLAINTEXT_KEY").ok().as_deref() != Some("1") {
+            if !allow_plaintext {
                 return Err(AppError::Other(format!(
                     "系统密钥库不可用（{error}）。如需退回明文密钥文件，请设置 ALLOW_PLAINTEXT_KEY=1（不安全）。"
                 )));
             }
             std::fs::write(dir.join(LEGACY_KEY_FILE), hex_key)?;
-            Ok(())
+            Ok(Storage::Plaintext)
         }
     }
 }
@@ -404,6 +429,21 @@ mod tests {
         let secrets = SecretBox::load_or_create(&dir).unwrap();
         let error = secrets.decrypt("v1:whatever").unwrap_err();
         assert!(error.to_string().contains("Electron"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plaintext_fallback_keeps_the_only_key_across_restarts() {
+        let dir = std::env::temp_dir().join(format!("pm-crypto-{}", pm_core::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let hex_key = hex::encode([7u8; 32]);
+        std::fs::write(dir.join(LEGACY_KEY_FILE), &hex_key).unwrap();
+        let unavailable = |_: &[u8]| Err::<Vec<u8>, String>("DPAPI 不可用".into());
+        for _ in 0..3 {
+            let (key, _) = load_key_with(&dir, &unavailable, true).unwrap();
+            assert_eq!(key, [7u8; 32]);
+        }
+        assert!(dir.join(LEGACY_KEY_FILE).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

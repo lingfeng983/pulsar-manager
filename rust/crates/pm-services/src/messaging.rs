@@ -328,14 +328,13 @@ pub async fn start_consume(
                     buffer_bytes += message.data_bytes;
                     buffer.push(message);
                     received.fetch_add(1, Ordering::Relaxed);
+                    pending.store(consumer.pending_count(), Ordering::Relaxed);
                     let hit_limit =
                         max_messages > 0 && received.load(Ordering::Relaxed) >= max_messages;
                     if buffer.len() >= BATCH_SIZE
                         || buffer_bytes >= BATCH_MAX_BYTES
                         || last_flush.elapsed() >= Duration::from_millis(BATCH_FLUSH_MS)
                     {
-                        // 手动确认模式下未确认条数就是待确认队列长度
-                        pending.store(buffer.len() as i64, Ordering::Relaxed);
                         flush(
                             &task_emit,
                             CONSUME_BATCH,
@@ -401,7 +400,7 @@ pub async fn start_consume(
                     done,
                 })) => {
                     let mut result = Ok(());
-                    for seq in seqs {
+                    for seq in consumer.ack_targets(seqs, cumulative) {
                         let outcome = if cumulative {
                             consumer.ack_cumulative(seq).await
                         } else {
@@ -412,10 +411,7 @@ pub async fn start_consume(
                             break;
                         }
                     }
-                    if result.is_ok() {
-                        let left = pending.load(Ordering::Relaxed);
-                        pending.store((left - 1).max(0), Ordering::Relaxed);
-                    }
+                    pending.store(consumer.pending_count(), Ordering::Relaxed);
                     let _ = done.send(result);
                 }
                 Event::Cmd(Some(Command::Nack { seqs, done })) => {
@@ -426,6 +422,7 @@ pub async fn start_consume(
                             break;
                         }
                     }
+                    pending.store(consumer.pending_count(), Ordering::Relaxed);
                     let _ = done.send(result);
                 }
                 Event::Tick => {
@@ -572,7 +569,12 @@ pub async fn start_read(
                                     _ => request
                                         .message_id
                                         .as_deref()
-                                        .map(|id| id == message.message_id)
+                                        .map(|id| {
+                                            pm_pulsar::native::message_id_matches(
+                                                id,
+                                                &message.message_id,
+                                            )
+                                        })
                                         .unwrap_or(false),
                                 };
                                 if !collecting {

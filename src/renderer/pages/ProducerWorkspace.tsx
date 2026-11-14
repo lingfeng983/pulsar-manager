@@ -103,8 +103,8 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
             body: draft.body,
             variables: draft.variables,
             properties: draft.properties,
-            // 三条发送路径（send/startFlow/sendOnce）都拿这份，schema 校验在主进程
-            // resolveBatch 里按它逐条把关，所以这里必须把 schema 字段带上。
+            // 三条发送路径（send/startFlow/sendOnce）都拿这份，后台渲染每条报文后按它逐条
+            // 做 schema 校验，所以这里必须把 schema 字段带上。
             schemaMode: draft.schemaMode,
             schemaJson: draft.schemaMode === 'inline' ? draft.schemaJson : undefined,
         }),
@@ -280,27 +280,30 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
 
     // 关页签即断连接：主进程不会自己收，留着下次进来还是"已有会话"。
     // 只停自己认领的这批——sessions 从认领到新建都带着 ownerId。
-    useEffect(
-        () => () => {
+    const unmountedRef = useRef(false);
+    const stopQuietly = useCallback((sessionId: string) => {
+        // 清理不能 await（会拖住卸载），但 rpc 失败只体现在 success:false，
+        // 不判就等于把「断不掉、会话残留」静默吞掉，留个 warn 便于排查。
+        void window.electronAPI.producer
+            .stop(sessionId)
+            .then(response => {
+                if (!response.success) {
+                    console.warn(`[producer] 停止会话 ${sessionId} 失败：${response.error || '未知错误'}`);
+                }
+            })
+            .catch((error: unknown) => {
+                console.warn(`[producer] 停止会话 ${sessionId} 异常`, error);
+            });
+    }, []);
+    useEffect(() => {
+        unmountedRef.current = false;
+        return () => {
+            unmountedRef.current = true;
             for (const session of sessionsRef.current) {
-                // 清理不能 await（会拖住卸载），但 rpc 失败只体现在 success:false，
-                // 不判就等于把「断不掉、会话残留」静默吞掉，留个 warn 便于排查。
-                void window.electronAPI.producer
-                    .stop(session.sessionId)
-                    .then(response => {
-                        if (!response.success) {
-                            console.warn(
-                                `[producer] 停止会话 ${session.sessionId} 失败：${response.error || '未知错误'}`,
-                            );
-                        }
-                    })
-                    .catch((error: unknown) => {
-                        console.warn(`[producer] 停止会话 ${session.sessionId} 异常`, error);
-                    });
+                stopQuietly(session.sessionId);
             }
-        },
-        [],
-    );
+        };
+    }, [stopQuietly]);
 
     useEffect(() => {
         const off = window.electronAPI.messages.onSessionEnd(event => {
@@ -324,14 +327,21 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
     }, []);
 
     // 连续发送的统计帧：只认自己这些会话的，别的 topic 的工作台推来的直接丢。
+    // 统计帧每 500ms 一帧、终止原因会一直挂在帧上，所以只在「运行 → 停下」那一帧报一次错。
+    const flowRunningRef = useRef<Record<string, boolean>>({});
     useEffect(() => {
         const off = window.electronAPI.producer.onStats(stats => {
             if (!sessionsRef.current.some(item => item.sessionId === stats.sessionId)) {
                 return;
             }
+            const wasRunning = flowRunningRef.current[stats.sessionId] ?? false;
+            flowRunningRef.current[stats.sessionId] = stats.flowRunning;
             setFlowStats(current => ({...current, [stats.sessionId]: stats}));
             if (!stats.flowRunning) {
                 setFlowBusy(current => ({...current, [stats.sessionId]: false}));
+                if (wasRunning && stats.error) {
+                    setError(`连续发送已停止：${stats.error}`);
+                }
             }
         });
         return off;
@@ -361,6 +371,13 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
                 options,
                 ownerId,
             });
+            // 连接期间页签已关：卸载清理时它还没登记，只能在这里补停
+            if (unmountedRef.current) {
+                if (response.success && response.data) {
+                    stopQuietly(response.data.sessionId);
+                }
+                return;
+            }
             if (response.success && response.data) {
                 setSessions(current => [...current, response.data as ProducerSessionInfo]);
                 message.success(`已连接：${response.data.producerName}`);
@@ -428,6 +445,8 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
                 sessionId: session.sessionId,
                 template: templateBody,
                 count,
+                // 路由键、事件时间、延迟投递是逐条参数，必须随每次发送带上
+                options,
                 // 发送历史那一行要知道这是哪个模板发的
                 templateName: draft.name || undefined,
                 templateId: currentId,
@@ -494,11 +513,14 @@ const ProducerWorkspace: React.FC<ProducerWorkspaceProps> = ({
                 totalMessages: settings.totalMessages,
                 maxInFlight: settings.maxInFlight,
                 stopOnError: settings.stopOnError,
+                options,
                 templateName: draft.name || undefined,
                 templateId: currentId,
             });
             if (response.success && response.data) {
                 const info = response.data;
+                // 第一帧统计到达前就出错停下时，也要按「运行 → 停下」报出原因
+                flowRunningRef.current[info.sessionId] = true;
                 // busy 只盖住"这一次请求在路上"：留着 true 到本轮结束，「停止」按钮
                 // 会一直是 loading 态而 antd 的 loading 按钮点不动，整轮就停不下来。
                 setFlowBusy(current => ({...current, [session.sessionId]: false}));

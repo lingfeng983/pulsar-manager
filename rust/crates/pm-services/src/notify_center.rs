@@ -1237,19 +1237,14 @@ pub async fn dispatch_event(
             remember_send(&channel.id, input.at_ms);
         }
         // 运行结果回写到渠道行：界面的「上次发送 / 失败次数」靠这三个字段
-        let mut updated = channel.clone();
-        updated.fail_count = if outcome.0 { 0 } else { channel.fail_count + 1 };
-        updated.last_error = if outcome.0 {
-            None
-        } else {
-            Some(outcome.1.clone())
-        };
-        updated.last_sent_at = if outcome.0 {
-            Some(iso_from_ms(input.at_ms))
-        } else {
-            channel.last_sent_at.clone()
-        };
-        let _ = store::save_channel(store_handle, &updated);
+        let sent_at = iso_from_ms(input.at_ms);
+        let _ = store::record_channel_status(
+            store_handle,
+            &channel.id,
+            outcome.0,
+            outcome.0.then_some(sent_at.as_str()),
+            (!outcome.0).then_some(outcome.1.as_str()),
+        );
 
         let delivery = NotifyDelivery {
             id: 0,

@@ -11,6 +11,7 @@ pub mod notify;
 pub mod notify_center;
 pub mod plugins;
 pub mod producer;
+pub mod schema_lite;
 pub mod template;
 pub mod tunnel;
 pub mod update;

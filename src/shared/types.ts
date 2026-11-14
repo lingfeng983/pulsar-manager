@@ -319,6 +319,8 @@ export interface AggregatedStats {
     totalThroughputIn: number;
     totalThroughputOut: number;
     totalBacklog: number;
+    /** 下钻时读失败被跳过的命名空间/topic 数；大于 0 表示合计偏小 */
+    failedSamples?: number;
 }
 
 // ========== 消息 ==========

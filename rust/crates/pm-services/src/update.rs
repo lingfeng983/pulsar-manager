@@ -772,10 +772,10 @@ pub async fn download(url: &str, dir: &Path, proxy: &str, emit: Emit) -> AppResu
     Ok(final_path.to_string_lossy().to_string())
 }
 
-/// 拉起安装器：NSIS 支持 /SILENT，静默覆盖安装。
+/// 拉起安装器：NSIS 的 `/S` 静默覆盖安装。
 ///
 /// 本进程必须立刻退出让出 exe 与 dll，所以“等安装器装完再把应用拉起来”这件事只能交给
-/// 一个外部观察者——NSIS 的 /SILENT 不会执行“安装完运行应用”那一步。
+/// 一个外部观察者——NSIS 静默安装不会执行“安装完运行应用”那一步。
 pub fn launch_installer() -> AppResult<String> {
     let file = last_file()
         .lock()
@@ -799,6 +799,23 @@ pub fn launch_installer() -> AppResult<String> {
     Ok(file.to_string_lossy().to_string())
 }
 
+/// NSIS 的静默开关只有大小写敏感的 `/S`；`/SILENT` 是 Inno Setup 的写法，NSIS 不认，会弹出交互向导。
+const NSIS_SILENT: &str = "/S";
+
+/// PowerShell 只做两件事：等安装器退出、再把应用拉起来。用 -Wait 而不是轮询，
+/// 装多久就等多久；安装失败也照样拉起旧版本，总比留下一个"装完没反应"的黑洞好。
+#[cfg_attr(not(windows), allow(dead_code))]
+fn relaunch_script(installer: &Path, app: &Path) -> String {
+    let escape = |path: &Path| path.display().to_string().replace('\'', "''");
+    format!(
+        "$ErrorActionPreference='SilentlyContinue'; \
+         Start-Process -FilePath '{}' -ArgumentList '{NSIS_SILENT}' -Wait; \
+         Start-Process -FilePath '{}'",
+        escape(installer),
+        escape(app)
+    )
+}
+
 #[cfg(windows)]
 fn spawn_installer(installer: &Path, app: &Path) -> std::io::Result<()> {
     use std::os::windows::process::CommandExt;
@@ -806,16 +823,7 @@ fn spawn_installer(installer: &Path, app: &Path) -> std::io::Result<()> {
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-    // PowerShell 只做两件事：等安装器退出、再把应用拉起来。用 -Wait 而不是轮询，
-    // 装多久就等多久；安装失败也照样拉起旧版本，总比留下一个"装完没反应"的黑洞好。
-    let escape = |path: &Path| path.display().to_string().replace('\'', "''");
-    let script = format!(
-        "$ErrorActionPreference='SilentlyContinue'; \
-         Start-Process -FilePath '{}' -ArgumentList '/SILENT' -Wait; \
-         Start-Process -FilePath '{}'",
-        escape(installer),
-        escape(app)
-    );
+    let script = relaunch_script(installer, app);
 
     // 先试带重启的包装；PowerShell 不可用（被策略禁用、被裁掉）时退回直接启动安装器，
     // 用户需要自己再打开应用——但安装本身不能因此失败。
@@ -837,7 +845,7 @@ fn spawn_installer(installer: &Path, app: &Path) -> std::io::Result<()> {
         return Ok(());
     }
     std::process::Command::new(installer)
-        .arg("/SILENT")
+        .arg(NSIS_SILENT)
         .spawn()
         .map(|_| ())
 }
@@ -845,7 +853,7 @@ fn spawn_installer(installer: &Path, app: &Path) -> std::io::Result<()> {
 #[cfg(not(windows))]
 fn spawn_installer(installer: &Path, _app: &Path) -> std::io::Result<()> {
     std::process::Command::new(installer)
-        .arg("/SILENT")
+        .arg(NSIS_SILENT)
         .spawn()
         .map(|_| ())
 }
@@ -857,6 +865,17 @@ pub fn updates_dir(root: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installer_is_run_with_the_nsis_silent_switch() {
+        let script = relaunch_script(Path::new(r"C:\tmp\it's.exe"), Path::new(r"C:\app\pm.exe"));
+        assert!(script.contains("-ArgumentList '/S' -Wait"), "{script}");
+        assert!(
+            script.contains(r"'C:\tmp\it''s.exe'"),
+            "单引号要转义：{script}"
+        );
+        assert!(script.ends_with(r"Start-Process -FilePath 'C:\app\pm.exe'"));
+    }
 
     #[test]
     fn stable_version_rejects_prerelease_and_noise() {

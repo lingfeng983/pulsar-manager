@@ -9,7 +9,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use pm_core::{AppError, SendOptions};
 use pm_services::messaging::{self, ConsumeSessionView, ReadRequest, SessionRegistry};
-use pm_services::producer::{self, BenchmarkSpec, FlowSpec, ProducerRegistry, SendItem};
+use pm_services::producer::{
+    self, BenchmarkSpec, FlowSpec, ItemRecipe, MessageOptions, ProducerRegistry, RecipeError,
+    SendItem,
+};
+use pm_services::schema_lite::PayloadSchema;
 use serde_json::{json, Value};
 
 use crate::bridge::{fail, ok, Shared};
@@ -301,10 +305,12 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
         "producer:startFlow" => {
             let id = string_of(&params, "sessionId");
             let template = params.get("template").cloned().unwrap_or_else(|| json!({}));
+            let recipe = match recipe_of(&template, params.get("options")) {
+                Ok(recipe) => recipe,
+                Err(error) => return Some(fail(error)),
+            };
             let spec = FlowSpec {
-                body: string_of(&template, "body"),
-                variables: variables_of(&template),
-                properties: map_of(&template, "properties"),
+                recipe,
                 rate_per_sec: params
                     .get("ratePerSecond")
                     .and_then(Value::as_f64)
@@ -313,6 +319,11 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
                     .get("totalMessages")
                     .and_then(Value::as_i64)
                     .unwrap_or(0),
+                // 界面默认开；缺省按开处理，宁可停早也别闷头一直失败
+                stop_on_error: params
+                    .get("stopOnError")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
             };
             match producers().start_flow(&id, spec).await {
                 Ok(()) => match producers().view(&id) {
@@ -331,8 +342,10 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
                 .unwrap_or(1)
                 .clamp(1, MAX_SEND_COUNT);
             match build_items(&template, count, params.get("options")) {
-                Ok(items) => match producers().send(&id, items).await {
-                    Ok(ids) => ok(json!({"messageIds": ids, "failures": []})),
+                Ok(batch) => match producers().send(&id, batch.items).await {
+                    Ok(ids) => ok(
+                        json!({"messageIds": ids, "bytes": batch.bytes, "failures": batch.failures}),
+                    ),
                     Err(error) => fail(error),
                 },
                 Err(error) => fail(error),
@@ -350,11 +363,16 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
                 .and_then(Value::as_i64)
                 .unwrap_or(1)
                 .clamp(1, MAX_SEND_COUNT);
-            let items = match build_items(&template, count, params.get("options")) {
-                Ok(items) => items,
+            let batch = match build_items(&template, count, params.get("options")) {
+                Ok(batch) => batch,
                 Err(error) => return Some(fail(error)),
             };
-            let bytes: i64 = items.iter().map(|item| item.payload.len() as i64).sum();
+            let (items, bytes, failures) = (batch.items, batch.bytes, batch.failures);
+            if items.is_empty() {
+                return Some(ok(
+                    json!({"messageIds": [], "bytes": 0, "failures": failures}),
+                ));
+            }
             match producer::burst(&config, &topic_uri(&params), items).await {
                 Ok(ids) => {
                     let options = SendOptions {
@@ -366,12 +384,12 @@ pub async fn dispatch(context: Shared, method: &str, args: Vec<Value>) -> Option
                     record_send(
                         &context,
                         &options,
-                        count,
+                        ids.len() as i64,
                         ids.first().cloned(),
                         "success",
                         None,
                     );
-                    ok(json!({"messageIds": ids, "bytes": bytes, "failures": []}))
+                    ok(json!({"messageIds": ids, "bytes": bytes, "failures": failures}))
                 }
                 Err(error) => fail(error),
             }
@@ -515,57 +533,48 @@ fn consumer_snapshot(registry: &Arc<SessionRegistry>, session_id: &str) -> Value
     }
 }
 
-/// 模板 -> 待发报文。逐条重新渲染：占位符里的随机量每次都要重算。
-fn build_items(
-    template: &Value,
-    count: i64,
-    options: Option<&Value>,
-) -> pm_core::AppResult<Vec<SendItem>> {
-    let body = string_of(template, "body");
-    let variables = variables_of(template);
-    let properties = map_of(template, "properties");
-    let (partition_key, event_time, deliver_at) = message_options(options);
-    // 入口已 clamp；这里再夹一次兜底，保证 with_capacity 与循环次数都受限。
-    let count = count.clamp(1, MAX_SEND_COUNT);
-    let mut items = Vec::with_capacity(count as usize);
-    for _ in 0..count {
-        let rendered = pm_services::template::render(&body, &variables)?;
-        items.push(SendItem {
-            payload: rendered.body.into_bytes(),
-            properties: properties.clone(),
-            partition_key: partition_key.clone(),
-            event_time,
-            deliver_at,
-        });
-    }
-    Ok(items)
+/// 模板 -> 待发报文。逐条重新渲染：占位符里的随机量、发送时刻类参数每次都要重算。
+/// 没过 schema 的那几条进 failures（界面逐条提示），模板本身坏了才整批报错。
+struct Batch {
+    items: Vec<SendItem>,
+    failures: Vec<Value>,
+    bytes: i64,
 }
 
-fn message_options(options: Option<&Value>) -> (Option<String>, Option<i64>, Option<i64>) {
-    let Some(options) = options else {
-        return (None, None, None);
+fn recipe_of(template: &Value, options: Option<&Value>) -> pm_core::AppResult<ItemRecipe> {
+    Ok(ItemRecipe {
+        body: string_of(template, "body"),
+        variables: variables_of(template),
+        properties: map_of(template, "properties"),
+        options: MessageOptions::from_json(options),
+        schema: PayloadSchema::from_template(template)?,
+    })
+}
+
+fn build_items(template: &Value, count: i64, options: Option<&Value>) -> pm_core::AppResult<Batch> {
+    let recipe = recipe_of(template, options)?;
+    // 入口已 clamp；这里再夹一次兜底，保证 with_capacity 与循环次数都受限。
+    let count = count.clamp(1, MAX_SEND_COUNT);
+    let mut batch = Batch {
+        items: Vec::with_capacity(count as usize),
+        failures: Vec::new(),
+        bytes: 0,
     };
-    let event_time = match options.get("eventTimeMode").and_then(Value::as_str) {
-        Some("now") => Some(pm_core::now_ms()),
-        Some("fixed") => options.get("eventTimeFixed").and_then(Value::as_i64),
-        _ => None,
-    };
-    let deliver_at = match options.get("delayMode").and_then(Value::as_str) {
-        Some("deliverAfter") => options
-            .get("deliverAfterMs")
-            .and_then(Value::as_i64)
-            .map(|delay| pm_core::now_ms() + delay),
-        Some("deliverAt") => options.get("deliverAt").and_then(Value::as_i64),
-        _ => None,
-    };
-    (
-        options
-            .get("partitionKey")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        event_time,
-        deliver_at,
-    )
+    for index in 0..count {
+        match recipe.render(pm_core::now_ms()) {
+            Ok(item) => {
+                batch.bytes += item.payload.len() as i64;
+                batch.items.push(item);
+            }
+            Err(RecipeError::Template(error)) => return Err(error),
+            Err(RecipeError::Rejected(reason)) => {
+                batch
+                    .failures
+                    .push(json!({"index": index, "error": reason}));
+            }
+        }
+    }
+    Ok(batch)
 }
 
 fn variables_of(template: &Value) -> Vec<pm_core::TemplateVariable> {
@@ -712,4 +721,44 @@ fn seqs_of(payload: &Value) -> Vec<u64> {
         .and_then(Value::as_array)
         .map(|items| items.iter().filter_map(Value::as_u64).collect())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schema_rejections_become_per_item_failures_not_a_whole_batch_error() {
+        let template = json!({
+            "body": "{\"n\": 1}",
+            "schemaMode": "inline",
+            "schemaJson": "{\"required\": [\"id\"]}"
+        });
+        let batch = build_items(&template, 2, None).expect("schema 不过不是整批错误");
+        assert!(batch.items.is_empty());
+        assert_eq!(batch.failures.len(), 2);
+        assert_eq!(batch.failures[1]["index"], 1);
+        assert!(batch.failures[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("id：必填字段缺失"));
+    }
+
+    #[test]
+    fn broker_schema_mode_refuses_the_whole_batch() {
+        let template = json!({"body": "{}", "schemaMode": "broker"});
+        assert!(build_items(&template, 1, None).is_err());
+    }
+
+    #[test]
+    fn message_options_reach_every_item() {
+        let template = json!({"body": "{\"user\": \"u1\"}"});
+        let options = json!({"usePartitionKeyFromField": true, "partitionKeyField": "user"});
+        let batch = build_items(&template, 3, Some(&options)).unwrap();
+        assert_eq!(batch.bytes, 3 * "{\"user\": \"u1\"}".len() as i64);
+        assert!(batch
+            .items
+            .iter()
+            .all(|item| item.partition_key.as_deref() == Some("u1")));
+    }
 }

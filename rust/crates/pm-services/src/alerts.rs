@@ -74,12 +74,17 @@ pub async fn evaluate(client: &AdminClient, rule: &AlertRule) -> AppResult<RuleE
             let topics = client.topics(&rule.tenant, &rule.namespace).await?;
             let mut total = 0.0;
             for topic in topics {
-                if let Ok(stats) = client
+                // 少一个 topic 的数，合计就偏小，可能把仍在越线的规则判成「已恢复」
+                let stats = client
                     .topic_stats(&rule.tenant, &rule.namespace, &topic.name, topic.persistent)
                     .await
-                {
-                    total += topic_metric(&stats, &rule.metric);
-                }
+                    .map_err(|error| {
+                        pm_core::AppError::Other(format!(
+                            "采样不完整：topic {} 统计读取失败（{error}）",
+                            topic.name
+                        ))
+                    })?;
+                total += topic_metric(&stats, &rule.metric);
             }
             Some(Observation {
                 value: total,
@@ -88,6 +93,12 @@ pub async fn evaluate(client: &AdminClient, rule: &AlertRule) -> AppResult<RuleE
         }
         _ => {
             let stats = client.aggregated_stats().await?;
+            if stats.failed_samples > 0 {
+                return Err(pm_core::AppError::Other(format!(
+                    "采样不完整：{} 个命名空间或 topic 读取失败",
+                    stats.failed_samples
+                )));
+            }
             let value = match rule.metric.as_str() {
                 "msgRateIn" => stats.total_msg_rate_in,
                 "msgRateOut" => stats.total_msg_rate_out,
@@ -329,6 +340,138 @@ mod tests {
         // 回落一次即清零，下一次越线重新计数
         assert!(!engine.observe(&rule, 10.0));
         assert!(!engine.observe(&rule, 101.0));
+    }
+
+    /// 按路径应答的最小 HTTP 服务：路径不在表里一律 500，模拟单个 topic 统计读失败。
+    async fn admin_stub(routes: Vec<(&'static str, &'static str)>) -> AdminClient {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let routes = routes.clone();
+                tokio::spawn(async move {
+                    let mut buffer = vec![0u8; 8192];
+                    let mut read = 0;
+                    while !buffer[..read].windows(4).any(|w| w == b"\r\n\r\n") {
+                        match socket.read(&mut buffer[read..]).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => read += n,
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&buffer[..read]).to_string();
+                    let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                    let (status, body) = routes
+                        .iter()
+                        .find(|(route, _)| *route == path)
+                        .map(|(_, body)| ("200 OK", *body))
+                        .unwrap_or(("500 Internal Server Error", "boom"));
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        AdminClient::new(&pm_core::AdminConfig {
+            service_url: "pulsar://127.0.0.1:6650".into(),
+            web_service_url: Some(format!("http://{addr}")),
+            timeout_ms: 2000,
+            auth_plugin: None,
+            auth_params: None,
+            tls_enabled: false,
+            trust_certs: None,
+        })
+        .unwrap()
+    }
+
+    /// 命名空间里有一个 topic 的统计读不到：观测值少了一块，不能当真值去判「已恢复」。
+    #[tokio::test]
+    async fn namespace_scope_fails_when_any_topic_sample_is_missing() {
+        let client = admin_stub(vec![
+            (
+                "/admin/v2/namespaces/t/n/topics",
+                r#"["persistent://t/n/a","persistent://t/n/b"]"#,
+            ),
+            ("/admin/v2/non-persistent/t/n", "[]"),
+            (
+                "/admin/v2/persistent/t/n/a/stats",
+                r#"{"subscriptions":{"s":{"msgBacklog":5}}}"#,
+            ),
+        ])
+        .await;
+        let rule = AlertRule {
+            scope: "namespace".into(),
+            tenant: "t".into(),
+            namespace: "n".into(),
+            metric: "backlog".into(),
+            ..rule(1)
+        };
+        let outcome = evaluate(&client, &rule).await;
+        assert!(
+            outcome.is_err(),
+            "缺样本时必须报错，实际 {:?}",
+            outcome.map(|e| e.observation)
+        );
+    }
+
+    #[tokio::test]
+    async fn namespace_scope_sums_when_every_sample_is_read() {
+        let client = admin_stub(vec![
+            (
+                "/admin/v2/namespaces/t/n/topics",
+                r#"["persistent://t/n/a"]"#,
+            ),
+            ("/admin/v2/non-persistent/t/n", "[]"),
+            (
+                "/admin/v2/persistent/t/n/a/stats",
+                r#"{"subscriptions":{"s":{"msgBacklog":5}}}"#,
+            ),
+        ])
+        .await;
+        let rule = AlertRule {
+            scope: "namespace".into(),
+            tenant: "t".into(),
+            namespace: "n".into(),
+            metric: "backlog".into(),
+            ..rule(1)
+        };
+        let observation = evaluate(&client, &rule).await.unwrap().observation.unwrap();
+        assert_eq!(observation.value, 5.0);
+    }
+
+    #[tokio::test]
+    async fn cluster_scope_fails_when_aggregation_dropped_samples() {
+        let client = admin_stub(vec![
+            ("/admin/v2/tenants", r#"["t"]"#),
+            ("/admin/v2/namespaces/t", r#"["t/n"]"#),
+            (
+                "/admin/v2/namespaces/t/n/topics",
+                r#"["persistent://t/n/a","persistent://t/n/b"]"#,
+            ),
+            ("/admin/v2/non-persistent/t/n", "[]"),
+            (
+                "/admin/v2/persistent/t/n/a/stats",
+                r#"{"subscriptions":{"s":{"msgBacklog":5}}}"#,
+            ),
+        ])
+        .await;
+        let rule = AlertRule {
+            scope: "cluster".into(),
+            metric: "backlog".into(),
+            ..rule(1)
+        };
+        let outcome = evaluate(&client, &rule).await;
+        assert!(
+            outcome.is_err(),
+            "缺样本时必须报错，实际 {:?}",
+            outcome.map(|e| e.observation)
+        );
     }
 
     #[test]

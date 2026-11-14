@@ -290,27 +290,30 @@ const ConsumerWorkspace: React.FC<ConsumerWorkspaceProps> = ({
     // 关页签即停会话。生产者那边留着连接只是多占一条 producer，这里留着却会继续吃订阅
     // 的投递并自动确认——界面已经不在了，消息却被一条条吞掉，必须停。
     // 只停自己认领的这批：sessions 从认领到新建都带 ownerId。
-    useEffect(
-        () => () => {
+    const unmountedRef = useRef(false);
+    const stopQuietly = useCallback((sessionId: string) => {
+        // 清理不能 await（会拖住卸载），但 rpc 失败只体现在 success:false，
+        // 不判就等于把「停不掉、订阅仍在后台吞消息」静默吞掉，留个 warn 便于排查。
+        void window.electronAPI.consumer
+            .stop(sessionId)
+            .then(response => {
+                if (!response.success) {
+                    console.warn(`[consumer] 停止会话 ${sessionId} 失败：${response.error || '未知错误'}`);
+                }
+            })
+            .catch((error: unknown) => {
+                console.warn(`[consumer] 停止会话 ${sessionId} 异常`, error);
+            });
+    }, []);
+    useEffect(() => {
+        unmountedRef.current = false;
+        return () => {
+            unmountedRef.current = true;
             for (const session of sessionsRef.current) {
-                // 清理不能 await（会拖住卸载），但 rpc 失败只体现在 success:false，
-                // 不判就等于把「停不掉、订阅仍在后台吞消息」静默吞掉，留个 warn 便于排查。
-                void window.electronAPI.consumer
-                    .stop(session.sessionId)
-                    .then(response => {
-                        if (!response.success) {
-                            console.warn(
-                                `[consumer] 停止会话 ${session.sessionId} 失败：${response.error || '未知错误'}`,
-                            );
-                        }
-                    })
-                    .catch((error: unknown) => {
-                        console.warn(`[consumer] 停止会话 ${session.sessionId} 异常`, error);
-                    });
+                stopQuietly(session.sessionId);
             }
-        },
-        [],
-    );
+        };
+    }, [stopQuietly]);
 
     const sessionNames = useMemo(() => sessions.map(item => item.subscription), [sessions]);
 
@@ -398,6 +401,13 @@ const ConsumerWorkspace: React.FC<ConsumerWorkspaceProps> = ({
                 ...draft,
                 ownerId,
             });
+            // 启动期间页签已关：卸载清理时它还没登记，只能在这里补停
+            if (unmountedRef.current) {
+                if (response.success && response.data) {
+                    stopQuietly(response.data.sessionId);
+                }
+                return;
+            }
             if (response.success && response.data) {
                 const info = response.data;
                 setBases(current => ({...current, [info.sessionId]: info.received}));

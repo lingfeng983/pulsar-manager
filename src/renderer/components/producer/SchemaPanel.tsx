@@ -3,8 +3,8 @@ import {Input, Radio} from 'antd';
 import {parseSchemaJson} from '../../../shared/json-schema-lite';
 import type {TemplateSchemaMode} from '../../types';
 
-// Schema 校验面板：只在发送前做结构校验（校验链路在主进程 producer-send 的
-// resolveBatch 里），这里负责把 schema 文本立时解析一遍——存一个语法就坏的
+// Schema 校验面板：只在发送前做结构校验（逐条校验在后台 pm-services 的 schema_lite，
+// 规则与 shared/json-schema-lite 对齐），这里负责把 schema 文本立时解析一遍——存一个语法就坏的
 // schema 等于给自己埋一个"每条都失败但看不出为什么"的坑。
 
 const EXAMPLE_SCHEMA = [

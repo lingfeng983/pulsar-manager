@@ -13,6 +13,117 @@ use crate::AdminClient;
 /// 「已超出可确认窗口」，而不是让向量随会话无限增长。
 const ACK_WINDOW: usize = 10_000;
 
+/// `ledger:entry:partition[:batchIndex]`：同一 entry 里的批消息只靠 batchIndex 区分，
+/// 丢掉它会让界面按 ID 去重时把同批后续消息吞掉。
+pub fn format_message_id(id: &pulsar::message::proto::MessageIdData) -> String {
+    let base = format!(
+        "{}:{}:{}",
+        id.ledger_id,
+        id.entry_id,
+        id.partition.unwrap_or(-1)
+    );
+    match id.batch_index.filter(|index| *index >= 0) {
+        Some(index) => format!("{base}:{index}"),
+        None => base,
+    }
+}
+
+/// 按 ID 定位：三段的旧 ID（历史记录里存的）命中该 entry 的第一条批消息。
+pub fn message_id_matches(wanted: &str, actual: &str) -> bool {
+    let wanted = wanted.trim();
+    if wanted.is_empty() {
+        return false;
+    }
+    if wanted == actual {
+        return true;
+    }
+    wanted.split(':').count() == 3
+        && actual
+            .strip_prefix(wanted)
+            .is_some_and(|rest| rest.starts_with(':'))
+}
+
+const OUT_OF_WINDOW: &str = "该消息已超出可确认窗口，将由 broker 重投";
+
+/// 手动确认窗口：按递增序号保存条目，并记住哪些已确认 / 已重投。
+/// 「全部确认」和待确认计数都以它为准，而不是以界面上的批次长度为准。
+pub struct AckWindow<T> {
+    entries: VecDeque<(T, bool)>,
+    base: u64,
+    capacity: usize,
+}
+
+impl<T: Clone> AckWindow<T> {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            entries: VecDeque::new(),
+            base: 0,
+            capacity: capacity.max(1),
+        }
+    }
+
+    pub fn push(&mut self, item: T) -> u64 {
+        self.entries.push_back((item, false));
+        if self.entries.len() > self.capacity {
+            self.entries.pop_front();
+            self.base += 1;
+        }
+        self.base + self.entries.len() as u64 - 1
+    }
+
+    pub fn get(&self, seq: u64) -> AppResult<T> {
+        seq.checked_sub(self.base)
+            .and_then(|index| self.entries.get(index as usize))
+            .map(|(item, _)| item.clone())
+            .ok_or_else(|| AppError::Other(OUT_OF_WINDOW.into()))
+    }
+
+    pub fn resolve(&mut self, seq: u64) {
+        if let Some(entry) = seq
+            .checked_sub(self.base)
+            .and_then(|index| self.entries.get_mut(index as usize))
+        {
+            entry.1 = true;
+        }
+    }
+
+    pub fn resolve_through(&mut self, seq: u64) {
+        let Some(last) = seq.checked_sub(self.base) else {
+            return;
+        };
+        for entry in self.entries.iter_mut().take(last as usize + 1) {
+            entry.1 = true;
+        }
+    }
+
+    pub fn pending_count(&self) -> i64 {
+        self.entries
+            .iter()
+            .filter(|(_, resolved)| !resolved)
+            .count() as i64
+    }
+
+    fn pending_seqs(&self) -> impl Iterator<Item = u64> + '_ {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, resolved))| !resolved)
+            .map(|(index, _)| self.base + index as u64)
+    }
+
+    /// 空 seqs 表示「窗口里全部待确认」；累计确认只需要最后一条。
+    pub fn targets(&self, seqs: Vec<u64>, cumulative: bool) -> Vec<u64> {
+        if !seqs.is_empty() {
+            return seqs;
+        }
+        if cumulative {
+            self.pending_seqs().last().into_iter().collect()
+        } else {
+            self.pending_seqs().collect()
+        }
+    }
+}
+
 /// 原生协议客户端（纯 Rust 的 `pulsar` crate，不依赖 pulsar-client-cpp）。
 /// Admin REST 只能改资源，收发消息必须走 broker 的二进制口。
 pub struct NativeClient {
@@ -99,14 +210,8 @@ impl NativeClient {
 
         let id = receipt
             .message_id
-            .map(|id| {
-                format!(
-                    "{}:{}:{}",
-                    id.ledger_id,
-                    id.entry_id,
-                    id.partition.unwrap_or(-1)
-                )
-            })
+            .as_ref()
+            .map(format_message_id)
             .unwrap_or_else(|| "sent".to_string());
 
         let _ = producer.close().await;
@@ -186,8 +291,7 @@ impl NativeClient {
             auto_ack: options.auto_ack,
             max_messages: options.max_messages,
             received: 0,
-            ackable: VecDeque::new(),
-            ack_base: 0,
+            ackable: AckWindow::new(ACK_WINDOW),
         })
     }
 }
@@ -199,9 +303,8 @@ pub struct NativeConsumer {
     max_messages: i64,
     received: i64,
     /// 手动确认模式下保留最近一批消息 id：界面按 ackSeq 回调确认。
-    /// `ack_base` 是最旧一条的序号，窗口淘汰后序号不会整体前移造成错位。
-    ackable: VecDeque<pulsar::message::proto::MessageIdData>,
-    ack_base: u64,
+    /// 同时记下消息来自的实际 topic：分区 topic 的多消费者按分区 URI 找连接。
+    ackable: AckWindow<(String, pulsar::message::proto::MessageIdData)>,
 }
 
 impl NativeConsumer {
@@ -234,12 +337,7 @@ impl NativeConsumer {
                     }
                     None
                 } else {
-                    self.ackable.push_back(id_data.clone());
-                    if self.ackable.len() > ACK_WINDOW {
-                        self.ackable.pop_front();
-                        self.ack_base += 1;
-                    }
-                    Some(self.ack_base + self.ackable.len() as u64 - 1)
+                    Some(self.ackable.push((message.topic.clone(), id_data.clone())))
                 };
 
                 let properties = metadata
@@ -250,12 +348,7 @@ impl NativeConsumer {
 
                 self.received += 1;
                 Some(Ok(Message {
-                    message_id: format!(
-                        "{}:{}:{}",
-                        id_data.ledger_id,
-                        id_data.entry_id,
-                        id_data.partition.unwrap_or(-1)
-                    ),
+                    message_id: format_message_id(&id_data),
                     topic_name: self.topic.clone(),
                     producer_name: metadata.producer_name.clone(),
                     publish_time: metadata.publish_time as i64,
@@ -272,40 +365,44 @@ impl NativeConsumer {
         }
     }
 
-    fn ackable_id(&self, seq: u64) -> AppResult<pulsar::message::proto::MessageIdData> {
-        let index = seq
-            .checked_sub(self.ack_base)
-            .ok_or_else(|| AppError::Other("该消息已超出可确认窗口，将由 broker 重投".into()))?;
-        self.ackable
-            .get(index as usize)
-            .cloned()
-            .ok_or_else(|| AppError::Other("该消息已超出可确认窗口，将由 broker 重投".into()))
+    pub fn pending_count(&self) -> i64 {
+        self.ackable.pending_count()
+    }
+
+    pub fn ack_targets(&self, seqs: Vec<u64>, cumulative: bool) -> Vec<u64> {
+        self.ackable.targets(seqs, cumulative)
     }
 
     pub async fn ack(&mut self, seq: u64) -> AppResult<()> {
-        let id = self.ackable_id(seq)?;
+        let (topic, id) = self.ackable.get(seq)?;
         self.consumer
-            .ack_with_id(&self.topic, id)
+            .ack_with_id(&topic, id)
             .await
-            .map_err(|e| AppError::Other(format!("确认失败: {e}")))
+            .map_err(|e| AppError::Other(format!("确认失败: {e}")))?;
+        self.ackable.resolve(seq);
+        Ok(())
     }
 
     /// 累积确认：把某条之前（含）的全部消息一并确认，只对流式可累计的订阅类型有意义。
     pub async fn ack_cumulative(&mut self, seq: u64) -> AppResult<()> {
-        let id = self.ackable_id(seq)?;
+        let (topic, id) = self.ackable.get(seq)?;
         self.consumer
-            .cumulative_ack_with_id(&self.topic, id)
+            .cumulative_ack_with_id(&topic, id)
             .await
-            .map_err(|e| AppError::Other(format!("累计确认失败: {e}")))
+            .map_err(|e| AppError::Other(format!("累计确认失败: {e}")))?;
+        self.ackable.resolve_through(seq);
+        Ok(())
     }
 
     /// 主动重投：把这条放回队列，别的消费者（或本轮之后）会再收到它。
     pub async fn nack(&mut self, seq: u64) -> AppResult<()> {
-        let id = self.ackable_id(seq)?;
+        let (topic, id) = self.ackable.get(seq)?;
         self.consumer
-            .nack_with_id(&self.topic, id)
+            .nack_with_id(&topic, id)
             .await
-            .map_err(|e| AppError::Other(format!("重投失败: {e}")))
+            .map_err(|e| AppError::Other(format!("重投失败: {e}")))?;
+        self.ackable.resolve(seq);
+        Ok(())
     }
 
     pub async fn close(mut self) {
@@ -350,12 +447,7 @@ fn into_message(topic: &str, message: pulsar::consumer::Message<Vec<u8>>) -> Mes
     let payload = message.deserialize();
     let data_bytes = payload.len() as i64;
     Message {
-        message_id: format!(
-            "{}:{}:{}",
-            id_data.ledger_id,
-            id_data.entry_id,
-            id_data.partition.unwrap_or(-1)
-        ),
+        message_id: format_message_id(&id_data),
         topic_name: topic.to_string(),
         producer_name: metadata.producer_name.clone(),
         publish_time: metadata.publish_time as i64,
@@ -584,14 +676,8 @@ impl NativeProducer {
                     .map_err(|e| AppError::Other(format!("broker 未确认消息: {e}")))?;
                 Ok(receipt
                     .message_id
-                    .map(|id| {
-                        format!(
-                            "{}:{}:{}",
-                            id.ledger_id,
-                            id.entry_id,
-                            id.partition.unwrap_or(-1)
-                        )
-                    })
+                    .as_ref()
+                    .map(format_message_id)
                     .unwrap_or_else(|| "sent".to_string()))
             }),
         })
@@ -617,5 +703,80 @@ impl NativeProducer {
             .close()
             .await
             .map_err(|e| AppError::Other(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pulsar::message::proto::MessageIdData;
+
+    fn id(batch_index: Option<i32>) -> MessageIdData {
+        MessageIdData {
+            ledger_id: 7,
+            entry_id: 3,
+            partition: Some(1),
+            batch_index,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn batched_messages_get_distinct_ids() {
+        assert_eq!(format_message_id(&id(Some(0))), "7:3:1:0");
+        assert_eq!(format_message_id(&id(Some(2))), "7:3:1:2");
+    }
+
+    #[test]
+    fn unbatched_message_keeps_three_segments() {
+        assert_eq!(format_message_id(&id(None)), "7:3:1");
+        assert_eq!(format_message_id(&id(Some(-1))), "7:3:1");
+    }
+
+    #[test]
+    fn legacy_three_segment_id_still_locates_entry() {
+        assert!(message_id_matches("7:3:1", "7:3:1:0"));
+        assert!(message_id_matches("7:3:1:2", "7:3:1:2"));
+        assert!(!message_id_matches("7:3:1:2", "7:3:1:0"));
+        assert!(!message_id_matches("7:3:10", "7:3:1:0"));
+        assert!(!message_id_matches(" ", "7:3:1"));
+    }
+
+    #[test]
+    fn ack_all_targets_every_pending_seq() {
+        let mut window = AckWindow::new(10);
+        for item in ["a", "b", "c"] {
+            window.push(item);
+        }
+        window.resolve(1);
+        assert_eq!(window.targets(Vec::new(), false), vec![0, 2]);
+        assert_eq!(window.targets(Vec::new(), true), vec![2]);
+        assert_eq!(window.targets(vec![1], false), vec![1]);
+    }
+
+    #[test]
+    fn pending_count_follows_resolution() {
+        let mut window = AckWindow::new(10);
+        for item in ["a", "b", "c", "d"] {
+            window.push(item);
+        }
+        assert_eq!(window.pending_count(), 4);
+        window.resolve(0);
+        assert_eq!(window.pending_count(), 3);
+        window.resolve_through(2);
+        assert_eq!(window.pending_count(), 1);
+        assert_eq!(window.targets(Vec::new(), false), vec![3]);
+    }
+
+    #[test]
+    fn evicted_seq_is_reported_out_of_window() {
+        let mut window = AckWindow::new(2);
+        for item in ["a", "b", "c"] {
+            window.push(item);
+        }
+        assert!(window.get(0).is_err());
+        assert_eq!(window.get(2).unwrap(), "c");
+        assert_eq!(window.pending_count(), 2);
+        assert_eq!(window.targets(Vec::new(), false), vec![1, 2]);
     }
 }

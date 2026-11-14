@@ -69,9 +69,17 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
     const [forwardResult, setForwardResult] = useState<{ok: boolean; text: string} | null>(null);
     // 测试连接代次：改过连接参数或再点一次测试后，旧响应必须被丢弃。
     const testRequestRef = useRef(0);
+    // 弹窗会话代次：Modal 不销毁，关掉再打开（或换一个集群编辑）后，上一轮在途的
+    // 测试结果不能写进这一轮的表单与结果区。
+    const modalSessionRef = useRef(0);
 
     useEffect(() => {
         if (open) {
+            testRequestRef.current += 1;
+            modalSessionRef.current += 1;
+            setTesting(false);
+            setTunnelTesting(false);
+            setForwardTesting(false);
             // Modal 不销毁，Form 实例会跨会话保留字段。编辑分支必须先清空，
             // 否则上一个集群的 authParams / tlsTrustCerts 会原样带进下一个集群。
             form.resetFields();
@@ -102,6 +110,33 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
             setForwardResult(null);
         }
     }, [open, editingCluster, form]);
+
+    const invalidatePendingTests = () => {
+        testRequestRef.current += 1;
+        modalSessionRef.current += 1;
+        setTesting(false);
+        setTunnelTesting(false);
+        setForwardTesting(false);
+    };
+
+    // 弹窗已经换了一轮才回来的隧道/转发：它在后台真实占着本地端口，表单里又不会再有
+    // 它的 id，关弹窗时的清理够不着——只能在这里当场断开。
+    const releaseOrphan = (kind: 'ssh' | 'k8s', id: string | undefined, ownId: string | undefined) => {
+        if (!id || id === ownId) {
+            return;
+        }
+        const api = kind === 'ssh' ? window.electronAPI.ssh : window.electronAPI.k8s;
+        void api
+            .disconnect(id)
+            .then(response => {
+                if (!response.success) {
+                    console.warn(`[${kind}] 断开过期的测试连接失败：${response.error || '未知错误'}`);
+                }
+            })
+            .catch((error: unknown) => {
+                console.warn(`[${kind}] 断开过期的测试连接异常`, error);
+            });
+    };
 
     // 经隧道的集群，测试连接会先按当前隧道参数建立转发；主进程把落库后的
     // 隧道 id 回传，这里回填表单，避免"测一次存一条、保存再存一条"。
@@ -171,6 +206,7 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
             return;
         }
         const ssh = form.getFieldValue('ssh');
+        const session = modalSessionRef.current;
         setTunnelTesting(true);
         setTunnelResult(null);
         try {
@@ -178,6 +214,10 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
                 ...ssh,
                 id: form.getFieldValue('sshConfigId') || editingCluster?.sshConfigId,
             });
+            if (session !== modalSessionRef.current) {
+                releaseOrphan('ssh', response.data?.tunnelId, editingCluster?.sshConfigId);
+                return;
+            }
             if (response.success && response.data) {
                 form.setFieldValue('sshConfigId', response.data.tunnelId);
                 const admin = `127.0.0.1:${response.data.localPort}`;
@@ -187,9 +227,14 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
                 setTunnelResult({ok: false, text: response.error || '隧道建立失败'});
             }
         } catch (error) {
+            if (session !== modalSessionRef.current) {
+                return;
+            }
             setTunnelResult({ok: false, text: error instanceof Error ? error.message : '隧道建立失败'});
         } finally {
-            setTunnelTesting(false);
+            if (session === modalSessionRef.current) {
+                setTunnelTesting(false);
+            }
         }
     };
 
@@ -206,6 +251,7 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
             return;
         }
         const k8s = form.getFieldValue('k8s');
+        const session = modalSessionRef.current;
         setForwardTesting(true);
         setForwardResult(null);
         try {
@@ -215,6 +261,10 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
                 remoteAdminPort: k8s?.remoteAdminPort || 8080,
                 remoteBrokerPort: k8s?.remoteBrokerPort || 6650,
             });
+            if (session !== modalSessionRef.current) {
+                releaseOrphan('k8s', response.data?.forwardId, editingCluster?.k8sConfigId);
+                return;
+            }
             if (response.success && response.data) {
                 form.setFieldValue('k8sConfigId', response.data.forwardId);
                 const admin = `127.0.0.1:${response.data.localAdminPort}`;
@@ -224,9 +274,14 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
                 setForwardResult({ok: false, text: response.error || '端口转发建立失败'});
             }
         } catch (error) {
+            if (session !== modalSessionRef.current) {
+                return;
+            }
             setForwardResult({ok: false, text: error instanceof Error ? error.message : '端口转发建立失败'});
         } finally {
-            setForwardTesting(false);
+            if (session === modalSessionRef.current) {
+                setForwardTesting(false);
+            }
         }
     };
 
@@ -290,6 +345,7 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
                       }
                     : undefined;
                 form.resetFields();
+                invalidatePendingTests();
                 setTestResult(null);
                 onSuccess(saved);
             } else {
@@ -334,6 +390,7 @@ const ClusterConfigModal: React.FC<ClusterConfigModalProps> = ({open, onCancel, 
                 });
         }
         form.resetFields();
+        invalidatePendingTests();
         setTestResult(null);
         setTunnelResult(null);
         setForwardResult(null);

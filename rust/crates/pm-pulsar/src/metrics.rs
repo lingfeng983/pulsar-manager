@@ -30,7 +30,7 @@ impl AdminClient {
         })
     }
 
-    /// 全集群聚合：逐层下钻并统计，单 topic / 单命名空间失败只丢它自己的数，
+    /// 全集群聚合：逐层下钻并统计，单 topic / 单命名空间失败只丢它自己的数并记进 `failed_samples`，
     /// 租户列表拉不动才向上抛（那说明集群不可达）。
     pub async fn aggregated_stats(&self) -> AppResult<AggregatedStats> {
         let mut stats = AggregatedStats::default();
@@ -39,12 +39,18 @@ impl AdminClient {
         for tenant in tenants.into_iter().take(MAX_TENANTS) {
             let namespaces = match self.namespaces(&tenant.name).await {
                 Ok(list) => list,
-                Err(_) => continue,
+                Err(_) => {
+                    stats.failed_samples += 1;
+                    continue;
+                }
             };
             for namespace in namespaces.into_iter().take(MAX_NAMESPACES) {
                 let topics = match self.topics(&tenant.name, &namespace).await {
                     Ok(list) => list,
-                    Err(_) => continue,
+                    Err(_) => {
+                        stats.failed_samples += 1;
+                        continue;
+                    }
                 };
                 let count = topics.len();
                 let tenant_name = tenant.name.clone();
@@ -73,7 +79,11 @@ impl AdminClient {
                 .await;
 
                 stats.total_topics += count as i64;
-                for topic in results.into_iter().flatten() {
+                for topic in results {
+                    let Some(topic) = topic else {
+                        stats.failed_samples += 1;
+                        continue;
+                    };
                     stats.total_subscriptions += topic.subscriptions.len() as i64;
                     stats.total_producers += topic.producers.len() as i64;
                     stats.total_consumers += topic.all_consumers().len() as i64;
