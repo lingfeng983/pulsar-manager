@@ -213,14 +213,22 @@ function checkTree(options) {
     }
 }
 
+function tagExists(tag) {
+    return spawnSync('git', ['rev-parse', '--verify', '--quiet', `refs/tags/${tag}`], {cwd: ROOT, stdio: 'ignore'})
+        .status === 0;
+}
+
 function checkTag(tag, options) {
     const head = git(['rev-parse', 'HEAD']);
-    let tagCommit;
-    try {
-        tagCommit = git(['rev-list', '-n1', tag]);
-    } catch {
+    if (!tagExists(tag)) {
+        if (options.dryRun) {
+            // 排练常发生在打标签之前（流水线的手动排练也是），这时只是还没到打标签那一步。
+            warn(`本地还没有标签 ${tag}（dry-run 放行；正式发版前先打标签并推送）`);
+            return;
+        }
         fail(`本地没有标签 ${tag}；发版前先打标签并推送。`);
     }
+    const tagCommit = git(['rev-list', '-n1', tag]);
     if (tagCommit !== head) {
         if (options.dryRun) {
             // 发版前先排练一遍是合理用法：只预览，不发布，所以这里放行但要说清楚。
@@ -347,13 +355,15 @@ function notesPathFor(version) {
  */
 function buildDraftNotes(version, tag) {
     const short = git(['rev-parse', '--short', 'HEAD']);
+    // 只有 dry-run 会在标签不存在时走到这里：按当前 HEAD 出草稿
+    const ref = tagExists(tag) ? tag : 'HEAD';
     let previous = null;
     try {
-        previous = git(['describe', '--tags', '--abbrev=0', `${tag}^`]);
+        previous = git(['describe', '--tags', '--abbrev=0', `${ref}^`]);
     } catch {
         previous = null;
     }
-    const commits = git(['log', '--no-merges', '--format=- %s', previous ? `${previous}..${tag}` : tag])
+    const commits = git(['log', '--no-merges', '--format=- %s', previous ? `${previous}..${ref}` : ref])
         .split('\n')
         .filter(Boolean)
         .join('\n');

@@ -321,7 +321,7 @@ npm run release -- --verify-only --tag v1.6.2  # 只回读校验已发布的发�
 脚本会拦下这些事故，任何一条不过都不发：
 
 - 版本号三处不一致：`package.json`、`rust/Cargo.toml` 的 workspace version、`tauri.conf.json` 的 version。「设置 → 关于」与在线更新比对的都是它（`update:getVersion` 走后台返回应用版本，不是运行时版本）。
-- 标签 `v<版本>` 不存在、不指向 HEAD，或还没推到 origin；工作区有未提交的已跟踪改动（`--allow-dirty` 可跳过）。
+- 标签 `v<版本>` 不存在、不指向 HEAD，或还没推到 origin（`--dry-run` 时只告警，方便打标签前先排练）；工作区有未提交的已跟踪改动（`--allow-dirty` 可跳过）。
 - 安装包大小不在 5–12 MB，或 exe 属性里的文件 / 产品版本不等于当前版本——拦的是被文件锁截断的半成品与误传的 Electron 包。
 - 发行说明缺文件：脚本按提交记录生成草稿后停下，等你补完再跑。
 
@@ -339,6 +339,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/wincred.ps1 -Action 
 
 - **发行版仓库必须是公开的**：匿名就能读，应用内没有任何令牌入口，用户不用配凭证；源码仓与发行版在同一个公开仓库（`pulsar-manager`），避免同一版本两份包对不上号。
 - 仓库只保留最近几个版本的大体积安装包；删发行版与附件不影响标签。
+
+#### 在 GitHub Actions 上发版
+
+`.github/workflows/release.yml` 在 `windows-latest` 上跑同一个脚本，本机发版与云端发版二选一即可（发行版已存在时脚本会拒绝重发）：
+
+1. 改好三处版本号，写好 `docs/releases/v<版本>.md`，一起提交并推到 master。
+2. 打标签并推送：`git tag v<版本> && git push origin v<版本>`。
+3. 流水线先核对「标签 = `v` + package.json 版本」且发行说明已入库，再跑完 CI 的全部门禁，最后 `npm run release -- --yes`。令牌用流水线自带的 `GITHUB_TOKEN`（仅本 job 有 `contents: write`），不需要配置任何 secret。
+
+在 Actions 页面手动运行 Release 时默认勾选 `dry_run`：只出包、过门禁、打印发行说明，不建发行版。不管是否发布，安装包都会挂在这次运行的产物里（保留 14 天）。
 
 ## 架构约束
 

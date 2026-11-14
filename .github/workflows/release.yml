@@ -1,0 +1,108 @@
+# 发版流水线：推 v* 标签即在云端出 Windows NSIS 包并正式发布；手动触发默认只排练（出包 + 门禁，不建发行版）。
+# 发布本身仍交给 scripts/release-publish.mjs——版本号三处一致、标签指向 HEAD 且已推送、说明里的 SHA256、
+# 匿名回读与失败回滚这些门禁只在脚本里写一份，流水线不另抄一套，免得两边规则走散。
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '只出包并跑门禁，不创建发行版'
+        type: boolean
+        default: true
+
+# 同一个 ref 排队而不是互相顶掉：发到一半被取消，留下的可能是没有附件的半成品发行版。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: 出包与发版
+    # 产品只出 Windows NSIS 包，脚本里 exe 版本属性的门禁也依赖 powershell
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    env:
+      # 推标签总是正式发布；手动触发只有显式取消勾选 dry_run 才发布
+      PUBLISH: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run) }}
+      # 脚本对「标签已推送」的只读查询会带 credential.helper=manager；云端绝不能弹交互
+      GCM_INTERACTIVE: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 草稿说明要 git describe 找上一个标签、门禁要比对标签与 HEAD：都需要完整历史与标签
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      # 脚本按 package.json 的版本推出要发的标签；推的标签与它不符时，脚本会去比另一个标签，
+      # 报出来的错让人摸不着头脑——这里先用一句人话拦下。
+      - name: 标签与版本号一致
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "::error::推送的标签 ${GITHUB_REF_NAME} 与 package.json 的版本 ${version} 不一致：先改版本号提交，再打 v${version}。"
+            exit 1
+          fi
+          if [ ! -f "docs/releases/v${version}.md" ]; then
+            echo "::error::缺少发行说明 docs/releases/v${version}.md：先写好并入库，再打标签。"
+            exit 1
+          fi
+
+      - name: 安装依赖
+        run: npm ci
+      - name: 类型检查
+        run: npm run typecheck
+      - name: ESLint
+        run: npm run lint
+      - name: Prettier
+        run: npm run format:check
+      - name: 模板引擎自测
+        run: npm run selftest
+      - name: 文档中心自测
+        run: npm run selftest:docs
+      - name: Rust 格式检查
+        working-directory: rust
+        run: cargo fmt --all -- --check
+      # cargo test 编译期要求 frontendDist 存在（tauri::generate_context!），先出一份真的渲染层产物
+      - name: 渲染层构建
+        run: npm run build:renderer
+      - name: Rust 单测
+        working-directory: rust
+        run: cargo test --workspace
+
+      - name: 出包并发布
+        if: env.PUBLISH == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run release -- --yes
+      - name: 出包排练（不发布）
+        if: env.PUBLISH != 'true'
+        run: npm run release -- --dry-run
+
+      # 排练拿得到包；正式发布在上传或回读失败回滚后，也还能从这里取回这次构建的包排查
+      - name: 安装包挂到本次运行
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pulsar-manager-setup
+          path: rust/target/release/bundle/nsis/*.exe
+          if-no-files-found: warn
+          retention-days: 14
